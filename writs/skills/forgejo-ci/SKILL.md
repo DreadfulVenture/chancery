@@ -15,12 +15,13 @@ metadata:
 # Reading Forgejo CI — PR to runs to jobs to logs
 
 Forgejo Actions looks GitHub-compatible and is not. The endpoints that exist answer with Forgejo's own field names, the
-endpoints a GitHub client expects mostly 404, and the logs live behind one working route. This skill walks the chain
-that works — run, then jobs, then attempts, then logs — with commands exercised against a live Forgejo v17 host. Older
-versions may differ; re-verify when the answers look wrong.
+endpoints a GitHub client expects mostly 404, and the logs live behind one working API route, plus the UI route the
+browser uses. This skill walks the chain that works — run, then jobs, then attempts, then logs — with commands exercised
+against a live Forgejo v17 host. Older versions may differ; re-verify when the answers look wrong.
 
-Unauthenticated GETs work on public repositories. Private repositories need a token: add
-`-H "Authorization: token <token>"` to the commands below.
+Unauthenticated GETs work on public repositories. Private repositories need a token on the `/api/v1` commands: add
+`-H "Authorization: token <token>"`. The UI log route's private-repo behavior is unverified — the live exercise ran
+unauthenticated on a public repo.
 
 Throughout, `{owner}` is the repo owner and `example-repo` the repository. The forge host appears as `git.example.com`.
 
@@ -71,15 +72,16 @@ The rows come in job-creation order, and each row's `html_url` names its positio
 Two routes fetch a job's log, both unauthenticated on public repos:
 
 ```bash
-# The API route — full plaintext, one attempt at a time
-curl -s "https://git.example.com/api/v1/repos/{owner}/example-repo/actions/jobs/<job-db-id>/logs?attempt=1"
+# The API route — full plaintext for attempt N
+curl -s "https://git.example.com/api/v1/repos/{owner}/example-repo/actions/jobs/<job-db-id>/logs?attempt=<N>"
 
 # The UI route the browser uses — same plaintext, addressed by position instead of id
 curl -s "https://git.example.com/{owner}/example-repo/actions/runs/<run-number>/jobs/<index>/attempt/<n>/logs"
 ```
 
-`<index>` is the 0-based position in the jobs array, `<n>` the 1-based attempt number. The log's first line names the
-task id and the workflow's internal job name, which is how a log URL confirms which job it answered.
+`<N>` is the job row's `attempt` field. Omitting `attempt` on the API route returns the latest attempt's log. `<index>`
+is the 0-based position in the jobs array, `<n>` the 1-based attempt number. The log's first line names the task id and
+the workflow's internal job name, which is how a log URL confirms which job it answered.
 
 ## Retried attempt, or fresh re-run?
 
@@ -120,19 +122,19 @@ Reverse the first walk. The run row's `prettyref` (or the task rows' `head_branc
 6. An out-of-range job index on the UI log route does **not** error — it answered with a job's log anyway. Trust the
    jobs array's `html_url` fields, not your own arithmetic on the URL scheme.
 
-## Driving the llmProxy MCP instead
+## Driving the MCP's Forgejo tools instead
 
-When the session drives the llmProxy MCP's Forgejo tools, the same chain has three tools, and the id conventions are the
-whole trick:
+An MCP server names its Forgejo capability tools with a server-specific prefix before the operation name. The same chain
+has three operations there, and the id conventions are the whole trick:
 
-- `Forgejo-list_workflow_runs` renders prose: `#<db-id> (run number <n>) - <title>`, with status, event, short sha, and
-  URL per run. This is the tool that maps a UI run number to the run database id. Its `head_sha` and `event` filters
-  work.
-- `Forgejo-list_action_run_jobs(owner, repo, run_id=<run-db-id>)` returns JSON job rows — `id`, `attempt`, `task_id`,
-  `status` — with paging metadata around them.
-- `Forgejo-get_action_job_logs(job_id=<job-db-id>, attempt, offset, max_bytes)` returns a bounded plaintext range.
-  `job_id` is the **job's** database id; a task id answers 404. Omitting `offset` returns the tail, which is usually
-  what you want for a failing job. `max_bytes` caps at 262144.
+- `list_workflow_runs` renders prose: `#<db-id> (run number <n>) - <title>`, with status, event, short sha, and URL per
+  run. This is the tool that maps a UI run number to the run database id. Its `head_sha` and `event` filters work.
+- `list_action_run_jobs(owner, repo, run_id=<run-db-id>)` returns JSON job rows — `id`, `attempt`, `task_id`, `status` —
+  with paging metadata around them.
+- `get_action_job_logs(job_id=<job-db-id>, attempt, offset, max_bytes)` returns a bounded plaintext range. `job_id` is
+  the **job's** database id; a task id answers 404. Omitting `offset` returns the tail, which is usually what you want
+  for a failing job. `max_bytes` caps at 262144.
 
-The same server also carries GitHub-flavored tools. When matching a capability by tool name, prefer the `Forgejo-`
-prefix — a bare name match can land on the GitHub flavor instead.
+The same server also carries GitHub-flavored tools. When matching a capability by tool name, read past the
+server-specific prefix and prefer the Forgejo flavor — a bare operation-name match can land on the GitHub flavor
+instead.
