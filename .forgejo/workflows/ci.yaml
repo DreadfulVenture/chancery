@@ -8,73 +8,39 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
-      run_test: ${{ steps.classify.outputs.run_test }}
-      run_zenigata: ${{ steps.classify.outputs.run_zenigata }}
+      run_test: ${{ steps.filter.outputs.test }}
+      run_zenigata: ${{ steps.filter.outputs.zenigata }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Classify changed paths
-        id: classify
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Default to running everything on ambiguity (workflow_dispatch, unknown base, detection errors).
-          run_test=true
-          run_zenigata=true
-          docs_only=false
-
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base_sha="${{ github.event.pull_request.base.sha || '' }}"
-            head_sha="${{ github.event.pull_request.head.sha || github.sha }}"
-            if [[ -n "$base_sha" ]] && git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
-              if mb=$(git merge-base "$base_sha" "$head_sha" 2>/dev/null); then
-                mapfile -t changed < <(git diff --name-only "$mb" "$head_sha")
-              else
-                changed=()
-              fi
-
-              if [[ ${#changed[@]} -gt 0 ]]; then
-                docs_only=true
-                run_test=false
-                run_zenigata=false
-                for f in "${changed[@]}"; do
-                  # Docs/skills-only allowlist (skips package matrix): the writs' prose
-                  # trees (writs/skills, writs/agents, writs/commands), docs/**, and
-                  # markdown-only diffs. Anything else is evaluated per package tree.
-                  if [[ "$f" == writs/skills/* || "$f" == writs/agents/* || "$f" == writs/commands/* || "$f" == docs/* || "$f" == *.md ]]; then
-                    :
-                  else
-                    docs_only=false
-                    # Package-tree gates: any change under a package tree runs that package's full suite.
-                    # review/zenigata/** => zenigata. Memory/watch/wake/coordinate/writs-reminders/build/test
-                    # surfaces => make test. Any other/unclassified path is ambiguous => run full (both suites).
-                    if [[ "$f" == review/zenigata/* ]]; then
-                      run_zenigata=true
-                    elif [[ "$f" == review/forgejo-adapter/* ]]; then
-                      run_test=true
-                      run_zenigata=true
-                    elif [[ "$f" == memory/store/* || "$f" == memory/cursor-client/* || "$f" == memory/opencode-client/* || "$f" == watch/* || "$f" == wake/* || "$f" == coordinate/* || "$f" == writs/plan-reminder/* || "$f" == writs/discovery-reminder/* || "$f" == nix/* || "$f" == .forgejo/* || "$f" == *.py || "$f" == Makefile || "$f" == flake.nix || "$f" == flake.lock || "$f" == .envrc || "$f" == .pre-commit-config.yaml || "$f" == .gitignore || "$f" == .prettierrc || "$f" == renovate.json ]]; then
-                      run_test=true
-                    else
-                      run_test=true
-                      run_zenigata=true
-                    fi
-                  fi
-                done
-              fi
-              # empty diff => defaults remain (run everything) as ambiguity-safe
-            fi
-            # unknown/missing base => defaults remain (run everything)
-          fi
-
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "run_test=$run_test" >> "$GITHUB_OUTPUT"
-          echo "run_zenigata=$run_zenigata" >> "$GITHUB_OUTPUT"
-          echo "docs_only=$docs_only run_test=$run_test run_zenigata=$run_zenigata"
+        id: filter
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        with:
+          filters: |
+            test:
+              - 'memory/**'
+              - 'review/forgejo-adapter/**'
+              - 'watch/**'
+              - 'wake/**'
+              - 'coordinate/**'
+              - 'writs/plan-reminder/**'
+              - 'writs/discovery-reminder/**'
+              - 'nix/**'
+              - 'Makefile'
+              - 'flake.nix'
+              - 'flake.lock'
+              - '.forgejo/**'
+              - '.envrc'
+              - '.pre-commit-config.yaml'
+              - '.gitignore'
+              - '.prettierrc'
+              - 'renovate.json'
+            zenigata:
+              - 'review/zenigata/**'
+              - 'review/forgejo-adapter/**'
 
   pre-commit:
     runs-on: ubuntu-latest

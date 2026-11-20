@@ -1,4 +1,10 @@
-# chancery
+<div align="center">
+
+<img src="assets/chancery-logo.svg" alt="Chancery" width="140">
+
+# Chancery
+
+</div>
 
 Chancery is a monorepo of agent tooling. Each product gets a short section below. The rest of this document describes
 memory-store: its clients, development, configuration, and deployment. The nix modules under `nix/` deploy all of it.

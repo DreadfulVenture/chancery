@@ -251,6 +251,8 @@
               enable = true;
               entry = "${forbidBinaryScript}/bin/forbid-binary";
               types = [ "binary" ];
+              # The house marks live in assets/: logos are images on purpose.
+              excludes = [ "^assets/" ];
               language = "system";
             };
             script-must-have-extension = {
