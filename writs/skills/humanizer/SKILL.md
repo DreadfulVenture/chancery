@@ -5,7 +5,7 @@ description:
   un-ChatGPT a piece of text; rewrite a draft (blog post, essay, PR description, docs, memo, email, tweet, resume
   bullet) so it does not sound LLM-generated; match their voice in writing they are producing; or review text for AI
   tells before publishing. Based on Wikipedia's "Signs of AI writing" guide and the base writing guidelines
-  (instructions/writing.md in the chancery repo).
+  (writs/instructions/writing.md in the chancery repo).
 version: 2.5.1
 author: Siqi Chen (@blader, https://github.com/blader/humanizer)
 license: MIT
@@ -651,7 +651,7 @@ condition instead of an action.
 
 ## The base writing guidelines
 
-Below the 29 patterns sits the standard they exist on: `instructions/writing.md`, the memory-store writing source. It
+Below the 29 patterns sits the standard they exist on: `writs/instructions/writing.md`, the house writing source. It
 arrives as standing instructions wherever the memory-store daemon is deployed; this section carries what an invocation
 needs without it. Clearing the tells is the floor, and the finished text clears on the first read.
 
@@ -819,7 +819,7 @@ new. Pattern 13 gains the boundary between fragments that hide an actor and frag
 Before/After pair is replaced, since upstream's "No configuration file needed" is the second kind. Pattern 13 also gains
 the "Worth Xing" recommendation and its before/after. The checklist and PERSONALITY AND SOUL are unchanged. The base
 writing guidelines section is local: the skill anchors its standard to the memory-store writing source
-(instructions/writing.md), assesses its three faults in the process, and carries its work-report shape.
+(writs/instructions/writing.md), assesses its three faults in the process, and carries its work-report shape.
 
 Key insight from Wikipedia: "LLMs use statistical algorithms to guess what should come next. The result tends toward the
 most statistically likely result that applies to the widest variety of cases."

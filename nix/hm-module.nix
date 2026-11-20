@@ -356,7 +356,7 @@ let
       "How the memory tools work and when to use them";
 
   cursorWritingRule =
-    cursorRule ../memory/store/instructions/writing.md "writing.mdc"
+    cursorRule ../writs/instructions/writing.md "writing.mdc"
       "The writing rule for agent prose";
 
   # Read as a set for the same reason the package fileset is: a skill nobody
@@ -837,8 +837,7 @@ in
                   "${cfg.package}/lib/memory-store/instructions/memory.md";
                 # The chancery's rules land beside it under their own root:
                 # working rules, shipped by the repo, watched the same way.
-                "${lib.removePrefix "${home}/" cfg.rulesDir}/writing.md".source =
-                  "${cfg.package}/lib/memory-store/instructions/writing.md";
+                "${lib.removePrefix "${home}/" cfg.rulesDir}/writing.md".source = ../writs/instructions/writing.md;
                 # The director agent ships from the director package
                 # (PRJ-453); the rest of the agents come from the writs tree
                 # through the assets package below.
