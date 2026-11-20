@@ -35,6 +35,15 @@ New source code is TypeScript. Raw JavaScript does not enter the repo without th
 the oc-wake bin — converts to TypeScript; until a file converts, edits to it ride the conversion instead of growing the
 js surface. The loader is not a constraint: opencode runs on Bun, which imports TypeScript natively.
 
+## Skill references resolve at runtime
+
+A skill's ID is the directory name on its deployment path, exact and case-sensitive; the frontmatter name is only a
+display label (`opencode.ai/docs/skills`, "IDs" and "Loading"). When prose tells an agent to use a skill, the reference
+has to resolve where the prose is read: "Load the `humanizer` skill" resolves everywhere, because the agent loads it
+through the `skill` tool with that ID. A repo-relative path (`writs/skills/humanizer/SKILL.md`) resolves only in a
+checkout; deployed rule files live in the operator's home directory, where the repo tree does not follow. In chat, the
+operator loads a skill by mentioning it as `@skill-id`.
+
 ## State that keeps needing line math lives in the director plugin's manifest surface
 
 When a working state — a run manifest, a plan, a slice's fact sheet — starts needing exact-match edits, `grep -n`, or

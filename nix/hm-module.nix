@@ -359,6 +359,10 @@ let
     cursorRule ../writs/instructions/writing.md "writing.mdc"
       "The writing rule for agent prose";
 
+  cursorDeliveryRule =
+    cursorRule ../writs/instructions/delivery.md "delivery.mdc"
+      "Mechanical rules for delivered paths and generated file names";
+
   # Read as a set for the same reason the package fileset is: a skill nobody
   # remembered to list would be missing from the client with nothing reporting
   # it. The names come from the flake's own copy, so adding a skill needs a
@@ -919,6 +923,8 @@ in
                 # The chancery's rules land beside it under their own root:
                 # working rules, shipped by the repo, watched the same way.
                 "${lib.removePrefix "${home}/" cfg.rulesDir}/writing.md".source = ../writs/instructions/writing.md;
+                "${lib.removePrefix "${home}/" cfg.rulesDir}/delivery.md".source =
+                  ../writs/instructions/delivery.md;
                 # The director agent ships from the director package
                 # (PRJ-453); the rest of the agents come from the writs tree
                 # through the assets package below.

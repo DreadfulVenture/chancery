@@ -4,7 +4,7 @@ description:
   Strip AI-isms from text and rewrite with a natural human voice. Use when the user asks to humanize, de-AI, de-slop, or
   un-ChatGPT a piece of text; rewrite a draft (blog post, essay, PR description, docs, memo, email, tweet, resume
   bullet) so it does not sound LLM-generated; match their voice in writing they are producing; or review text for AI
-  tells before publishing. Anchored to the house writing source (writs/instructions/writing.md in the chancery repo).
+  tells before publishing. Anchored to the house writing source (`writing.md`, shipped beside this skill).
 version: 2.5.1
 author: Siqi Chen (@blader, https://github.com/blader/humanizer)
 license: MIT
@@ -13,8 +13,8 @@ license: MIT
 # Humanizer: Remove AI Writing Patterns
 
 Identify and remove signs of AI-generated text to make writing sound natural and human. The patterns below come from a
-body of observation documented in the file's NOTICE.md; the house writing source (writs/instructions/writing.md) sets
-the standard this skill works to.
+body of observation documented in the file's NOTICE.md; the house writing source (`writing.md`, shipped beside this
+skill) sets the standard this skill works to.
 
 **Key insight:** LLMs use statistical algorithms to guess what should come next. The result tends toward the most
 statistically likely completion, which is how the telltale patterns below get baked in.
@@ -52,21 +52,22 @@ text already meets it, there is nothing to do and you leave it alone.
 
 When given text to humanize:
 
-1. **Assess before you change anything** — go through the 30 patterns below, the checklist in the Process section, and
-   the three faults in the base writing guidelines section, and write down which ones the text fails, and where.
-2. **If nothing fails, say so and stop** — name what you checked and report that the text came back clean. That is a
+1. **Assess before you change anything** — read the full writing source first: `writing.md`, shipped beside this file.
+   Then go through each of the patterns below, the checklist in the Process section, and the writing source's faults and
+   report shape, and write down which ones the text fails, and where.
+2. **If nothing fails, say so and stop** — state what you checked and report that the text came back clean. That is a
    result. It is not a sign you failed to look hard enough. One read stands above the rule check: before calling text
    clean, apply pattern 30's test (read it aloud; count the chained clauses), because the rules are the floor and a
    paragraph can pass every one of them and still fail the read.
-3. **Act only on what failed, and cite it** — every edit names the pattern number or checklist item it fixes. An edit
-   you cannot attach to something in the assessment does not get made, however much better it sounds. Shorter, punchier
-   and plainer synonym are not items on any list here.
+3. **Act only on what failed, and cite it** — every edit attaches to the pattern number or checklist item it fixes. An
+   edit you cannot attach to something in the assessment does not get made, however much better it sounds. Shorter,
+   punchier and plainer synonym are not items on any list here.
 4. **Preserve the claims** — see CLAIM PRESERVATION below.
 5. **Maintain voice** — match the intended tone (formal, casual, technical, etc.). If a voice sample was provided, match
    it specifically.
 6. **Add soul** — don't just remove bad patterns, inject actual personality. See PERSONALITY AND SOUL below.
 7. **Do a final anti-AI pass** — ask yourself: "What makes the below so obviously AI generated?" "Nothing" is a
-   permitted answer. If there are tells, name them and revise once more.
+   permitted answer. If there are tells, state them and revise once more.
 
 ## Voice Calibration (optional)
 
@@ -637,7 +638,7 @@ file is text somebody wrote, a phase of work is a span on a calendar. You also h
 tense, and the present is what you reach for, so you end up saying work is under way on something nobody has built.
 
 Processes and people can act: Django, the gateway, a worker, the caller, the author. Addresses and artifacts cannot:
-routes, endpoints, pages, files, tables, phases, tickets, docs. Name the process or person that acts, or state a
+routes, endpoints, pages, files, tables, phases, tickets, docs. Write the process or person that acts, or state a
 condition instead of an action.
 
 **Before:**
@@ -647,8 +648,6 @@ condition instead of an action.
 **After:**
 
 > Django only forwards the request.
-
----
 
 ### 30. Clause Density
 
@@ -681,14 +680,90 @@ per the rhythm rule in PERSONALITY AND SOUL, paragraphs must contain varied leng
 > The runner will execute whatever lands in the queue, so the queue's write permission should be secured. Today it
 > requires a deploy key, which would need to be stolen to exploit it. This loosens that restriction.
 
+### 31. The Flat Present
+
+**Signs to watch:** a paragraph about a proposed or hypothetical change where every verb is simple present — "the
+migration drops the table", "the authorization process checks no JWT". No "will", no "would", no past, no temporal hints
+such as "the OLD table". Time lives only in stray time words like "today" and "once the migration finishes".
+
+**Problem:** LLMs narrate proposed work in the dramatic present, the way a press release describes a product the reader
+can already buy. In a plan or a risk writeup, tense is one of the signals a reader uses to tell current behavior from
+post-change behavior; flatten it and every sentence about the future reads as a claim about the present. The reader
+reconstructs the timeline from anchors, and one missed anchor makes the document lie.
+
+**Before:**
+
+> The change removes the staging check. A deploy to production skips review, and a bad commit reaches customers within
+> minutes. Today the check catches one in ten bad deploys.
+
+**After:**
+
+> The change will remove the staging check. A deploy to production will skip review, and a bad commit would reach
+> customers within minutes. Today the check catches one in ten bad deploys.
+
+### 32. The "Verbs No" Construction
+
+**Signs to watch:** an action verb taking "no" as its object — "checks no credentials", "stores no state", "writes no
+files", "needs no key".
+
+**Problem:** LLMs compress negation into a literary construction — "suffers no fools" — and reach for it as their
+default negative. Humans keep the form for fixed idioms; everywhere else they negate the verb, and the stiff form marks
+the sentence as machine-made.
+
+**Before:**
+
+> The listener checks no credentials. It stores no session state, and the deploy needs no key.
+
+**After:**
+
+> The listener doesn't check credentials. It doesn't keep session state, and the deploy doesn't need a key.
+
+State verbs don't get a pass either: write "doesn't have credentials", not "has no credentials". Copula predicatives are
+ordinary English — "is no exception", "is no surprise", "is no accident", used sparingly. Fixed idioms stay: "takes no
+prisoners", "makes no sense", "leaves no doubt".
+
+### 33. "Never" as the Default Negative
+
+**Signs to watch:** "never" doing plain negation work — "the listener never checks credentials", "the job never runs
+unattended", "the table never stores keys". Often several in a paragraph, often as the "fix" for a pattern-32 sentence.
+
+**Problem:** LLMs reach for "never" as their default negative, which turns every plain statement into an absolute.
+Humans negate the verb for ordinary negatives and save "never" for absolutes they mean.
+
+**Before:**
+
+> The listener never checks credentials. The job never runs unattended, and the table never stores keys.
+
+**After:**
+
+> The listener doesn't check credentials. The job doesn't run unattended, and the table won't store keys.
+
+### 34. "Name" as a Verb
+
+**Signs to watch:** "name" doing a precise verb's job — "the plan does not name the element", "the appendix names two
+owners", "name the actor in every sentence".
+
+**Problem:** LLMs reach for "name" as an all-purpose verb of mention, and the vagueness spreads: the reader can't tell
+whether the writer mentioned the element or omitted it. Humans pick the verb that says what happened: mention, omit,
+list, identify, state, spell out.
+
+**Before:**
+
+> The plan does not name the rollback step. The appendix names two owners, and the runbook names the escalation path.
+
+**After:**
+
+> The plan doesn't mention the rollback step. The appendix lists two owners, and the runbook spells out the escalation
+> path.
+
 ---
 
 ## The base writing guidelines
 
-Below the 30 patterns sits the standard they exist on: `writs/instructions/writing.md`, the house writing source. It
-loads from the repo tree — the OpenCode config's instructions entry and the Cursor rule pair both read it as a file;
-this section carries what an invocation needs without it. Clearing the tells is the floor, and the finished text clears
-on the first read.
+Below the 34 patterns sits the standard they exist on: `writing.md`, the house writing source, shipped beside this skill
+and read as part of every assessment. The rules dir loads the same text as ambient instructions; the skill reads it
+again as an operative step. This section is the summary, not the substitute. Clearing the tells is the floor, and the
+finished text clears on the first read.
 
 1. **Hidden characters and actions.** Passive voice erases the actor, a noun built from a verb erases the action, status
    verbs hide change, inanimate nouns take the actor's job, and the agent hides its own "I". Fix: character as subject,
@@ -701,14 +776,14 @@ on the first read.
 For work reports on your own output, the shape comes from the file too: the answer line first, every sentence naming its
 actor, one fact per sentence, data in tables and reasoning in prose, never a plan rendered as a table.
 
-Assess against all of it the way you check the patterns: name what fires and the sentence it fires on.
+Assess against all of it the way you check the patterns: state what fires and the sentence it fires on.
 
 ## Process
 
 1. Read the input text carefully, loading the file first if that's where it lives.
 2. Decide whether it is a document of record under CLAIM PRESERVATION, and say which.
-3. Assess it against the 30 patterns above and the three faults in the base writing guidelines section. Write down what
-   fires and the sentence it fires on.
+3. Assess it against the full writing source (`writing.md`, beside this file), the patterns above, and the faults in the
+   base writing guidelines section. Write down what fires and the sentence it fires on.
 4. Assess it against this checklist, the same way. Each line is a property the text either already has or does not:
    - Sounds natural when read aloud
    - Varies sentence structure naturally
@@ -716,7 +791,7 @@ Assess against all of it the way you check the patterns: name what fires and the
    - Maintains appropriate tone for context
    - Uses simple constructions (is/are/has) where appropriate
 5. If steps 3 and 4 both came back empty, report that and stop. Do not go on to step 6.
-6. Rewrite only the sentences the assessment named, one at a time, citing on each the pattern number or checklist line
+6. Rewrite only the sentences the assessment flagged, one at a time, citing on each the pattern number or checklist line
    it fixes. In a document of record, run the CLAIM PRESERVATION test on each edit as you make it, not at the end, and
    revert the ones that fail. When the text is an excerpt, write each sentence so it parses for someone reading the
    destination document, not for someone who has followed this conversation.

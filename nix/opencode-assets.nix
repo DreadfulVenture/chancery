@@ -69,6 +69,16 @@ let
       cp -R ${root}/. "$out/share/skills.${host}/"
       chmod -R u+w "$out/share/skills.${host}"
       cp ${reviewPrFor host} "$out/share/skills.${host}/review-pr/SKILL.md"
+      # The humanizer's SKILL.md directs the agent to read the house writing
+      # source (writing.md) as the first act of its assessment, so the full
+      # text ships beside SKILL.md and the writing rules exist twice on a
+      # deployed host — on purpose. The rules dir copy is ambient context,
+      # loaded every session, and ambient does not survive the skill's own
+      # checklist; a consumer may also ship the skills package without the
+      # rules wiring at all. Single source stays at
+      # writs/instructions/writing.md: both copies are build-time artifacts
+      # of it and cannot drift.
+      cp ${../writs/instructions/writing.md} "$out/share/skills.${host}/humanizer/writing.md"
     ''
     + lib.concatStrings (
       map (name: ''

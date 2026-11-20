@@ -25,5 +25,5 @@ would write): it is the first-read standard's enforcement arm, and process step 
 Pattern 13 gains the boundary between fragments that hide an actor and fragments that are merely short, and its
 Before/After pair is replaced, since upstream's "No configuration file needed" is the second kind. Pattern 13 also gains
 the "Worth Xing" recommendation and its before/after. The checklist and PERSONALITY AND SOUL are unchanged. The base
-writing guidelines section is local: the skill anchors its standard to the house writing source
-(writs/instructions/writing.md), assesses its three faults in the process, and carries its work-report shape.
+writing guidelines section is local: the skill anchors its standard to the house writing source (the writing.md shipped
+beside the skill), assesses its three faults in the process, and carries its work-report shape.
