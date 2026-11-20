@@ -26,6 +26,24 @@ export interface SessionDriver {
     sessionId: string,
     opts?: { signal?: AbortSignal },
   ): Promise<string>;
+  /**
+   * The session's recorded turns, oldest first: the prompts the caller
+   * sent and the replies the runtime recorded. The read mirrors the
+   * runtime's own record — a session the runtime no longer holds (the
+   * retention sweep disposed it) fails the read with the runtime's
+   * session-not-found error, which is how the status page's transcript
+   * view knows to degrade.
+   */
+  transcript(
+    sessionId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<SessionTurn[]>;
   /** End the session. */
   dispose(sessionId: string): Promise<void>;
+}
+
+/** One turn of a session's transcript: who spoke and what they said. */
+export interface SessionTurn {
+  role: "user" | "assistant";
+  text: string;
 }

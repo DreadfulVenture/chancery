@@ -4,15 +4,20 @@
  * POST /v1/events intake (202 + background processing), the /metrics and
  * /healthz probes, and the read-only status surface — /status as JSON
  * (the pinned machine contract), / as the human page, both rendered from
- * src/status.ts's one projection. The human page adds four inputs the
- * JSON does not carry: each view probes the adapter (a plain, tokenless
- * fetch, bounded short) and renders the answer, the live sessions' rows
- * read with each run's started stamp (viewsWithStartedAt) — the ledger
- * data the running duration renders from, a page-only read /status never
- * serializes — the runs table reads its wall time from the settled rows'
- * stamps in the projection (recentRunsWithWallTime) — also a page-only
- * derivation — and the page renders that same projection's PR cells as
- * links into the forge, using the config's forge base URL: also page
+ * src/status.ts's one projection. The human page adds seven inputs the
+ * JSON does not carry: (1) each view probes the adapter (a plain,
+ * tokenless fetch, bounded short) and renders the answer; (2) the live
+ * sessions' rows read with each run's started stamp (viewsWithStartedAt),
+ * the ledger data the running duration renders from; (3) the runs table
+ * reads its wall time from the settled rows' stamps in the projection,
+ * and (4) the failed runs' failed drafts ride that same projection read;
+ * (5) the PR cells render as links into the forge with the config's
+ * forge base URL; (6) the narration ring's tail (PRJ-461) — the bot's
+ * own lines, captured at emission through the logger's one write path,
+ * held in memory — renders as the page's log tail; (7) a failed run's
+ * reviewer session transcript (PRJ-461's transcript scope) reads live
+ * through the session driver for each failed run whose retained session
+ * still stands, degrading once the session is gone. All seven are page
  * rendering only, /status gains nothing.
  *
  * The completion-signal hook: startServer stores one promise per accepted
@@ -36,6 +41,7 @@ import type { ForgeEvent } from "./contracts/forge.js";
 import { ForgeEventSchema } from "./contracts/forge.js";
 import {
   consoleLogger,
+  narratingLogger,
   systemClock,
   type Ctx,
   type Clock,
@@ -50,6 +56,7 @@ import {
   type ReviewRecord,
   type ReviewStartRecord,
 } from "./journal.js";
+import { LogRing } from "./log-ring.js";
 import { Metrics } from "./metrics.js";
 import { loadPersona } from "./persona.js";
 import { redactSecrets } from "./redact.js";
@@ -60,13 +67,20 @@ import { StatusDb, statusDbPath } from "./status-db.js";
 import {
   SWEEP_INTERVAL_MS,
   createSweeper,
+  isSessionAlreadyGone,
   type SweepSummary,
 } from "./sweep.js";
-import { renderStatusPage } from "./ui.js";
+import { withTimeout } from "./with-timeout.js";
+import {
+  renderStatusPage,
+  type RunDraftsView,
+  type TranscriptView,
+} from "./ui.js";
 import type { Config } from "./config.js";
 import type { MemoryGateway } from "./contracts/memory.js";
 import type { ForgeAdapter } from "./contracts/forge.js";
 import type { SessionDriver } from "./contracts/session.js";
+import type { SessionTurn } from "./contracts/session.js";
 
 type ReviewRequestedEvent = Extract<ForgeEvent, { kind: "review_requested" }>;
 type ReplyEvent = Extract<ForgeEvent, { kind: "reply" }>;
@@ -82,6 +96,132 @@ class BodyTooLarge extends Error {}
 
 /** How long the human page's adapter probe may wait for any HTTP answer. */
 const ADAPTER_PROBE_TIMEOUT_MS = 1500;
+
+/**
+ * How long one transcript read may wait for the session driver: a page
+ * render must not hang on a runtime that never answers. Bounded like
+ * the adapter probe above. The bound cancels the read rather than
+ * abandoning it: the controller's abort rides the driver's own signal
+ * (the contract's opts.signal), so a hung runtime's in-flight request
+ * stops at the bound.
+ */
+const TRANSCRIPT_READ_TIMEOUT_MS = 2000;
+
+/** The transcript view's byte cap, composed at read time. */
+export const TRANSCRIPT_VIEW_CAP = 65_536;
+export const TRANSCRIPT_TURN_MARKER =
+  "[turn truncated at the page's transcript cap]";
+
+/**
+ * One turn's rendered line. Redaction runs FIRST, on the full turn
+ * text: a cap cut through a credentialed URL before its "@" would
+ * leave scheme://user:password stranded with nothing for either
+ * pattern to match, and the fragment would ride the open page. Only
+ * the redacted text is capped, and the cap budgets the line's own
+ * prefix, so a capped line totals the view cap exactly once rendered.
+ */
+const transcriptTurnText = (turn: SessionTurn): string => {
+  const prefix = turn.role === "user" ? "user: " : "reviewer: ";
+  return `${prefix}${capTurnText(redactSecrets(turn.text), prefix)}`;
+};
+
+const capTurnText = (text: string, prefix: string): string => {
+  const room =
+    TRANSCRIPT_VIEW_CAP -
+    Buffer.byteLength(TRANSCRIPT_TURN_MARKER, "utf8") -
+    Buffer.byteLength(prefix, "utf8");
+  if (Buffer.byteLength(text, "utf8") <= room) {
+    return text;
+  }
+  const cut = Buffer.from(text, "utf8").subarray(0, room);
+  return cut.toString("utf8") + TRANSCRIPT_TURN_MARKER;
+};
+
+/**
+ * Compose the found state: the turns rendered oldest first, the total
+ * held under the byte cap by dropping the oldest whole turns (a
+ * diagnosis reads the run's last turns first), each turn itself bounded
+ * by capTurnText so even a diff-sized prompt fits. The truncated flag
+ * says whole turns were cut at the old end. Exported for the tests —
+ * the cap's boundary math is pinned at unit grain.
+ */
+export const composeTranscriptView = (turns: SessionTurn[]): TranscriptView => {
+  const rendered = turns.map(transcriptTurnText);
+  const keptNewestFirst: string[] = [];
+  let bytes = 0;
+  for (let i = rendered.length - 1; i >= 0; i--) {
+    const line = rendered[i] as string;
+    const lineBytes =
+      Buffer.byteLength(line, "utf8") + (keptNewestFirst.length === 0 ? 0 : 2);
+    if (bytes + lineBytes > TRANSCRIPT_VIEW_CAP) {
+      break;
+    }
+    keptNewestFirst.push(line);
+    bytes += lineBytes;
+  }
+  keptNewestFirst.reverse();
+  return {
+    state: "found",
+    text: keptNewestFirst.join("\n\n"),
+    truncated: keptNewestFirst.length < rendered.length,
+  };
+};
+
+/**
+ * One run's transcript view, read live through the session driver: the
+ * session's turns while it stands; the gone note when the driver
+ * answers that the session is not found — a swept session, the
+ * retention sweep being the usual hand, though the note does not
+ * attribute it (a 404 from a proxy or a stopped runtime reads the
+ * same); the unavailable note when the read failed for any other
+ * reason. Verified against the pinned client (2.2.5): message.list
+ * declares 404 among its statuses and throws the service's tagged
+ * SessionNotFoundError for it, so a disposed session's read fails —
+ * it never answers an empty turn list.
+ */
+const readTranscriptView = async (
+  sessionId: string,
+  sessions: SessionDriver,
+): Promise<TranscriptView> => {
+  let turns: SessionTurn[];
+  // The bound cancels, not abandons: the abort rides the driver's own
+  // signal, so a hung runtime's in-flight request stops with the bound.
+  const abort = new AbortController();
+  try {
+    turns = await withTimeout(
+      sessions.transcript(sessionId, { signal: abort.signal }),
+      TRANSCRIPT_READ_TIMEOUT_MS,
+      () => abort.abort(),
+    );
+  } catch (error) {
+    return isSessionAlreadyGone(error)
+      ? { state: "swept" }
+      : { state: "unavailable" };
+  }
+  return composeTranscriptView(turns);
+};
+
+/**
+ * The page's run rows, each failed row extended with its transcript
+ * view: only failed runs carrying a retained session read one, and the
+ * reads run in parallel, each bounded. Every other row renders exactly
+ * as before. All of it is page-only render data — /status's pinned
+ * shape gains nothing.
+ */
+const pageRunRows = async (
+  rows: RunDraftsView[],
+  sessions: SessionDriver,
+): Promise<RunDraftsView[]> =>
+  Promise.all(
+    rows.map(async (row) =>
+      row.failure === undefined || row.sessionId === undefined
+        ? row
+        : {
+            ...row,
+            transcript: await readTranscriptView(row.sessionId, sessions),
+          },
+    ),
+  );
 
 /**
  * Whether the forge adapter answers at all: any HTTP response — even a
@@ -121,6 +261,14 @@ export interface ServerDeps {
    * window without moving anything else.
    */
   sweepClock?: Clock;
+  /**
+   * The narration ring the human page's log tail renders from (PRJ-461).
+   * Production callers leave it unset and the server owns one; index.ts
+   * passes the same ring the memory gateway's logger feeds, so a
+   * narration line emitted outside the server still reaches the page.
+   * Every line pushed through it is redacted at capture.
+   */
+  logRing?: LogRing;
 }
 
 export interface ServerHandle {
@@ -253,7 +401,11 @@ export async function startServer(
   config: Config,
   deps: ServerDeps,
 ): Promise<ServerHandle> {
-  const logger = deps.logger ?? consoleLogger;
+  // One write path, two sinks (PRJ-461): every narration line the bot
+  // logs goes to the console sink (stdout/stderr, journald's source) and
+  // into the ring, redacted at capture, for the human page's log tail.
+  const logRing = deps.logRing ?? new LogRing();
+  const logger = narratingLogger(logRing, deps.logger ?? consoleLogger);
   const reviewPipeline = deps.runReview ?? runReview;
   const replyPipeline = deps.runReply ?? runReply;
   /** Process start; the status surface's uptime anchors on this moment. */
@@ -735,12 +887,21 @@ export async function startServer(
               // it, and /status's pinned shape gains nothing.
               liveSessions.viewsWithStartedAt(),
               // The page's run rows, read straight from the projection
-              // with each settled run's wall time; /status never carries it.
-              statusDb.recentRunsWithWallTime(),
+              // with each settled run's wall time, and each failed run
+              // carrying a retained session extended with its
+              // transcript view, read live through the driver;
+              // /status never carries any of it.
+              await pageRunRows(
+                statusDb.recentRunsWithWallTime(),
+                deps.sessions,
+              ),
               // The PR cells' links ride the same page-only rule: the
               // forge's base URL renders the links and the re-request
               // affordance; /status's pinned shape gains nothing.
               config.forgeUrl,
+              // The page's log tail: the narration ring's lines since
+              // boot, held in memory. /status never serializes them.
+              logRing.tail(),
             ),
             "text/html; charset=utf-8",
           );

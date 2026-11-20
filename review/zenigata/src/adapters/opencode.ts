@@ -53,7 +53,7 @@
 
 import { OpenCode } from "@opencode/client";
 import { whenAborted } from "../with-timeout.js";
-import type { SessionDriver } from "../contracts/session.js";
+import type { SessionDriver, SessionTurn } from "../contracts/session.js";
 
 export interface OpencodeDriverOptions {
   baseUrl: string;
@@ -87,6 +87,9 @@ const DEFAULT_TURN_BUDGET_SECONDS = 900;
 
 /** Messages per state read: the newest-first window the loop scans. */
 const MESSAGES_WINDOW = 25;
+
+/** Messages per transcript read: the newest-first window the page's view scans. */
+const TRANSCRIPT_MESSAGES_WINDOW = 50;
 
 /**
  * Structural subset of the 2.2.5 message shapes the loop reads.
@@ -265,6 +268,43 @@ class OpenCodeSessionDriver implements SessionDriver {
   async dispose(sessionId: string): Promise<void> {
     this.lastRead.delete(sessionId);
     await this.client.session.remove({ sessionID: sessionId });
+  }
+
+  async transcript(
+    sessionId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<SessionTurn[]> {
+    // One bounded list read, newest first, reversed to the turns' own
+    // order. The window keeps the read's cost fixed; a session with
+    // more recorded turns than the window offers its newest ones — the
+    // page's own byte cap trims the view further anyway.
+    const listed = await this.client.message.list(
+      {
+        sessionID: sessionId,
+        order: "desc",
+        limit: TRANSCRIPT_MESSAGES_WINDOW,
+      },
+      { signal: opts?.signal },
+    );
+    return (
+      listed.data as Array<{
+        type: string;
+        content?: Array<{ type: string; text: string }>;
+      }>
+    )
+      .filter((item) => item.type === "user" || item.type === "assistant")
+      .map((item) => ({
+        role: item.type as SessionTurn["role"],
+        text:
+          item.content
+            ?.filter(
+              (part): part is { type: "text"; text: string } =>
+                part.type === "text",
+            )
+            .map((part) => part.text)
+            .join("\n") ?? "",
+      }))
+      .reverse();
   }
 
   /**

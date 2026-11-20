@@ -102,6 +102,10 @@ const ZProjectionReview = z.looseObject({
   // (PRJ-381's FailedDraft shape); the page's failed report renders from
   // them. Consumed for failed outcomes only — see the write path below.
   failedDrafts: ZFailedDrafts.optional(),
+  // The reviewer session a retained run left standing (PRJ-382's
+  // journal field), read back for the page's transcript view. Absent on
+  // window-0 records and runs that died before creating a session.
+  sessionId: z.string().optional(),
 });
 
 const ZProjectionReply = z.looseObject({
@@ -136,6 +140,7 @@ CREATE TABLE IF NOT EXISTS runs (
   failureStage   TEXT,
   failureMessage TEXT,
   failedDrafts   TEXT,
+  sessionId      TEXT,
   updatedAt      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runs_window ON runs (kind, startedAt);
@@ -154,6 +159,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_window ON runs (kind, startedAt);
  */
 const RUNS_ADDED_COLUMNS: Array<[name: string, type: string]> = [
   ["failedDrafts", "TEXT"],
+  ["sessionId", "TEXT"],
 ];
 
 /**
@@ -186,6 +192,7 @@ const runs = sqliteTable(
     failureStage: text("failureStage"),
     failureMessage: text("failureMessage"),
     failedDrafts: text("failedDrafts"),
+    sessionId: text("sessionId"),
     updatedAt: text("updatedAt").notNull(),
   },
   (t) => [index("idx_runs_window").on(t.kind, t.startedAt)],
@@ -208,6 +215,7 @@ interface RunInsert {
   failureStage: string | null;
   failureMessage: string | null;
   failedDrafts: string | null;
+  sessionId: string | null;
 }
 
 export class StatusDb {
@@ -294,6 +302,10 @@ export class StatusDb {
           failureStage: sql`excluded.failureStage`,
           failureMessage: sql`excluded.failureMessage`,
           failedDrafts: sql`excluded.failedDrafts`,
+          // The session id rides the terminal record (a start never
+          // carries one), so a replayed start's null must not unsettle
+          // the settled row's id.
+          sessionId: sql`COALESCE(excluded.sessionId, ${runs.sessionId})`,
           updatedAt: sql`excluded.updatedAt`,
         },
         setWhere: and(
@@ -354,6 +366,7 @@ export class StatusDb {
           failureStage: null,
           failureMessage: null,
           failedDrafts: null,
+          sessionId: null,
         });
         return null;
       }
@@ -420,6 +433,11 @@ export class StatusDb {
           failureMessage:
             failure === undefined ? null : redactSecrets(failure.message),
           failedDrafts,
+          // The retained session the sweep will retire; null for the
+          // window-0 records and runs that died before creating a
+          // session. Reply rows never surface in the runs window, so
+          // their records' session id stays journal-only.
+          sessionId: data.sessionId ?? null,
         });
         return null;
       }
@@ -453,6 +471,7 @@ export class StatusDb {
           failureMessage:
             failure === undefined ? null : redactSecrets(failure.message),
           failedDrafts: null,
+          sessionId: null,
         });
         return null;
       }
@@ -685,6 +704,10 @@ export class StatusDb {
       ...this.runView(row),
       wallSeconds: this.wallSecondsOf(row),
       failedDrafts: this.draftsOf(row),
+      // The retained session's id: the page reads the transcript
+      // through the driver with it. The machine contract's RunView
+      // never carries it.
+      sessionId: row.sessionId ?? undefined,
     }));
   }
 

@@ -4,20 +4,26 @@
  * HTML page: no scripts, no stylesheets, no assets the page would have
  * to fetch. The markup and the one CSS block ship in this module.
  *
- * Two inputs arrive outside the JSON payload: the route's
- * adapter-reachability probe result, and the runs table's wall time —
- * derived at the projection read from the settled rows' own stamps
- * (the RunWallView extension). A third arrives beside them: the live
- * sessions' started moments — the ledger's first stage-entry stamps
- * (the SessionStartView extension), the raw data the running duration
- * renders from. A fourth rides with them: the forge's base URL, the
- * config's ZENIGATA_FORGE_URL, which the PR cells render their links
- * with. A fifth rides with all of them: a failed run's failed drafts —
- * the journaled attempts the projection stored on the run's row
- * (the RunDraftsView extension), rendered in the failure cell. The
- * machine contract's shape is pinned, so all of these render at / and
- * nowhere else (the reason is named in the deployment doc and in the PR
- * body).
+ * Seven inputs arrive beside the JSON payload, in the order they read:
+ * (1) the route's adapter-reachability probe result; (2) the live
+ * sessions' started moments — the ledger's first stage-entry stamps (the
+ * SessionStartView extension), the raw data the running duration renders
+ * from; (3) the runs table's wall time — derived at the projection read
+ * from the settled rows' own stamps (the RunWallView extension); (4) a
+ * failed run's failed drafts — the
+ * journaled attempts the projection stored on the run's row (the
+ * RunDraftsView extension), rendered in the failure cell; (5) the
+ * forge's base URL, the config's ZENIGATA_FORGE_URL, which the PR cells
+ * render their links with; (6) the narration ring's tail (PRJ-461) —
+ * the bot's own lines since boot, captured at emission through the
+ * logger's one write path and held in memory — rendered as the
+ * log-tail panel, whose note says the store empties on restart and is
+ * written nowhere; (7) a failed run's transcript view (PRJ-461's
+ * transcript scope) — the retained reviewer session's turns read live
+ * through the driver, rendered in the failure cell and degrading once
+ * the session is gone. The machine contract's shape is pinned, so all
+ * of these render at / and nowhere else (the reason is named in the
+ * deployment doc and in the PR body).
  *
  * Escaping discipline: table and list cells compose small amounts of
  * markup (chips, muted spans), so every raw field is routed through esc()
@@ -133,7 +139,32 @@ export interface FailedDraftView {
  */
 export interface RunDraftsView extends RunWallView {
   failedDrafts?: FailedDraftView[];
+  /**
+   * The retained reviewer session's id (PRJ-382's journal field, read
+   * from the row) — the key the page reads the transcript through.
+   * Undefined for window-0 runs and runs that died before creating a
+   * session; never serialized into /status.
+   */
+  sessionId?: string;
+  /** The transcript view composed for the failed run, page-only. */
+  transcript?: TranscriptView;
 }
+
+/**
+ * One run's reviewer-session transcript view (PRJ-461's transcript
+ * scope), read live through the session driver for the human page:
+ * `found` carries the session's turns composed for the pre block —
+ * already redacted and byte-capped by the composition — while the
+ * session stands; `swept` says the driver reported the session gone,
+ * the retention sweep being the usual hand (the classification reads
+ * any not-found answer the same, so the page's note names the fact
+ * without attributing the sweeper); `unavailable` says the read failed
+ * for any other reason. All three are page-only render data.
+ */
+export type TranscriptView =
+  | { state: "found"; text: string; truncated: boolean }
+  | { state: "swept" }
+  | { state: "unavailable" };
 
 export interface StatusConfig {
   /** The configured listen port (0 = the OS picks one). */
@@ -366,6 +397,64 @@ const failedReport = (run: RunDraftsView): string =>
     : run.failedDrafts.map(failedDraft).join("");
 
 // ---------------------------------------------------------------------------
+// The transcript report
+// ---------------------------------------------------------------------------
+
+/**
+ * One failed run's reviewer-session transcript (PRJ-461's transcript
+ * scope), beneath the failed report in the failure cell. While the
+ * retained session stands, the turns render in a collapsible pre block
+ * — the text arrives composed, redacted, and capped, and routes
+ * through esc() once. A session the driver reports gone says so
+ * plainly: the classification reads the runtime's session-not-found
+ * answer (and any bare 404 beside it), the retention sweep being the
+ * usual hand — the note names the fact without attributing it, so it
+ * stays true when a stopped runtime answers the same. A read that
+ * failed for any other reason says that instead. Runs with no
+ * transcript view (window-0, no session, posted runs) render exactly
+ * as before.
+ */
+const transcriptReport = (run: RunDraftsView): string => {
+  const transcript = run.transcript;
+  if (transcript === undefined) {
+    return "";
+  }
+  if (transcript.state === "swept") {
+    return `<div class="transcript-note muted small">the session is gone — the transcript is not available</div>`;
+  }
+  if (transcript.state === "unavailable") {
+    return `<div class="transcript-note muted small">the transcript could not be read right now</div>`;
+  }
+  if (transcript.text === "") {
+    return `<div class="transcript-note muted small">the session stands, but recorded no turns</div>`;
+  }
+  const capped = transcript.truncated
+    ? `<div class="transcript-note muted small">the transcript is capped at the page's 64KiB; its oldest turns are cut</div>`
+    : "";
+  return `${capped}<details class="transcript"><summary class="muted small">reviewer session transcript</summary><pre class="transcript-body">${esc(
+    transcript.text,
+  )}</pre></details>`;
+};
+
+// ---------------------------------------------------------------------------
+// The narration tail
+// ---------------------------------------------------------------------------
+
+/**
+ * The bot's own narration (PRJ-461): the lines the logger emitted this
+ * boot, stored in the bounded in-memory ring and rendered oldest first
+ * as one pre block. The note above it names the store's contract — in
+ * memory since boot, written nowhere, emptied by a restart — so the
+ * page never implies a log file exists. The lines are narration the
+ * logger already composed; the whole block routes through esc() once,
+ * so a line carrying markup renders as text.
+ */
+const narrationTail = (lines: string[]): string =>
+  lines.length === 0
+    ? `<p class="empty">Nothing said yet this boot.</p>`
+    : `<pre class="log-tail">${esc(lines.join("\n"))}</pre>`;
+
+// ---------------------------------------------------------------------------
 // One table renderer
 // ---------------------------------------------------------------------------
 
@@ -440,7 +529,10 @@ const configList = (config: StatusConfig, forgeUrl: string): string => {
  * extended with each settled run's wall time (see RunWallView) and,
  * for the failed runs, with the failed drafts the projection stored
  * (see RunDraftsView) — plus the forge's base URL, which the PR cells
- * link with. All of these are page-only inputs: /status's pinned shape
+ * link with. The last input rides beside them: the narration tail — the
+ * ring's lines since boot, the log the page renders and the JSON never
+ * serializes (optional, defaulting empty, so tests of other panels can
+ * omit it). All of these are page-only inputs: /status's pinned shape
  * gains nothing.
  */
 export function renderStatusPage(
@@ -449,6 +541,7 @@ export function renderStatusPage(
   sessions: SessionStartView[],
   runs: RunDraftsView[],
   forgeUrl: string,
+  logLines: string[] = [],
 ): string {
   const now = Date.now();
   const renderedAt = new Date(now).toISOString();
@@ -502,7 +595,7 @@ export function renderStatusPage(
           ? `<span class="muted">—</span>`
           : `<span class="danger">${esc(run.failure.stage)}${esc(": ")}${esc(
               run.failure.message,
-            )}</span>${failedReport(run)}`,
+            )}</span>${failedReport(run)}${transcriptReport(run)}`,
     },
   ];
 
@@ -605,6 +698,32 @@ export function renderStatusPage(
     white-space: pre-wrap;
     word-break: break-word;
   }
+  .log-tail {
+    background: #0d1017;
+    border: 1px solid #242c38;
+    border-radius: 6px;
+    font: 400 .78rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: .3rem 0 0;
+    max-height: 24rem;
+    overflow: auto;
+    padding: .4rem .55rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .transcript-note { margin: .35rem 0 0; }
+  .transcript summary { cursor: pointer; margin: .35rem 0 0; }
+  .transcript-body {
+    background: #0d1017;
+    border: 1px solid #242c38;
+    border-radius: 6px;
+    font: 400 .78rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: .3rem 0 0;
+    max-height: 16rem;
+    overflow: auto;
+    padding: .4rem .55rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   table { border-collapse: collapse; width: 100%; }
   th {
     border-bottom: 1px solid #2b3441;
@@ -695,6 +814,12 @@ export function renderStatusPage(
           droppedStarts.starts,
         )}`
   }
+</section>
+
+<section class="panel">
+  <h2>Bot narration</h2>
+  <p class="fine">the bot's own narration — the same lines journald collects — held in memory since this boot, written nowhere; a restart empties it</p>
+  ${narrationTail(logLines)}
 </section>
 
 <section class="panel">

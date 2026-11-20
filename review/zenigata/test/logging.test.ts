@@ -4,7 +4,10 @@
  * appends under the state dir are the journal's run records (state the
  * boot reader and the retry gate consume), the status db rows the status
  * surface reads, the canonical clones, and the disposable review
- * worktrees.
+ * worktrees. PRJ-461's narration ring sits beside the console sink —
+ * the same lines, one write path — but is memory only: it appends no
+ * file, so the state-dir-only-state invariant below survives unchanged,
+ * and the ring's own bounds and capture live in test/log-ring.test.ts.
  */
 
 import { readdir } from "node:fs/promises";

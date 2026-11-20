@@ -85,4 +85,17 @@ describe("redactSecrets", () => {
     expect(truncated).not.toContain("supersecrettoken");
     expect(truncated).toContain("https://");
   });
+
+  it("stays linear on a long run of matchable characters with no @ in it", () => {
+    // The scheme-less pattern's regex form rescans such a run from every
+    // position — minutes on a 64KiB blob. A narration line can carry
+    // one (a base64 blob riding an error body), so the scan must not.
+    const blob = `zenigata: the body was ${"y".repeat(65_536)}`;
+    const started = Date.now();
+    expect(redactSecrets(blob)).toBe(blob);
+    // 3.3s was the quadratic reading on this machine; the linear scan
+    // is a millisecond. The bound keeps the test honest without pinning
+    // a speed.
+    expect(Date.now() - started).toBeLessThan(500);
+  });
 });

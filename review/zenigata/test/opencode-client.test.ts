@@ -20,7 +20,13 @@ import {
 } from "../src/adapters/opencode.js";
 import type { SessionDriver } from "../src/contracts/session.js";
 
-type ListPage = { data: Array<{ type: string; time: { created: number } }> };
+type ListPage = {
+  data: Array<{
+    type: string;
+    time: { created: number };
+    content?: Array<{ type: string; text: string }>;
+  }>;
+};
 /** One stage per poll: a page, or a status code to fail the read with. */
 type Stage = number | ((userMs: number) => ListPage);
 
@@ -423,5 +429,77 @@ describe("turnSettled", () => {
     expect(
       turnSettled([{ type: "idle", time: { created: userMs - 10 } }], userMs),
     ).toBe(false);
+  });
+});
+
+describe("opencode transcript read", () => {
+  it("maps the session's user and assistant messages into oldest-first turns", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [
+      (userMs) => ({
+        data: [
+          {
+            type: "assistant",
+            time: { created: userMs + 6000 },
+            content: [{ type: "text", text: "the review says no" }],
+          },
+          {
+            type: "user",
+            time: { created: userMs },
+            content: [{ type: "text", text: "review this diff" }],
+          },
+        ],
+      }),
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).resolves.toEqual([
+      { role: "user", text: "review this diff" },
+      { role: "assistant", text: "the review says no" },
+    ]);
+  });
+
+  it("ignores the bookkeeping records and joins the text parts", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [
+      (userMs) => ({
+        data: [
+          { type: "idle", time: { created: userMs + 9000 } },
+          {
+            type: "assistant",
+            time: { created: userMs + 6000 },
+            content: [
+              { type: "text", text: "part one" },
+              { type: "other", text: "not text" },
+              { type: "text", text: "part two" },
+            ],
+          },
+          {
+            type: "user",
+            time: { created: userMs },
+            content: [{ type: "text", text: "prompt" }],
+          },
+        ],
+      }),
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).resolves.toEqual([
+      { role: "user", text: "prompt" },
+      { role: "assistant", text: "part one\npart two" },
+    ]);
+  });
+
+  it("a read for a session the runtime no longer holds fails the read", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [404]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).rejects.toThrow(
+      /session not found/i,
+    );
   });
 });

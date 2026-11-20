@@ -29,16 +29,32 @@ bot functioning and what has it done" needs no journal walk or process probe. Th
 shape is pinned, and anything that scrapes it can rely on it byte for byte. The human page renders the same projection
 for reading, in the order an operator reads at 2am: the health line (uptime, the bound port, and the adapter's
 reachability), the sessions running or parked right now, the recent runs with their verdicts and wall times, the review
-starts a restart dropped, and the configuration echo. It is one static page — one embedded CSS block, no scripts, no
-external assets.
+starts a restart dropped, the bot's own narration as a log tail, and the configuration echo. It is one static page — one
+embedded CSS block, no scripts, no external assets.
 
-The human page has three inputs the JSON does not carry. Each page view probes the adapter (a plain, tokenless GET of
-the configured base URL, bounded to a wait of one and a half seconds; any HTTP response, even an error status, reads
-reachable), and the health line renders that answer. The runs table also reads each settled run's wall time from the
-row's own start and finish stamps in the projection — a page-only derivation (recentRunsWithWallTime). And the page
-renders every `repo#pr` cell as a link into the forge, composed from `ZENIGATA_FORGE_URL` above: the dropped starts'
-re-request affordance (and the live sessions', same cells) is that same link, pointing at the forge's own PR page. The
-JSON keeps the shape it was pinned with, so none of the three is in it.
+The human page has seven inputs the JSON does not carry, counted the same way in the renderer's own header: (1) each
+page view probes the adapter (a plain, tokenless GET of the configured base URL, bounded to a wait of one and a half
+seconds; any HTTP response, even an error status, reads reachable), and the health line renders that answer; (2) the
+live sessions' rows read with each run's started stamp, from which the running duration renders; (3) the runs table
+reads each settled run's wall time from the row's own start and finish stamps in the projection; (4) the failed runs'
+failed drafts ride that same projection read; (5) the page renders every `repo#pr` cell as a link into the forge,
+composed from `ZENIGATA_FORGE_URL` above — the dropped starts' re-request affordance (and the live sessions', same
+cells) is that same link, pointing at the forge's own PR page; (6) the narration tail (PRJ-461): the bot's own lines,
+captured at emission through the logger's one write path — the same lines journald collects on stdout/stderr — held in a
+bounded in-memory ring (500 lines, 64 KiB, oldest dropped) and rendered oldest first under a note saying the store is
+memory since boot, written nowhere, and emptied by a restart. Redaction holds at capture: the credentialed-URL machinery
+runs on a line before the ring stores it, so the page never carries a secret the journal wouldn't. The ring is the bot's
+voice only — the reviewer session's turns ride the session driver and are never captured. (7) the failed run's
+transcript view: a failed run whose journal record carried a retained session (PRJ-382's window) reads that session's
+turns live through the session driver — the same surface the sweep disposes with — and renders them in the failure cell,
+redacted and byte-capped at composition, each read bounded like the adapter probe. The panel's reach is a deliberate
+choice: the human page is the operator's post-mortem surface, open like `/metrics` and `/healthz`, and a failed run's
+diagnosis wants the session's own words beside the failure — the diff-bearing prompts and the reviewer's replies for
+exactly the failed runs whose sessions the retention window still holds. A session the driver reports not found reads as
+gone — the retention sweep being the usual hand, though the note does not attribute it ("the session is gone — the
+transcript is not available"); a read that failed for any other reason says that instead. The sweep's window is the
+transcript's whole retention — nothing new is stored anywhere, and a window-0 run (which tears its session down at
+settle) offers no transcript at all. The JSON keeps the shape it was pinned with, so none of the seven is in it.
 
 The surface has no write endpoints of its own and carries no secret — /metrics exposes durations and counters, and the
 status surface redacts at every projection (below); the endpoint is open like `/metrics` and `/healthz`.
@@ -52,7 +68,9 @@ status surface redacts at every projection (below); the endpoint is open like `/
 | `config`        | The redacted echo: configured listen port, allowlist sizes, retry policy, timeout values, and the agent name.                                                                                                                 |
 
 A session the surface shows as `queued` for a long time sits behind a full review limiter; one that stays in a stage for
-a long time is the run an operator can correlate against journalctl for that moment.
+a long time is the run an operator can correlate against journalctl for that moment. The narration tail on the human
+page is the same correlation without leaving the browser: it reads what the bot itself said this boot, bounded and
+memory-only, with journald still the durable record.
 
 ### Where the status surface reads
 

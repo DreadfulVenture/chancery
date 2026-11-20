@@ -5,13 +5,14 @@ The bot core consumes the runtime through the `SessionDriver` contract (`src/con
 lives in `src/adapters/opencode.ts` and its double in `src/adapters/session-double.ts`. This document is the spec a
 driver author implements and the rationale behind the pin.
 
-## The four methods
+## The five methods
 
 | Method                            | What it does                                                                              |
 | --------------------------------- | ----------------------------------------------------------------------------------------- |
 | `createSession(directory, agent)` | Create a session working in `directory`, running the named agent; returns the session id. |
 | `prompt(sessionId, text)`         | Send one prompt and wait for the turn to finish.                                          |
 | `readOutput(sessionId)`           | Return the text of the session's last assistant message, after the most recent turn.      |
+| `transcript(sessionId)`           | Return the session's recorded turns, oldest first (`{role, text}` per turn).              |
 | `dispose(sessionId)`              | End the session.                                                                          |
 
 A review uses one session for all of its passes: create, then up to five prompt/readOutput rounds (blind, context,
@@ -23,6 +24,13 @@ returned — a turn that produced no assistant output — it returns `""` rather
 corrective-retry path depends on this: a retry prompt that yields no answer reads as empty and fails validation, instead
 of silently re-validating the previous stage's output. The in-repo `SessionDouble` diverges here for convenience: it
 replays the scripted output on a repeat read instead of returning `""`.
+
+`transcript` reads the whole recorded session for the status page's transcript view (PRJ-461's transcript scope): the
+prompts the caller sent and the replies the runtime recorded, oldest first, text parts joined per message. The read
+mirrors the runtime's own record, so a session the runtime no longer holds — the retention sweep disposed it — fails the
+read with the runtime's session-not-found error; that failure is how the page's view knows to degrade to the swept note.
+The read is one bounded window over the message list (the newest 50 records), so its cost is fixed; a session with more
+turns than the window offers its newest ones.
 
 ## The version pin
 

@@ -222,6 +222,105 @@ describe("the NOW panel's started render", () => {
   });
 });
 
+describe("the failed report's transcript view", () => {
+  const transcriptRun = (over: Partial<RunDraftsView> = {}): RunDraftsView => ({
+    ...run,
+    outcome: "failed",
+    verdict: null,
+    failure: { stage: "blind", message: "boom" },
+    ...over,
+  });
+
+  it("renders the standing session's transcript as a collapsible pre block, escaped", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [
+        transcriptRun({
+          sessionId: "ses-1",
+          transcript: {
+            state: "found",
+            text: 'user: review <diff>\nreviewer: says & "no"',
+            truncated: false,
+          },
+        }),
+      ],
+      FORGE_URL,
+    );
+    expect(page).toContain("reviewer session transcript");
+    expect(page).toContain("user: review &lt;diff&gt;");
+    expect(page).toContain("reviewer: says &amp; &quot;no&quot;");
+    expect(page).not.toContain("review <diff>");
+  });
+
+  it("labels a capped transcript with the note and the marker rides the text", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [
+        transcriptRun({
+          sessionId: "ses-1",
+          transcript: {
+            state: "found",
+            text: "the last turn before the cut",
+            truncated: true,
+          },
+        }),
+      ],
+      FORGE_URL,
+    );
+    expect(page).toContain("the transcript is capped at the page's 64KiB");
+    expect(page).toContain("the last turn before the cut");
+  });
+
+  it("says plainly when the session is gone, without attributing the sweeper", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [transcriptRun({ sessionId: "ses-1", transcript: { state: "swept" } })],
+      FORGE_URL,
+    );
+    expect(page).toContain(
+      "the session is gone — the transcript is not available",
+    );
+    expect(page).not.toContain("reviewer session transcript");
+  });
+
+  it("distinguishes an unreadable transcript from a swept one", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [
+        transcriptRun({
+          sessionId: "ses-1",
+          transcript: { state: "unavailable" },
+        }),
+      ],
+      FORGE_URL,
+    );
+    expect(page).toContain("the transcript could not be read right now");
+    expect(page).not.toContain("transcript was swept");
+  });
+
+  it("a run with no transcript view renders the failure cell exactly as before", () => {
+    const bare = renderStatusPage(
+      status(),
+      true,
+      [],
+      [transcriptRun({ sessionId: "ses-1" })],
+      FORGE_URL,
+    );
+    // The style block always carries the classes; the markup must not.
+    expect(bare).not.toContain('class="transcript"');
+    expect(bare).not.toContain('class="transcript-note');
+    expect(bare).not.toContain("reviewer session transcript");
+  });
+});
+
 describe("the failed report", () => {
   const draft = (over: Partial<FailedDraftView> = {}): FailedDraftView => ({
     stage: "context",

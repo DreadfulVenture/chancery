@@ -27,7 +27,8 @@ import {
   type ReviewRecord,
   type ReviewStartRecord,
 } from "../src/journal.js";
-import { REVIEW_SLOTS } from "../src/server.js";
+import { REVIEW_SLOTS, TRANSCRIPT_TURN_MARKER } from "../src/server.js";
+import { composeTranscriptView, TRANSCRIPT_VIEW_CAP } from "../src/server.js";
 import { StatusDb, statusDbPath } from "../src/status-db.js";
 import { LiveSessions } from "../src/status.js";
 import type { StatusData } from "../src/ui.js";
@@ -96,6 +97,30 @@ const gated =
     prompt: (sessionId, text, opts) =>
       gate.then(() => inner.prompt(sessionId, text, opts)),
     readOutput: (sessionId, opts) => inner.readOutput(sessionId, opts),
+    transcript: (sessionId, opts) => inner.transcript(sessionId, opts),
+    dispose: (sessionId) => inner.dispose(sessionId),
+  });
+
+/**
+ * Wrap the session driver so its transcript read hangs until the bound
+ * aborts it: the promise settles only through the signal, so a test can
+ * tell a cancelled read (the signal reached the driver) from an
+ * abandoned one (the promise never settles).
+ */
+const hangingTranscript =
+  (onAbort: () => void) =>
+  (inner: SessionDriver): SessionDriver => ({
+    createSession: (directory, agent, opts) =>
+      inner.createSession(directory, agent, opts),
+    prompt: (sessionId, text, opts) => inner.prompt(sessionId, text, opts),
+    readOutput: (sessionId, opts) => inner.readOutput(sessionId, opts),
+    transcript: (sessionId, opts) =>
+      new Promise((_, reject) => {
+        opts?.signal?.addEventListener("abort", () => {
+          onAbort();
+          reject(new Error("the transcript read was aborted"));
+        });
+      }),
     dispose: (sessionId) => inner.dispose(sessionId),
   });
 
@@ -688,12 +713,14 @@ describe("status surface", () => {
 
     const body = await (await fetch(`${intakeUrl(h)}/`)).text();
     // The read the operator makes at 2am arrives in this order: health
-    // line, what is running, recent runs, dropped starts, config echo.
+    // line, what is running, recent runs, dropped starts, the bot's own
+    // narration, config echo.
     const positions = [
       "up ",
       "Running now",
       "Recent review runs",
       "restart dropped",
+      "Bot narration",
       "Configuration",
     ].map((marker) => body.indexOf(marker));
     expect(positions).not.toContain(-1);
@@ -764,7 +791,7 @@ describe("the page's forge links", () => {
     );
   });
 
-  it("the machine contract gains nothing: no started stamp, no forge URL, no PR links on /status", async () => {
+  it("the machine contract gains nothing: no started stamp, no forge URL, no PR links, no narration on /status", async () => {
     const h = await harness({ script: happyScript() });
     await postReviewEvent(h);
     const text = await (await fetch(`${intakeUrl(h)}/status`)).text();
@@ -772,6 +799,206 @@ describe("the page's forge links", () => {
     expect(text).not.toContain("forgeUrl");
     expect(text).not.toContain("forge.invalid");
     expect(text).not.toContain("pulls/");
+    // The narration ring is a page-only input: neither its lines nor its
+    // panel's note appears on the wire.
+    expect(text).not.toContain("zenigata: intake listening");
+    expect(text).not.toContain("held in memory since this boot");
+    // The transcript views ride the same rule: no read, no note, no
+    // session id on the wire.
+    expect(text).not.toContain("transcript");
+    expect(text).not.toContain("sessionId");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The page's narration tail
+// ---------------------------------------------------------------------------
+
+describe("the page's narration tail", () => {
+  it("renders the bot's narration since boot, with the memory-only store named", async () => {
+    const h = await harness({ script: happyScript() });
+    await postReviewEvent(h);
+    // A skipped run narrates a line of its own; a clean posted run
+    // narrates nothing beyond the boot lines.
+    await postReviewEvent(h, { requesterLogin: "stranger" });
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    // The boot's own narration is in the tail, exactly as journald
+    // collected it — prefix and all.
+    expect(page).toContain(
+      `zenigata: intake listening on port ${h.handle.port}`,
+    );
+    // The skip's narration landed behind it.
+    expect(page).toContain(
+      `zenigata: skipped ${REPO}#${PR}: requester stranger is not in the allowed logins`,
+    );
+    // The note names the store's contract: in memory since this boot,
+    // written nowhere, emptied by a restart. No log file is implied.
+    expect(page).toContain("held in memory since this boot, written nowhere");
+    expect(page).toContain("a restart empties it");
+    // The narration is a leak surface like any other: no token rides it.
+    expect(page).not.toContain(EVENT_TOKEN);
+    expect(page).not.toContain(ADAPTER_TOKEN);
+  });
+
+  it("the reviewer session's turns stay out of the ring — the transcript view reads them through the driver instead", async () => {
+    const h = await harness({ script: happyScript() });
+    await postReviewEvent(h);
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    // The scripted session's own outputs ride the session driver, never
+    // the logger: the ring holds narration alone. A posted run's
+    // session reaches the page by no route — the transcript view reads
+    // failed runs only.
+    expect(page).not.toContain("names nothing; say what was added");
+    expect(page).not.toContain("The case: two lines land");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The failed run's transcript view
+// ---------------------------------------------------------------------------
+
+describe("the failed run's transcript view", () => {
+  /** A scripted run that fails at the blind stage's validation. */
+  const failingScript = () => ["blind noise", "not json", "still not json"];
+
+  it("a retained failed run offers its reviewer session transcript while the session stands", async () => {
+    const h = await harness({ script: failingScript() });
+    await postReviewEvent(h);
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    // The failure cell carries the collapsible transcript, oldest turn
+    // first: the pipeline's own prompt, then the scripted reply.
+    expect(page).toContain("reviewer session transcript");
+    expect(page).toContain("user: ");
+    expect(page).toContain("reviewer: not json");
+    // The posted runs' cells stay exactly as they were.
+    expect((page.match(/reviewer session transcript/g) ?? []).length).toBe(1);
+  });
+
+  it("a swept session degrades: the note names the fact without the sweeper", async () => {
+    const h = await harness({
+      script: failingScript(),
+      // The sweep's window compare on a clock past the window: one
+      // on-demand pass disposes the run's retained session.
+      sweepNowMs: Date.now() + 100 * 24 * 60 * 60 * 1000,
+    });
+    await postReviewEvent(h);
+    await h.handle.sweep();
+    expect(h.sessions.disposed).toHaveLength(1);
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(page).toContain(
+      "the session is gone — the transcript is not available",
+    );
+    expect(page).not.toContain("reviewer session transcript");
+  });
+
+  it("a window-0 run tears its session down at settle and offers no transcript", async () => {
+    const h = await harness({
+      script: failingScript(),
+      env: { ZENIGATA_RETENTION_WINDOW_SECONDS: "0" },
+    });
+    await postReviewEvent(h);
+    // The immediate teardown ran, and the record carried no session id,
+    // so the row offers no transcript block at all.
+    expect(h.sessions.disposed).toHaveLength(1);
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(page).not.toContain("reviewer session transcript");
+    expect(page).not.toContain("transcript was swept");
+  });
+
+  it("a cap cut can never strand a credential: the newest turn is redacted before it is capped", async () => {
+    // The raw turn places "https://user:" just inside a naive cap cut
+    // with the "@" just outside it, where neither redaction pattern can
+    // match — cap-first would ride the fragment onto the open page.
+    const h = await harness({
+      script: [
+        "blind noise",
+        "not json",
+        `${"y".repeat(65476)} https://user:secretpw@forge.invalid/x failed`,
+      ],
+    });
+    await postReviewEvent(h);
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    // The transcript's own rendered line: extract it from the page —
+    // the failed drafts panel beside it renders the raw model output by
+    // PRJ-423's settled design, so the no-fragment assertions scope to
+    // the transcript's pre block alone.
+    const transcriptBody =
+      /<pre class="transcript-body">([\s\S]*?)<\/pre>/.exec(page)?.[1] ?? "";
+    expect(transcriptBody).not.toBe("");
+    // The newest turn rendered, capped and marked: the boundary rule
+    // kept it.
+    expect(transcriptBody).toContain("reviewer: ");
+    expect(transcriptBody).toContain(TRANSCRIPT_TURN_MARKER);
+    // And no fragment of the raw credential rode it: the redaction ran
+    // on the full text before the cut, so the cut landed in
+    // already-redacted text.
+    expect(transcriptBody).not.toContain("https://user");
+    expect(transcriptBody).not.toContain("secretpw");
+    expect(page).not.toContain("recorded no turns");
+  });
+
+  it("the transcript read's bound cancels the read instead of abandoning it", async () => {
+    let aborted = false;
+    const h = await harness({
+      script: failingScript(),
+      wrapSessions: hangingTranscript(() => {
+        aborted = true;
+      }),
+    });
+    await postReviewEvent(h);
+
+    const started = Date.now();
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    // The page answers inside the bound's neighborhood, not hung.
+    expect(Date.now() - started).toBeLessThan(10_000);
+    // The read itself observed the abort: the contract's signal reached
+    // the driver, so the bound cancelled the in-flight request.
+    expect(aborted).toBe(true);
+    expect(page).toContain("the transcript could not be read right now");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The transcript view's cap math
+// ---------------------------------------------------------------------------
+
+describe("the transcript view's cap math", () => {
+  it("an oversized newest turn renders its capped line at the view cap exactly", () => {
+    const view = composeTranscriptView([
+      { role: "assistant", text: "y".repeat(200_000) },
+    ]);
+    expect(view.state).toBe("found");
+    expect(view.truncated).toBe(false);
+    // The prefix is budgeted inside the cap: the rendered line totals
+    // the view cap once, never over it.
+    expect(Buffer.byteLength(view.text, "utf8")).toBe(TRANSCRIPT_VIEW_CAP);
+    expect(view.text.startsWith("reviewer: ")).toBe(true);
+    expect(view.text.endsWith(TRANSCRIPT_TURN_MARKER)).toBe(true);
+  });
+
+  it("older turns drop whole once the newest capped line fills the cap", () => {
+    const view = composeTranscriptView([
+      { role: "user", text: "the older prompt" },
+      { role: "assistant", text: "y".repeat(200_000) },
+    ]);
+    expect(view.truncated).toBe(true);
+    expect(view.text).not.toContain("the older prompt");
+    expect(Buffer.byteLength(view.text, "utf8")).toBe(TRANSCRIPT_VIEW_CAP);
+  });
+
+  it("a view under the cap keeps every turn and claims no truncation", () => {
+    const view = composeTranscriptView([
+      { role: "user", text: "prompt" },
+      { role: "assistant", text: "reply" },
+    ]);
+    expect(view.truncated).toBe(false);
+    expect(view.text).toBe("user: prompt\n\nreviewer: reply");
   });
 });
 
@@ -969,6 +1196,7 @@ describe("status db projection", () => {
           { name: "failureStage", type: "TEXT", notnull: 0, pk: 0 },
           { name: "failureMessage", type: "TEXT", notnull: 0, pk: 0 },
           { name: "failedDrafts", type: "TEXT", notnull: 0, pk: 0 },
+          { name: "sessionId", type: "TEXT", notnull: 0, pk: 0 },
           { name: "updatedAt", type: "TEXT", notnull: 1, pk: 0 },
         ]);
         // The idempotency contract rides on the unique key: the primary
@@ -1375,6 +1603,39 @@ describe("status db projection", () => {
     expect(
       states(statusDbPath(stateDir)).find((row) => row.eventId === "evt-once"),
     ).toEqual(expect.objectContaining({ outcome: "posted" }));
+    db.close();
+  });
+
+  it("the terminal record's retained session id rides the row, and a replayed start never unsets it", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "zenigata-projection-"));
+    const db = new StatusDb({
+      path: statusDbPath(stateDir),
+      logger: consoleLogger,
+      clock: projectionClock(),
+    });
+    db.apply(
+      unitStart("evt-ses", "2026-11-16T09:00:00.000Z"),
+      "the accepted-start record",
+    );
+    // The running row never surfaces; only the settled one carries the
+    // session id the page reads the transcript through.
+    expect(db.recentRunsWithWallTime()).toEqual([]);
+    db.apply(
+      unitTerminal("evt-ses", "2026-11-16T09:05:00.000Z", {
+        outcome: "failed",
+        failure: { stage: "blind", message: "boom" },
+        sessionId: "ses-reviewer-1",
+      }),
+      "the failed review record",
+    );
+    expect(db.recentRunsWithWallTime()[0]?.sessionId).toBe("ses-reviewer-1");
+    // A replayed start carries no session of its own and must not
+    // unsettle the settled row's id.
+    db.apply(
+      unitStart("evt-ses", "2026-11-16T09:06:00.000Z"),
+      "the replayed start record",
+    );
+    expect(db.recentRunsWithWallTime()[0]?.sessionId).toBe("ses-reviewer-1");
     db.close();
   });
 

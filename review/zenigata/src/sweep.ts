@@ -59,8 +59,13 @@ export interface Sweeper {
  * a failure. A driver whose error surfaces neither signal (an SDK that
  * drops the body, say) degrades safely into a logged failure — the work
  * is still gone, and the next pass repeats it.
+ *
+ * The status page's transcript view (PRJ-461's transcript scope) reads
+ * through the same driver and classifies its read failures with the
+ * same answer: a session the sweep disposed reads as the swept note,
+ * not a failure. Exported for that caller.
  */
-const isSessionAlreadyGone = (error: unknown): boolean => {
+export const isSessionAlreadyGone = (error: unknown): boolean => {
   const status = (error as { status?: unknown } | null)?.status;
   if (status === 404) {
     return true;

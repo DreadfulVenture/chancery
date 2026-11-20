@@ -21,8 +21,52 @@ const CREDENTIALED_URL = /(?:https?|ssh|git|file):\/\/[^\s@]*@/g;
  * the ":" separator keeps ordinary "name@host" mentions (an email
  * address, a committer line) from matching, and the classes stop at
  * whitespace and quotes so one match cannot run across a sentence.
+ *
+ * The scan below is the hand-rolled linear equivalent of that pattern
+ * rather than the pattern itself: on a long run of matchable characters
+ * with no "@" in it (a base64 blob riding an error body), the regex
+ * rescans the run from every position before failing — quadratic, long
+ * enough to hang an emission path — while a match can only ever begin
+ * at a maximal run's start, because the first class's maximal run pins
+ * the colon's position and its backtracking can never place it
+ * elsewhere. The classes are the regex's own, matched per character.
  */
-const SCHEMELESS_USERINFO = /[^\s"'():@]+:[^\s"'@]+@/g;
+const USER_CHAR = /[^\s"'():@]/;
+const PASS_CHAR = /[^\s"'@]/;
+
+const stripSchemelessUserinfo = (text: string): string => {
+  let kept = "";
+  let scan = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (!USER_CHAR.test(text[i] as string)) {
+      i += 1;
+      continue;
+    }
+    // The maximal user run: only its start can begin a match.
+    const start = i;
+    let end = start;
+    while (end < text.length && USER_CHAR.test(text[end] as string)) {
+      end += 1;
+    }
+    if (text[end] === ":") {
+      let q = end + 1;
+      while (q < text.length && PASS_CHAR.test(text[q] as string)) {
+        q += 1;
+      }
+      if (q > end + 1 && text[q] === "@") {
+        // The match drops wholesale — user, colon, password, and the
+        // "@" — and the host after it stays readable.
+        kept += text.slice(scan, start);
+        scan = q + 1;
+        i = q + 1;
+        continue;
+      }
+    }
+    i = end;
+  }
+  return kept + text.slice(scan);
+};
 
 /**
  * Matches a token-bearing query parameter and captures everything up to
@@ -33,10 +77,9 @@ const QUERY_TOKEN =
   /([?&](?:token|access_token|password|secret|api_key|key)=)[^&\s"']*/gi;
 
 export function redactSecrets(text: string): string {
-  return text
-    .replace(CREDENTIALED_URL, (match) =>
+  return stripSchemelessUserinfo(
+    text.replace(CREDENTIALED_URL, (match) =>
       match.slice(0, match.indexOf("://") + 3),
-    )
-    .replace(SCHEMELESS_USERINFO, "")
-    .replace(QUERY_TOKEN, "$1[redacted]");
+    ),
+  ).replace(QUERY_TOKEN, "$1[redacted]");
 }
