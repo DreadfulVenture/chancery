@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      run_test: ${{ steps.classify.outputs.run_test }}
+      run_zenigata: ${{ steps.classify.outputs.run_zenigata }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Default to running everything on ambiguity (workflow_dispatch, unknown base, detection errors).
+          run_test=true
+          run_zenigata=true
+          docs_only=false
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha || '' }}"
+            head_sha="${{ github.event.pull_request.head.sha || github.sha }}"
+            if [[ -n "$base_sha" ]] && git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+              if mb=$(git merge-base "$base_sha" "$head_sha" 2>/dev/null); then
+                mapfile -t changed < <(git diff --name-only "$mb" "$head_sha")
+              else
+                changed=()
+              fi
+
+              if [[ ${#changed[@]} -gt 0 ]]; then
+                docs_only=true
+                run_test=false
+                run_zenigata=false
+                for f in "${changed[@]}"; do
+                  # Docs/skills-only allowlist (skips package matrix): the writs' prose
+                  # trees (writs/skills, writs/agents, writs/commands), docs/**, and
+                  # markdown-only diffs. Anything else is evaluated per package tree.
+                  if [[ "$f" == writs/skills/* || "$f" == writs/agents/* || "$f" == writs/commands/* || "$f" == docs/* || "$f" == *.md ]]; then
+                    :
+                  else
+                    docs_only=false
+                    # Package-tree gates: any change under a package tree runs that package's full suite.
+                    # review/zenigata/** => zenigata. Memory/watch/wake/coordinate/writs-reminders/build/test
+                    # surfaces => make test. Any other/unclassified path is ambiguous => run full (both suites).
+                    if [[ "$f" == review/zenigata/* ]]; then
+                      run_zenigata=true
+                    elif [[ "$f" == review/forgejo-adapter/* ]]; then
+                      run_test=true
+                      run_zenigata=true
+                    elif [[ "$f" == memory/store/* || "$f" == memory/cursor-client/* || "$f" == memory/opencode-client/* || "$f" == watch/* || "$f" == wake/* || "$f" == coordinate/* || "$f" == writs/plan-reminder/* || "$f" == writs/discovery-reminder/* || "$f" == nix/* || "$f" == .forgejo/* || "$f" == *.py || "$f" == Makefile || "$f" == flake.nix || "$f" == flake.lock || "$f" == .envrc || "$f" == .pre-commit-config.yaml || "$f" == .gitignore || "$f" == .prettierrc || "$f" == renovate.json ]]; then
+                      run_test=true
+                    else
+                      run_test=true
+                      run_zenigata=true
+                    fi
+                  fi
+                done
+              fi
+              # empty diff => defaults remain (run everything) as ambiguity-safe
+            fi
+            # unknown/missing base => defaults remain (run everything)
+          fi
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "run_test=$run_test" >> "$GITHUB_OUTPUT"
+          echo "run_zenigata=$run_zenigata" >> "$GITHUB_OUTPUT"
+          echo "docs_only=$docs_only run_test=$run_test run_zenigata=$run_zenigata"
+
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - name: Run pre-commit hooks
+        run: nix develop -c pre-commit run --all-files
+
+      # Covers this runner's system only, which is the point: the systemd
+      # service path in the home-manager module has no one exercising it by
+      # hand the way the launchd path does.
+      - name: Check the home-manager module
+        run: nix flake check
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.run_test == 'true'
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Run tests
+        run: make test
+
+  zenigata:
+    needs: changes
+    if: needs.changes.outputs.run_zenigata == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
+
+      - name: Install dependencies
+        working-directory: review/zenigata
+        run: npm ci
+
+      - name: Run vitest
+        working-directory: review/zenigata
+        run: npm test
+
+      - name: Typecheck
+        working-directory: review/zenigata
+        run: npm run typecheck

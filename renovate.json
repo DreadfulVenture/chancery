@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":automergeDigest",
+    ":automergeLinters",
+    ":automergeMinor",
+    ":semanticCommits",
+    ":separateMajorReleases"
+  ],
+  "timezone": "America/New_York",
+  "schedule": ["* * * * 6"],
+  "updateNotScheduled": false,
+  "prHourlyLimit": 10,
+  "automergeSchedule": ["* * * * 6"],
+  "platformAutomerge": true,
+  "rebaseWhen": "conflicted",
+  "nix": {
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["* * * * 6"]
+  },
+  "packageRules": [
+    {
+      "groupName": "all non-major dependencies, including digests",
+      "groupSlug": "all-minor-patch-digest",
+      "matchPackageNames": ["*"],
+      "matchUpdateTypes": ["digest", "minor", "patch", "pin"],
+      "automerge": true
+    },
+    {
+      "groupName": "nix locks",
+      "groupSlug": "nix-locks",
+      "matchManagers": ["nix"],
+      "matchUpdateTypes": ["digest", "minor", "patch", "pin"],
+      "automerge": true
+    },
+    {
+      "matchUpdateTypes": ["pin"],
+      "automerge": true
+    }
+  ]
+}

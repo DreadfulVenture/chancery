@@ -1,0 +1,8 @@
+{
+  "name": "oc-wake",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  }
+}

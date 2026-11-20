@@ -1,0 +1,587 @@
+#!/usr/bin/env node
+// oc-wake — wake an opencode session when a watched process exits (PRJ-383).
+//
+// PRJ-383 review 163 set the trigger (no timers, wake on completion); review
+// 179 shaped the watchdog itself. The only mode is --on-exit: the bin
+// validates its inputs, spawns a detached watcher child (node builtins;
+// stdin and stdout ignored, stderr routed to a file that survives), and
+// returns at once — the agent's shell never blocks. The watcher polls the
+// watched process and fires on the review's exit semantics: stat state 'Z'
+// (a zombie, the unreaped orphan of a backgrounded command) or a vanished
+// proc entry means the process EXITED, and the wake posts the host's
+// schedule route with a one-shot `when: { in: "1 second" }` so it arrives
+// ~immediately. 'R'/'S'/'D' etc. keep the ticker running.
+//
+// Identity is pid + starttime: on Linux that pair is unique against pid
+// recycling, so cmdline is not part of identity. Post-arm ticks verify the
+// starttime only; an entry that comes back carrying a different starttime is
+// the recycled-slug case — the watcher stops, posts nothing, and leaves a
+// trace (PRJ-383 review 179 counts 1-2).
+//
+// A lost wake leaves a trace on the machine (review 179 count 3): the
+// watcher's stderr rides a file instead of dropped stdio, and fire-time
+// outcomes append one record to the state file (paths below; the happy path
+// stays silent on stderr). Nothing persists before the command exits — a
+// dead watcher, a reboot, or a host outage mid-command means the wake never
+// enqueues — and a post that fails is not retried, because schedule
+// creation is not idempotent and a retried post could double-schedule.
+//
+// Discovery and credentials follow the host's own clients: the
+// registration file ($XDG_STATE_HOME/opencode/service.json, 0600 —
+// default ~/.local/state/opencode/service.json) names the service url and
+// local password, Basic auth user "opencode"; the password can also come
+// from the OC_WAKE_PASSWORD environment variable, which keeps it off argv
+// and out of ps. The watcher re-reads the registration at fire time, so a
+// service restart between arming and exit is handled with the fresh value;
+// the CLI reads it once up front only to surface a broken deployment before
+// the watcher detaches. The wake is id-addressable within that same-user
+// trust domain — see docs.
+
+"use strict";
+
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const BIN = fileURLToPath(import.meta.url);
+
+// The watcher mode rides the environment, never argv: ps shows argv of every
+// process, while the environment is readable by the same user alone — the
+// same domain that can read the registration file. The mode marker alone
+// does not dispatch: an arbitrary environment could carry OC_WAKE_WATCHER,
+// so a watcher must also hold the pid it watches, which only the CLI's
+// spawn sets (PRJ-383 review 189 count 2: the bin owns its OC_WAKE_* env,
+// it does not inherit other people's).
+const WATCHER_ENV = "OC_WAKE_WATCHER";
+const TICK_MS = Number(process.env.OC_WAKE_TICK_MS) || 3_000;
+
+// The chancery state location: the fire-time outcome records and the
+// watcher's stderr trail. OC_WAKE_STATE_FILE and OC_WAKE_LOG_FILE override
+// them (the tests do); production uses these defaults.
+const stateRoot = () =>
+  (process.env.XDG_STATE_HOME || `${process.env.HOME}/.local/state`).toString();
+const stateFile = () =>
+  process.env.OC_WAKE_STATE_FILE || `${stateRoot()}/chancery/oc-wake.jsonl`;
+const logFile = () =>
+  process.env.OC_WAKE_LOG_FILE || `${stateRoot()}/chancery/oc-wake.log`;
+
+// Attribution rides the prompt text (the host keeps metadata out of the
+// prompt the model reads), so the fixed label is the part an agent reads as
+// "this turn is a timer, not the user".
+const WAKE_LABEL = "Scheduled wake (oc-wake)";
+
+const USAGE = `usage: oc-wake [session-id] --on-exit <pid> --message <text|-> [options]
+
+Wake an opencode session when a watched process exits. Arms a detached
+watcher and returns immediately — compose it with a background job:
+
+  long-check & oc-wake --on-exit $! --message "done, look"
+
+The watcher fires when the process exits (stat state 'Z' — a zombie, or
+the proc entry vanishing) and the wake enqueues then. Watchdog
+semantics: it fires only while this machine and the watcher live —
+nothing persists; killing the watcher pid cancels the wake.
+
+arguments:
+  [session-id]            Target session. Default: OPENCODE_SESSION_ID (the
+                          session the invoking tool shell belongs to).
+  --on-exit <pid>         The process to watch (a positive integer). The
+                          wake is enqueued when it exits; a pid that does
+                          not exist on this machine is a usage error here,
+                          and an entry that returns with another
+                          starttime (a recycled pid) stops the watcher
+                          without a post.
+  --message <text|->      The prompt the session receives (after the fixed
+                          "Scheduled wake" label). "--message -" reads it
+                          from stdin, so a pipe can carry the message.
+  --name <name>           Label on the host's schedule list.
+                          Default: "oc-wake on-exit <pid>".
+  --session <id>          Same as the positional, for scripts.
+  --service-file <path>   Host registration file. Default:
+                          $XDG_STATE_HOME/opencode/service.json
+  --url <url>             Host base URL, skipping service discovery.
+  --quiet                 Print only the watcher's pid (kill it to cancel
+                          the wake).
+  -h, --help              This text.
+
+environment:
+  OC_WAKE_PASSWORD        Host password, taken from the environment rather
+                          than the command line (ps shows argv, not env),
+                          so it survives in process listings; the
+                          registration file's password still wins when the
+                          variable is unset.
+
+traces:
+  The watcher appends one fire-time outcome record per decision to
+  $XDG_STATE_HOME/chancery/oc-wake.jsonl and its anomaly stderr lines
+  (recycled slug, post failure) to $XDG_STATE_HOME/chancery/oc-wake.log.
+  The happy path is silent.
+`;
+
+function fail(exit, message) {
+  process.stderr.write(`oc-wake: ${message}\n`);
+  process.exit(exit);
+}
+
+function usage(message) {
+  if (message) process.stderr.write(`oc-wake: ${message}\n`);
+  process.stderr.write(USAGE);
+  process.exit(2);
+}
+
+function readArgs(argv) {
+  const args = {
+    session: undefined,
+    pid: undefined,
+    message: undefined,
+    name: undefined,
+    serviceFile: undefined,
+    url: undefined,
+    quiet: false,
+  };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const value = (name) => {
+      const joined = arg.startsWith("--") && arg.includes("=");
+      if (!joined) {
+        i += 1;
+        // A bare "-" is the stdin sentinel --message accepts; any other
+        // next token that looks like a flag is the flag it is, and eating
+        // it as a value would silently change the invocation's meaning.
+        if (i >= argv.length || (argv[i].startsWith("-") && argv[i] !== "-"))
+          usage(`${name} needs a value, not a flag`);
+        return argv[i];
+      }
+      return arg.slice(arg.indexOf("=") + 1);
+    };
+    if (arg === "-h" || arg === "--help") {
+      process.stdout.write(USAGE);
+      process.exit(0);
+    } else if (arg === "--on-exit" || arg.startsWith("--on-exit=")) {
+      args.pid = value("--on-exit");
+    } else if (arg === "--message" || arg.startsWith("--message=")) {
+      args.message = value("--message");
+    } else if (arg === "--name" || arg.startsWith("--name=")) {
+      args.name = value("--name");
+    } else if (arg === "--session" || arg.startsWith("--session=")) {
+      args.session = value("--session");
+    } else if (arg === "--service-file" || arg.startsWith("--service-file=")) {
+      args.serviceFile = value("--service-file");
+    } else if (arg === "--url" || arg.startsWith("--url=")) {
+      args.url = value("--url");
+    } else if (arg === "--quiet") {
+      args.quiet = true;
+    } else if (arg === "--after" || arg.startsWith("--after=")) {
+      usage(
+        "--after was removed: wake-on-exit replaced the timer; use --on-exit <pid>",
+      );
+    } else if (arg === "--password" || arg.startsWith("--password=")) {
+      usage(
+        "--password was taken off the command line: export OC_WAKE_PASSWORD instead",
+      );
+    } else if (arg.startsWith("-")) {
+      usage(`unknown option: ${arg}`);
+    } else if (args.session === undefined) {
+      args.session = arg;
+    } else {
+      usage(`unexpected argument: ${arg}`);
+    }
+  }
+  return args;
+}
+
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  // A pipe carries shell noise on its tail (the echo newline); the message
+  // text proper ends there.
+  return Buffer.concat(chunks).toString("utf8").trimEnd();
+}
+
+// The /proc root is an environment knob so tests can host a fake tree; in
+// production it stays unset and the kernel's own /proc answers.
+export const procRoot = () => process.env.OC_WAKE_PROC_ROOT || "/proc";
+
+// /proc/<pid>/stat, minus the comm field, as tokens: the first token after
+// ')' is the state (field 3), the twentieth (field 22) the boot-relative
+// starttime. The comm may carry spaces and parens, which is why the split
+// waits for the last ')'.
+function readStat(pid) {
+  let text;
+  try {
+    text = fs.readFileSync(`${procRoot()}/${pid}/stat`, "utf8");
+  } catch {
+    return undefined;
+  }
+  const after = text.slice(text.lastIndexOf(")") + 1);
+  const tokens = after.split(/\s+/).filter(Boolean);
+  return { state: tokens[0], starttime: tokens[19] };
+}
+
+// The URL grammar the host speaks: http(s) only, parsed exactly once so a
+// malformed --url fails named rather than deep inside the post.
+function parseUrl(url) {
+  let target;
+  try {
+    target = new URL(url);
+  } catch {
+    return { error: `not a valid URL: ${url}` };
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:")
+    return { error: `the service url must be http(s): ${url}` };
+  return { target };
+}
+
+function readRegistration(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    return {
+      error: `no opencode service registration at ${file} (${error.code ?? error})`,
+    };
+  }
+  let info;
+  try {
+    info = JSON.parse(text);
+  } catch {
+    return { error: `the service registration at ${file} is not JSON` };
+  }
+  if (typeof info?.url !== "string" || info.url === "") {
+    return { error: `the service registration at ${file} carries no url` };
+  }
+  return { info };
+}
+
+function recordOutcome(status, fields) {
+  const line = {
+    at: new Date().toISOString(),
+    watcher: process.pid,
+    pid: fields.pid,
+    sessionID: fields.sessionID,
+    status,
+    ...(fields.scheduleId === undefined
+      ? {}
+      : { scheduleId: fields.scheduleId }),
+    why: fields.why,
+  };
+  try {
+    fs.mkdirSync(path.dirname(stateFile()), { recursive: true });
+    fs.appendFileSync(stateFile(), `${JSON.stringify(line)}\n`);
+  } catch (error) {
+    process.stderr.write(
+      `oc-wake watcher: the outcome record failed: ${error}\n`,
+    );
+  }
+}
+
+// One enqueue. No retries: schedule creation is not idempotent, so a
+// retried post after an unclear response could double-schedule — the wake
+// is simply absent instead.
+async function postWake(input) {
+  const parsed = parseUrl(input.url);
+  if (parsed.error) return { error: parsed.error };
+  const payload = {
+    sessionID: input.sessionID,
+    name: input.name,
+    when: { in: "1 second" },
+    // The label makes the delivered turn name its origin; the message rides
+    // verbatim behind it. A message already carrying the label is sent
+    // once, not wrapped again.
+    prompt: input.message.startsWith(WAKE_LABEL)
+      ? input.message
+      : `${WAKE_LABEL}: ${input.message}`,
+  };
+  const headers = { "content-type": "application/json" };
+  if (input.password)
+    headers.authorization = `Basic ${Buffer.from(`opencode:${input.password}`).toString("base64")}`;
+  let response;
+  try {
+    // The route joins under the target's own path, not its origin: a
+    // registration url that carries a mount prefix keeps it, and the
+    // origin-only default is unaffected. The plain `new URL(path, base)`
+    // would throw the prefix away.
+    const route = new URL(parsed.target);
+    route.pathname = `${parsed.target.pathname.replace(/\/+$/, "")}/api/experimental/schedule`;
+    response = await fetch(route, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (error) {
+    return {
+      error: `the wake enqueue to ${parsed.target.origin} failed: ${error}`,
+    };
+  }
+  let body;
+  try {
+    body = await response.text();
+  } catch (error) {
+    // The fetch caught its own failures; the body read had no net, and a
+    // reset or the fifteen-second abort landing here used to kill the
+    // watcher with a stack trace and no receipt (PRJ-383 review 212).
+    return {
+      error: `the wake response body read failed after HTTP ${response.status}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(body);
+  } catch {
+    parsedBody = undefined;
+  }
+  if (!response.ok) {
+    const detail =
+      parsedBody?.message || body.trim().slice(0, 300) || "(no response body)";
+    return {
+      error: `the host refused the wake (HTTP ${response.status}${parsedBody?._tag ? ` ${parsedBody._tag}` : ""}): ${detail}`,
+    };
+  }
+  const info = parsedBody?.data;
+  if (!info?.id)
+    return {
+      error: `the host accepted the wake but returned no schedule id: ${body.trim().slice(0, 300)}`,
+    };
+  return { id: info.id, payload, info };
+}
+
+// The watcher's loop: poll the watched identity every TICK_MS, and check
+// the identity BEFORE the exit state — a slot that exists but carries
+// another starttime is the recycled-slug branch (the only wrong-target
+// path), and state must not speak for a stranger's process: a zombie with
+// a foreign starttime would otherwise post a wake nobody scheduled. Once
+// the starttime matches, the STATE field decides: a zombie ('Z') or a
+// vanished proc entry is the watched process EXITED — the orphan of a
+// backgrounded command included — and the wake fires; any other state
+// keeps ticking, and the stop leaves a trace.
+async function runWatcher() {
+  const pid = process.env.OC_WAKE_PID;
+  const starttime = process.env.OC_WAKE_STARTTIME;
+  const message = process.env.OC_WAKE_MESSAGE;
+  const name = process.env.OC_WAKE_NAME;
+  const sessionID = process.env.OC_WAKE_SESSION;
+  if (
+    pid === undefined ||
+    starttime === undefined ||
+    message === undefined ||
+    name === undefined ||
+    sessionID === undefined
+  )
+    return fail(
+      1,
+      "the watcher env arrived incomplete (OC_WAKE_PID, _STARTTIME, _MESSAGE, _NAME, _SESSION are required)",
+    );
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let exitWhy;
+  for (;;) {
+    await wait(TICK_MS);
+    const now = readStat(pid);
+    if (now === undefined) {
+      exitWhy = "exit detected (stat vanished)";
+      break;
+    }
+    // Identity before state: a foreign starttime is the slot speaking for
+    // a stranger, whatever its state — including a zombie — and no wake is
+    // owed to it.
+    if (now.starttime !== starttime) {
+      // The recycled-slug branch, by design (PRJ-383 review 189): the
+      // process the agent named is gone, and what the slot now holds is an
+      // unrelated one. Its eventual exit would be owed a wake only if the
+      // agent had named it, which nobody did — re-arming onto the stranger
+      // would invent a wake the caller never scheduled, and there is no
+      // clean way to tell the slot was ever ours once the starttime is not.
+      // The wake is dropped; the record below is the receipt.
+      const why = `recycled slug: pid ${pid} now carries starttime ${now.starttime}, not the captured ${starttime}`;
+      process.stderr.write(`oc-wake watcher: ${why}; no wake posted\n`);
+      recordOutcome("recycled-slug", { pid, sessionID, why });
+      process.exit(3);
+    }
+    // The starttime matches, so the state speaks for the process the agent
+    // did name.
+    if (now.state === "Z") {
+      exitWhy = `exit detected (state ${now.state})`;
+      break;
+    }
+  }
+
+  const input = { sessionID, name, message };
+  if (process.env.OC_WAKE_URL !== undefined) {
+    input.url = process.env.OC_WAKE_URL;
+    if (process.env.OC_WAKE_PASSWORD !== undefined)
+      input.password = process.env.OC_WAKE_PASSWORD;
+  } else {
+    const file =
+      process.env.OC_WAKE_SERVICE_FILE ||
+      `${stateRoot()}/opencode/service.json`;
+    const found = readRegistration(file);
+    if (found.error) {
+      process.stderr.write(`oc-wake watcher: ${found.error}\n`);
+      recordOutcome("failed", { pid, sessionID, why: found.error });
+      return fail(1, found.error);
+    }
+    input.url = found.info.url;
+    input.password = process.env.OC_WAKE_PASSWORD ?? found.info.password;
+  }
+  // Record-then-fail over the whole post phase (PRJ-383 review 212): a
+  // fetch, a body read, or anything after must leave the failed record
+  // behind before the error surfaces — a lost wake without a receipt is
+  // the failure this net exists for. The named-error path below is the
+  // same receipt for the failures postWake returns instead of throwing.
+  let posted;
+  try {
+    posted = await postWake(input);
+  } catch (error) {
+    const why = `the wake post failed: ${error instanceof Error ? error.message : String(error)}`;
+    process.stderr.write(`oc-wake watcher: ${why}\n`);
+    recordOutcome("failed", { pid, sessionID, why });
+    return fail(1, why);
+  }
+  if (posted.error) {
+    process.stderr.write(`oc-wake watcher: ${posted.error}\n`);
+    recordOutcome("failed", { pid, sessionID, why: posted.error });
+    return fail(1, posted.error);
+  }
+  recordOutcome("posted", {
+    pid,
+    sessionID,
+    scheduleId: posted.id,
+    why: `${exitWhy}; schedule ${posted.id}`,
+  });
+  process.exit(0);
+}
+
+// The CLI mode: validate everything the watcher would otherwise fail on
+// silently, arm the detached watcher, and return without waiting.
+async function runCli() {
+  const args = readArgs(process.argv.slice(2));
+  if (args.pid === undefined) usage("--on-exit <pid> is required");
+  if (!/^\d+$/.test(args.pid) || Number(args.pid) === 0)
+    usage(`--on-exit must be a process id (a positive integer): "${args.pid}"`);
+  // The /proc tree names directories in plain decimal; a padded form would
+  // miss its own target, so the pid is normalized once, here.
+  const pid = String(Number(args.pid));
+
+  let message = args.message;
+  if (message === "-") message = await readStdin();
+  if (typeof message !== "string" || message.trim() === "")
+    usage("--message is required");
+  if (message.includes("\0")) usage("--message cannot carry a NUL byte");
+
+  const sessionID = args.session || process.env.OPENCODE_SESSION_ID;
+  if (!sessionID)
+    usage(
+      "no target session: pass a session id, or run from a session tool shell (OPENCODE_SESSION_ID)",
+    );
+
+  // --url gets the same arm-time validation the registration path gets, so
+  // a malformed url fails named here instead of only inside the watcher's
+  // post, where stderr is a file nobody watches.
+  if (args.url !== undefined) {
+    const parsed = parseUrl(args.url);
+    if (parsed.error) usage(parsed.error);
+  }
+
+  // Discovery is validated here, before the watcher detaches: its own
+  // failures are anomalies in a file, so a broken deployment must say so
+  // now. The credential is part of that deployment: a registration
+  // without a password (and no OC_WAKE_PASSWORD) would only fail at the
+  // watcher's fire-time post, where the trace alone observes it. The
+  // watcher re-reads at fire time for the fresh value.
+  if (args.url === undefined) {
+    const file = args.serviceFile || `${stateRoot()}/opencode/service.json`;
+    const found = readRegistration(file);
+    if (found.error) fail(1, found.error);
+    const password = process.env.OC_WAKE_PASSWORD ?? found.info.password;
+    if (typeof password !== "string" || password === "") {
+      fail(
+        1,
+        `the wake's credential is unset or empty: OC_WAKE_PASSWORD and the registration at ${file} together provide no usable password — the wake's post would be refused at fire time`,
+      );
+    }
+  }
+
+  const identity = readStat(pid);
+  if (identity === undefined)
+    usage(`no process with pid ${pid} on this machine`);
+
+  const name = args.name || `oc-wake on-exit ${pid}`;
+  // The watcher's stderr must survive (review 179 count 3): anomalies ride
+  // the chancery state log instead of the dropped stdio. An unwritable
+  // state dir is not an arm failure — the wake matters more than its trail,
+  // which the outcome record also attempts.
+  let stdio;
+  try {
+    fs.mkdirSync(path.dirname(logFile()), { recursive: true });
+    const fd = fs.openSync(logFile(), "a");
+    stdio = ["ignore", "ignore", fd];
+  } catch {
+    stdio = "ignore";
+  }
+  // OC_WAKE_URL and OC_WAKE_SERVICE_FILE are the invocation's own inputs
+  // (review 189 count 2): the CLI takes them from arguments only, so an
+  // arbitrary environment cannot smuggle a different host or registration
+  // file into the watcher's fire-time discovery. The rest of the OC_WAKE_*
+  // family is either written by this spawn or is an internal seam.
+  const {
+    OC_WAKE_URL: _inheritedUrl,
+    OC_WAKE_SERVICE_FILE: _inheritedFile,
+    ...inheritedEnv
+  } = process.env;
+  const watcher = spawn(process.execPath, [BIN], {
+    detached: true,
+    stdio,
+    env: {
+      ...inheritedEnv,
+      [WATCHER_ENV]: "1",
+      OC_WAKE_PID: pid,
+      OC_WAKE_STARTTIME: identity.starttime,
+      OC_WAKE_MESSAGE: message,
+      OC_WAKE_NAME: name,
+      OC_WAKE_SESSION: sessionID,
+      ...(args.serviceFile === undefined
+        ? {}
+        : { OC_WAKE_SERVICE_FILE: args.serviceFile }),
+      ...(args.url === undefined ? {} : { OC_WAKE_URL: args.url }),
+    },
+  });
+  if (stdio !== "ignore" && stdio[2] !== undefined) {
+    try {
+      fs.closeSync(stdio[2]);
+    } catch {
+      // The fd is the child's concern now; a failed close changes nothing.
+    }
+  }
+  if (watcher.pid === undefined)
+    fail(
+      1,
+      `spawning the watcher failed (node ${process.version}, bin ${BIN})`,
+    );
+  watcher.unref();
+
+  if (args.quiet) {
+    process.stdout.write(`${watcher.pid}\n`);
+  } else {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: true,
+          watching: Number(pid),
+          watcher: watcher.pid,
+          sessionID,
+          name,
+          message,
+          note: "the wake enqueues when the process exits; kill the watcher pid to cancel",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+}
+
+await (process.env[WATCHER_ENV] === "1" && process.env.OC_WAKE_PID !== undefined
+  ? runWatcher()
+  : runCli());

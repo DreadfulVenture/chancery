@@ -1,0 +1,317 @@
+/**
+ * The status page renderer's forge links: the PR cell's anchor
+ * construction (the repo string is the forge path) and the page-level
+ * rendering — live sessions, recent runs, dropped starts, and the config
+ * echo. These are page-only concerns by construction: renderStatusPage
+ * takes the forge URL and the live rows' started stamps as render
+ * inputs, so /status's pinned shape gains nothing (the harness tests pin
+ * that from the wire side too).
+ */
+
+import { describe, expect, it } from "vitest";
+import { forgePullUrl, renderStatusPage } from "../src/ui.js";
+import type { FailedDraftView, RunDraftsView, StatusData } from "../src/ui.js";
+
+const FORGE_URL = "https://forge.invalid";
+
+const status = (over: Partial<StatusData> = {}): StatusData => ({
+  uptime: {
+    startedAt: "2026-11-16T09:00:00.000Z",
+    uptimeSeconds: 12,
+    listenPort: 8471,
+    adapterUrl: "http://adapter.invalid",
+  },
+  sessions: [],
+  droppedStarts: { count: 0, starts: [] },
+  runs: [],
+  config: {
+    listenPort: 0,
+    allowedLogins: 1,
+    allowedRepos: 0,
+    retryPolicy: "never",
+    reviewTimeoutSeconds: 1800,
+    turnPollSeconds: 3,
+    turnBudgetSeconds: 900,
+    agent: "zenigata-reviewer",
+  },
+  ...over,
+});
+
+const session = {
+  eventId: "evt-live",
+  repo: "acme/widget",
+  pr: 1,
+  eventKind: "review_requested",
+  requester: "example-user",
+  commentId: "c-1",
+  stage: "intake",
+  acceptedAt: "2026-11-16T10:00:00.000Z",
+  lastActivityAt: "2026-11-16T10:00:05.000Z",
+};
+
+/** A page row for the NOW panel: the session plus the ledger's stamp. */
+const sessionStart = (startedAtMs: number | undefined) => ({
+  ...session,
+  startedAtMs,
+});
+
+const dropped = {
+  eventId: "evt-dropped",
+  repo: "acme/widget",
+  pr: 9,
+  eventKind: "review_requested",
+  acceptedAt: "2026-11-16T09:00:00.000Z",
+};
+
+const run = {
+  ts: "2026-11-16T11:00:00.000Z",
+  repo: "acme/widget",
+  pr: 2,
+  outcome: "posted",
+  verdict: "APPROVE",
+  phases: [],
+  wallSeconds: 300,
+};
+
+describe("forgePullUrl", () => {
+  it("maps owner/name onto the forge's PR path", () => {
+    expect(forgePullUrl("example/repo", 7, "https://forge.example.com")).toBe(
+      "https://forge.example.com/example/repo/pulls/7",
+    );
+  });
+
+  it("keeps a nested repo path intact", () => {
+    expect(forgePullUrl("acme/team/widget", 1, FORGE_URL)).toBe(
+      "https://forge.invalid/acme/team/widget/pulls/1",
+    );
+  });
+
+  it("does not double the slash of a trailing-slash base URL", () => {
+    expect(forgePullUrl("acme/widget", 3, "https://forge.invalid/")).toBe(
+      "https://forge.invalid/acme/widget/pulls/3",
+    );
+  });
+
+  it("URI-encodes each path segment of the repo string", () => {
+    expect(forgePullUrl("acme/w id", 2, FORGE_URL)).toBe(
+      "https://forge.invalid/acme/w%20id/pulls/2",
+    );
+    expect(forgePullUrl("acme/a?b/c", 4, FORGE_URL)).toBe(
+      "https://forge.invalid/acme/a%3Fb/c/pulls/4",
+    );
+  });
+
+  it("refuses a repo with no forge path shape and hostile segments", () => {
+    expect(forgePullUrl("widget", 1, FORGE_URL)).toBeUndefined();
+    expect(forgePullUrl("acme/", 1, FORGE_URL)).toBeUndefined();
+    expect(forgePullUrl("/acme", 1, FORGE_URL)).toBeUndefined();
+    expect(forgePullUrl("", 1, FORGE_URL)).toBeUndefined();
+    expect(forgePullUrl("acme/..", 1, FORGE_URL)).toBeUndefined();
+    expect(forgePullUrl("acme/.", 1, FORGE_URL)).toBeUndefined();
+  });
+});
+
+describe("the page's forge links", () => {
+  it("links the live, run, and dropped PR cells, and the re-request affordance rides the live and dropped cells only", () => {
+    const live = renderStatusPage(
+      status(),
+      true,
+      [sessionStart(undefined)],
+      [],
+      FORGE_URL,
+    );
+    expect(
+      live.includes(
+        `<a href="${FORGE_URL}/acme/widget/pulls/1">acme/widget#1</a>`,
+      ),
+    ).toBe(true);
+    expect((live.match(/request review again/g) ?? []).length).toBe(1);
+    expect(live).toContain(
+      `<a href="${FORGE_URL}/acme/widget/pulls/1">request review again</a>`,
+    );
+
+    const settled = renderStatusPage(status(), true, [], [run], FORGE_URL);
+    expect(settled).toContain(
+      `<a href="${FORGE_URL}/acme/widget/pulls/2">acme/widget#2</a>`,
+    );
+    expect(settled).not.toContain("request review again");
+
+    const droppedRender = renderStatusPage(
+      status({ droppedStarts: { count: 1, starts: [dropped] } }),
+      true,
+      [],
+      [],
+      FORGE_URL,
+    );
+    expect(droppedRender).toContain(
+      `<a href="${FORGE_URL}/acme/widget/pulls/9">acme/widget#9</a>`,
+    );
+    expect(droppedRender).toContain(
+      `<a href="${FORGE_URL}/acme/widget/pulls/9">request review again</a>`,
+    );
+  });
+
+  it("renders a repo with no forge path shape as the plain-text identity", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [{ ...sessionStart(undefined), repo: "widget", pr: 3 }],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toContain("<strong>widget#3</strong>");
+    expect(page).not.toContain("forge.invalid/widget/pulls/3");
+  });
+
+  it("escapes the repo string in the text and the href both", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [{ ...sessionStart(undefined), repo: 'acme/a"b&c', pr: 5 }],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toContain("acme/a&quot;b&amp;c#5");
+    expect(page).toContain(`href="${FORGE_URL}/acme/a%22b%26c/pulls/5"`);
+  });
+
+  it("shows the forge URL plainly in the config echo", () => {
+    const page = renderStatusPage(status(), true, [], [], FORGE_URL);
+    expect(page).toContain("<dt>forge</dt><dd>https://forge.invalid</dd>");
+  });
+});
+
+describe("the NOW panel's started render", () => {
+  it("a running row's chip names the state and the run's age from the started stamp", () => {
+    // Elapsed 9m 30s with sub-second tolerance at the render: the pin is
+    // the minutes, not the exact second.
+    const page = renderStatusPage(
+      status(),
+      true,
+      [{ ...session, startedAtMs: Date.now() - 570_500 }],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toMatch(/class="chip ok">running 9m/);
+    expect(page).toContain('<span class="muted small">intake</span>');
+  });
+
+  it("a parked row keeps the amber chip and its wait, and claims no running duration", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [{ ...session, stage: "queued", startedAtMs: undefined }],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toContain(`class="chip warn">parked</span>`);
+    expect(page).toContain("waiting for a free review slot");
+    expect(page).not.toMatch(/class="chip ok">running/);
+  });
+
+  it("a running row whose ledger holds no started stamp names the state alone", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [sessionStart(undefined)],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toContain(`class="chip ok">running</span>`);
+    expect(page).toContain('<span class="muted small">intake</span>');
+  });
+});
+
+describe("the failed report", () => {
+  const draft = (over: Partial<FailedDraftView> = {}): FailedDraftView => ({
+    stage: "context",
+    attempt: 0,
+    reply: '{"verdict":',
+    truncated: false,
+    ...over,
+  });
+
+  const failedRun = (failedDrafts?: FailedDraftView[]): RunDraftsView => ({
+    ...run,
+    outcome: "failed",
+    verdict: null,
+    failure: {
+      stage: "context",
+      message: "context draft failed validation twice",
+    },
+    failedDrafts,
+  });
+
+  it("renders the stage, attempt, refusal, and capped reply beneath the failure message", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [failedRun([draft({ parseError: "unexpected end of JSON" })])],
+      FORGE_URL,
+    );
+    expect(page).toContain(
+      "context draft failed validation twice</span>" +
+        '<div class="draft"><div class="draft-head">' +
+        '<span class="chip mute">context</span>' +
+        '<span class="muted small">attempt 0</span></div>' +
+        '<div class="draft-refusal">unexpected end of JSON</div>' +
+        '<pre class="draft-reply">{&quot;verdict&quot;:</pre></div>',
+    );
+  });
+
+  it("labels a truncated draft with the chip, and an uncapped one claims no truncation", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [
+        failedRun([
+          draft({ truncated: true, reply: "cut off mid-attempt" }),
+          draft({ stage: "humanize", attempt: 1 }),
+        ]),
+      ],
+      FORGE_URL,
+    );
+    expect(page).toContain('<span class="chip warn">truncated</span>');
+    expect((page.match(/class="chip warn">truncated/g) ?? []).length).toBe(1);
+    expect(page).toContain("attempt 1");
+  });
+
+  it("escapes the refusal and the reply — model output renders as text", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [
+        failedRun([
+          draft({
+            parseError: "unexpected <end> of input",
+            reply: '<script>alert("draft")</script>',
+          }),
+        ]),
+      ],
+      FORGE_URL,
+    );
+    expect(page).toContain("unexpected &lt;end&gt; of input");
+    expect(page).toContain(
+      "&lt;script&gt;alert(&quot;draft&quot;)&lt;/script&gt;",
+    );
+    expect(page).not.toContain("<script>alert");
+  });
+
+  it("a run without failed drafts renders the failure cell exactly as before", () => {
+    const clean = renderStatusPage(status(), true, [], [run], FORGE_URL);
+    expect(clean).not.toContain('class="draft"');
+
+    const failedNoDrafts = renderStatusPage(
+      status(),
+      true,
+      [],
+      [failedRun()],
+      FORGE_URL,
+    );
+    expect(failedNoDrafts).not.toContain('class="draft"');
+    expect(failedNoDrafts).toContain("context draft failed validation twice");
+  });
+});

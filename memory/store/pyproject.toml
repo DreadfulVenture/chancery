@@ -1,0 +1,34 @@
+[project]
+name = "memory-store"
+version = "0.1.0"
+description = "Memory store: client daemon, MCP server, sync client, and hub"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp==2.3.0",
+    "starlette",
+    "uvicorn",
+    "fastembed",
+    "sqlite-vec",
+    "anyio",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-xdist",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["memory_store/tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"memory_store/consolidation/consolidation.py" = ["E501"]

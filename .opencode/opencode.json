@@ -1,0 +1,18 @@
+{
+  "references": {
+    "opencode": {
+      "repository": "https://github.com/anomalyco/opencode.git",
+      "branch": "dev",
+      "description": "Canonical reference for OpenCode default branch (v2)"
+    },
+    "opencode-v1": {
+      "repository": "https://github.com/anomalyco/opencode.git",
+      "branch": "v1",
+      "description": "OpenCode v1 Branch"
+    },
+    "thatch": "https://github.com/sysread/thatch.git",
+    "mnemosyne": "https://github.com/mnemosyne-oss/mnemosyne.git",
+    "hindsight": "https://github.com/vectorize-io/hindsight.git",
+    "compound-engineering": "https://github.com/EveryInc/compound-engineering-plugin"
+  }
+}

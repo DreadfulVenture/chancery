@@ -1,0 +1,136 @@
+{
+  "working_count": 4500,
+  "episodic_count": 490,
+  "seed_working": [
+    {
+      "id": "fork-01",
+      "content": "[USER] <chat-history-summary> Synthetic prior conversation one.</chat-history-summary>",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:01Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "fork-02",
+      "content": "[USER] <chat-history-summary> Synthetic prior conversation two.</chat-history-summary>",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:02Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "fork-03",
+      "content": "[USER] <chat-history-summary> Synthetic prior conversation three.</chat-history-summary>",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:03Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "fork-04",
+      "content": "[USER] <chat-history-summary> Synthetic prior conversation four.</chat-history-summary>",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:04Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "fork-05",
+      "content": "[USER] <chat-history-summary> Synthetic prior conversation five.</chat-history-summary>",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:05Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "fork-06",
+      "content": "[USER] <chat-history-summary> Synthetic prior conversation six.</chat-history-summary>",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:06Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "title-01",
+      "content": "[USER] Generate a title and a git branch name for a coding agent: synthetic task one.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:07Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "title-02",
+      "content": "[USER] Generate a title and a git branch name for a coding agent: synthetic task two.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:08Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "title-03",
+      "content": "[USER] Generate a title and a git branch name for a coding agent: synthetic task three.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:09Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "title-04",
+      "content": "[USER] Generate a title and a git branch name for a coding agent: synthetic task four.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:10Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "title-05",
+      "content": "[USER] Generate a title and a git branch name for a coding agent: synthetic task five.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:11Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "title-06",
+      "content": "[USER] Generate a title and a git branch name for a coding agent: synthetic task six.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:12Z",
+      "importance": 0.5,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    },
+    {
+      "id": "fragment-01",
+      "content": "[AGENT] The intermediate comparison is still incomplete.",
+      "source": "cursor:sample-repo:replay-session",
+      "timestamp": "2026-01-01T00:00:13Z",
+      "importance": 0.4,
+      "veracity": "unknown",
+      "author_id": null,
+      "author_type": null
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "director",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  }
+}

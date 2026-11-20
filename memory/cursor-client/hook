@@ -1,0 +1,8 @@
+#!/bin/sh
+# The command Cursor runs for every registered hook event. The hook JSON
+# arrives on stdin and hook.py dispatches on hook_event_name.
+#
+# System python, no dependency resolution: this runs on every prompt, and
+# anything that has to resolve an environment first is too slow to sit in
+# front of one. hook.py is stdlib-only for the same reason.
+exec /usr/bin/python3 "$(dirname "$0")/hook.py"
