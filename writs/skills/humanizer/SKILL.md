@@ -652,8 +652,9 @@ condition instead of an action.
 ## The base writing guidelines
 
 Below the 29 patterns sits the standard they exist on: `writs/instructions/writing.md`, the house writing source. It
-arrives as standing instructions wherever the memory-store daemon is deployed; this section carries what an invocation
-needs without it. Clearing the tells is the floor, and the finished text clears on the first read.
+loads from the repo tree — the OpenCode config's instructions entry and the Cursor rule pair both read it as a file;
+this section carries what an invocation needs without it. Clearing the tells is the floor, and the finished text clears
+on the first read.
 
 1. **Hidden characters and actions.** Passive voice erases the actor, a noun built from a verb erases the action, status
    verbs hide change, inanimate nouns take the actor's job, and the agent hides its own "I". Fix: character as subject,
@@ -818,7 +819,7 @@ Upstream's pattern 17, Title Case in Headings, is dropped and the ones after it 
 new. Pattern 13 gains the boundary between fragments that hide an actor and fragments that are merely short, and its
 Before/After pair is replaced, since upstream's "No configuration file needed" is the second kind. Pattern 13 also gains
 the "Worth Xing" recommendation and its before/after. The checklist and PERSONALITY AND SOUL are unchanged. The base
-writing guidelines section is local: the skill anchors its standard to the memory-store writing source
+writing guidelines section is local: the skill anchors its standard to the house writing source
 (writs/instructions/writing.md), assesses its three faults in the process, and carries its work-report shape.
 
 Key insight from Wikipedia: "LLMs use statistical algorithms to guess what should come next. The result tends toward the
