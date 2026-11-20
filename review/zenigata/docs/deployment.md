@@ -47,14 +47,20 @@ runs on a line before the ring stores it, so the page never carries a secret the
 voice only — the reviewer session's turns ride the session driver and are never captured. (7) the failed run's
 transcript view: a failed run whose journal record carried a retained session (PRJ-382's window) reads that session's
 turns live through the session driver — the same surface the sweep disposes with — and renders them in the failure cell,
-redacted and byte-capped at composition, each read bounded like the adapter probe. The panel's reach is a deliberate
-choice: the human page is the operator's post-mortem surface, open like `/metrics` and `/healthz`, and a failed run's
-diagnosis wants the session's own words beside the failure — the diff-bearing prompts and the reviewer's replies for
-exactly the failed runs whose sessions the retention window still holds. A session the driver reports not found reads as
-gone — the retention sweep being the usual hand, though the note does not attribute it ("the session is gone — the
-transcript is not available"); a read that failed for any other reason says that instead. The sweep's window is the
-transcript's whole retention — nothing new is stored anywhere, and a window-0 run (which tears its session down at
-settle) offers no transcript at all. The JSON keeps the shape it was pinned with, so none of the seven is in it.
+redacted and byte-capped at composition, each read bounded like the adapter probe. The composed view caches per session
+until the sweep disposes it — a failed run's session is frozen between settle and sweep, so a page view re-reads only
+what changed. The panel's reach is a deliberate choice: the human page is the operator's post-mortem surface, open like
+`/metrics` and `/healthz`, and a failed run's diagnosis wants the session's own words beside the failure — the
+diff-bearing prompts and the reviewer's replies for exactly the failed runs whose sessions the retention window still
+holds. The posture is worth naming plainly: the page carries no gate, so those prompts — which quote the reviewed
+repository's source, private repositories included — and the reviewer's replies are readable by anything that can reach
+the host, and the redaction they ride is the credentialed-URL and query-token machinery and nothing else. A deployment
+that cannot accept an open surface puts its own gate in front of the reverse proxy; the panel gains no gate of its own.
+A session the driver reports not found reads as gone — the retention sweep being the usual hand, though the note does
+not attribute it ("the session is gone — the transcript is not available"); a read that failed for any other reason says
+that instead. The sweep's window is the transcript's whole retention — nothing new is stored anywhere, and a window-0
+run (which tears its session down at settle) offers no transcript at all. The JSON keeps the shape it was pinned with,
+so none of the seven is in it.
 
 The surface has no write endpoints of its own and carries no secret — /metrics exposes durations and counters, and the
 status surface redacts at every projection (below); the endpoint is open like `/metrics` and `/healthz`.

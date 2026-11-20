@@ -15,6 +15,7 @@
  * retention is the sweep's window, untouched.
  */
 
+import { capUtf8 } from "./utf8-cap.js";
 import { redactSecrets } from "./redact.js";
 
 /** The ring holds at most this many lines; past it, the oldest drop. */
@@ -35,8 +36,9 @@ const lineBytes = (line: string): number => Buffer.byteLength(line, "utf8");
 
 /**
  * Cap one line to the byte bound, marker included. Cutting happens on
- * the UTF-8 bytes, so a multi-byte codepoint split at the boundary
- * decodes short — the stored line is then at or under the cap, never
+ * the UTF-8 bytes and walks back to a codepoint boundary (capUtf8), so
+ * a multi-byte codepoint split at the boundary is dropped rather than
+ * decoded short — the stored line is then at or under the cap, never
  * over it.
  */
 const capLine = (line: string): string => {
@@ -44,8 +46,7 @@ const capLine = (line: string): string => {
   if (lineBytes(line) <= room) {
     return line;
   }
-  const cut = Buffer.from(line, "utf8").subarray(0, room);
-  return cut.toString("utf8") + LOG_RING_TRUNCATION_MARKER;
+  return capUtf8(line, room) + LOG_RING_TRUNCATION_MARKER;
 };
 
 export class LogRing {

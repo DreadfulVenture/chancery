@@ -27,8 +27,12 @@ import {
   type ReviewRecord,
   type ReviewStartRecord,
 } from "../src/journal.js";
-import { REVIEW_SLOTS, TRANSCRIPT_TURN_MARKER } from "../src/server.js";
-import { composeTranscriptView, TRANSCRIPT_VIEW_CAP } from "../src/server.js";
+import {
+  composeTranscriptView,
+  REVIEW_SLOTS,
+  TRANSCRIPT_TURN_MARKER,
+  TRANSCRIPT_VIEW_CAP,
+} from "../src/server.js";
 import { StatusDb, statusDbPath } from "../src/status-db.js";
 import { LiveSessions } from "../src/status.js";
 import type { StatusData } from "../src/ui.js";
@@ -885,6 +889,14 @@ describe("the failed run's transcript view", () => {
       sweepNowMs: Date.now() + 100 * 24 * 60 * 60 * 1000,
     });
     await postReviewEvent(h);
+
+    // The first view composes the standing session's transcript and
+    // caches it; the sweep's disposal must invalidate that entry, or
+    // the second view would render the stale transcript instead of the
+    // gone note.
+    const before = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(before).toContain("reviewer session transcript");
+
     await h.handle.sweep();
     expect(h.sessions.disposed).toHaveLength(1);
 
@@ -911,14 +923,23 @@ describe("the failed run's transcript view", () => {
   });
 
   it("a cap cut can never strand a credential: the newest turn is redacted before it is capped", async () => {
-    // The raw turn places "https://user:" just inside a naive cap cut
-    // with the "@" just outside it, where neither redaction pattern can
-    // match — cap-first would ride the fragment onto the open page.
+    // The raw turn is padded so the cap's cut lands between
+    // "https://user:" and its "@": under cap-first the fragment carries
+    // the scheme and the user with no "@" behind them, and neither
+    // redaction pattern can match — the credential rides the open page.
+    // The real order redacts the full text first, so the cut lands in
+    // already-redacted text and the page carries only the host.
+    const room =
+      TRANSCRIPT_VIEW_CAP -
+      Buffer.byteLength(TRANSCRIPT_TURN_MARKER, "utf8") -
+      Buffer.byteLength("reviewer: ", "utf8");
+    // " https://user:" is 14 bytes: the separating space plus the
+    // scheme and user the cut keeps whole, the "@" just past it.
     const h = await harness({
       script: [
         "blind noise",
         "not json",
-        `${"y".repeat(65476)} https://user:secretpw@forge.invalid/x failed`,
+        `${"y".repeat(room - 14)} https://user:secretpw@forge.invalid/x failed`,
       ],
     });
     await postReviewEvent(h);
@@ -941,6 +962,66 @@ describe("the failed run's transcript view", () => {
     expect(transcriptBody).not.toContain("https://user");
     expect(transcriptBody).not.toContain("secretpw");
     expect(page).not.toContain("recorded no turns");
+  });
+
+  it("a newest turn capped mid-codepoint keeps the failure cell's transcript", async () => {
+    // The unfixed cap cut mid-codepoint and the decoder paid the dangle
+    // back as a 3-byte replacement character: the rendered line
+    // exceeded the view cap by a byte, the composer dropped the newest
+    // turn whole, and the cell reported a session that "recorded no
+    // turns" — one whose newest turn was merely huge. The boundary
+    // trim keeps the turn in place.
+    const room =
+      TRANSCRIPT_VIEW_CAP -
+      Buffer.byteLength(TRANSCRIPT_TURN_MARKER, "utf8") -
+      Buffer.byteLength("reviewer: ", "utf8");
+    const h = await harness({
+      script: [
+        "blind noise",
+        "not json",
+        `x${"日".repeat(Math.ceil((room - 1) / 3))}`,
+      ],
+    });
+    await postReviewEvent(h);
+
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(page).not.toContain("recorded no turns");
+    const transcriptBody =
+      /<pre class="transcript-body">([\s\S]*?)<\/pre>/.exec(page)?.[1] ?? "";
+    expect(transcriptBody).toContain(TRANSCRIPT_TURN_MARKER);
+    expect(transcriptBody).not.toContain("\uFFFD");
+  });
+
+  it("a second page view reuses the composed transcript: one driver read across the views", async () => {
+    // The composed view is cached per session until the sweep
+    // invalidates it: a failed run's session is frozen between settle
+    // and sweep, so the second render serves the entry instead of
+    // re-reading the driver.
+    let reads = 0;
+    const counting = (inner: SessionDriver): SessionDriver => ({
+      createSession: (directory, agent, opts) =>
+        inner.createSession(directory, agent, opts),
+      prompt: (sessionId, text, opts) => inner.prompt(sessionId, text, opts),
+      readOutput: (sessionId, opts) => inner.readOutput(sessionId, opts),
+      transcript: (sessionId, opts) => {
+        reads += 1;
+        return inner.transcript(sessionId, opts);
+      },
+      dispose: (sessionId) => inner.dispose(sessionId),
+    });
+    const h = await harness({
+      script: failingScript(),
+      wrapSessions: counting,
+    });
+    await postReviewEvent(h);
+
+    const first = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(first).toContain("reviewer session transcript");
+    expect(reads).toBe(1);
+
+    const second = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(second).toContain("reviewer session transcript");
+    expect(reads).toBe(1);
   });
 
   it("the transcript read's bound cancels the read instead of abandoning it", async () => {
@@ -980,6 +1061,34 @@ describe("the transcript view's cap math", () => {
     expect(Buffer.byteLength(view.text, "utf8")).toBe(TRANSCRIPT_VIEW_CAP);
     expect(view.text.startsWith("reviewer: ")).toBe(true);
     expect(view.text.endsWith(TRANSCRIPT_TURN_MARKER)).toBe(true);
+  });
+
+  it("an oversized newest turn cut mid-codepoint renders at or under the view cap", () => {
+    // The one-byte spacer shifts the three-byte codepoints so the cap's
+    // cut lands inside one. The unfixed cap paid the dangle back as a
+    // 3-byte replacement character — the rendered line exceeded the
+    // view cap, the composer dropped the newest turn whole, and the
+    // failure cell reported "recorded no turns" about a session whose
+    // newest turn was merely huge.
+    const room =
+      TRANSCRIPT_VIEW_CAP -
+      Buffer.byteLength(TRANSCRIPT_TURN_MARKER, "utf8") -
+      Buffer.byteLength("reviewer: ", "utf8");
+    const view = composeTranscriptView([
+      { role: "assistant", text: `x${"日".repeat(Math.ceil((room - 1) / 3))}` },
+    ]);
+    expect(view.state).toBe("found");
+    expect(view.truncated).toBe(false);
+    expect(view.text.length).toBeGreaterThan(0);
+    // The prefix is budgeted inside the cap and the boundary trim drops
+    // the partial codepoint: the rendered line totals at or under the
+    // view cap once, never over it.
+    expect(Buffer.byteLength(view.text, "utf8")).toBeLessThanOrEqual(
+      TRANSCRIPT_VIEW_CAP,
+    );
+    expect(view.text.startsWith("reviewer: ")).toBe(true);
+    expect(view.text.endsWith(TRANSCRIPT_TURN_MARKER)).toBe(true);
+    expect(view.text).not.toContain("\uFFFD");
   });
 
   it("older turns drop whole once the newest capped line fills the cap", () => {

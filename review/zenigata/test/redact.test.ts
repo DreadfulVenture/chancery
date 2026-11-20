@@ -88,14 +88,17 @@ describe("redactSecrets", () => {
 
   it("stays linear on a long run of matchable characters with no @ in it", () => {
     // The scheme-less pattern's regex form rescans such a run from every
-    // position — minutes on a 64KiB blob. A narration line can carry
-    // one (a base64 blob riding an error body), so the scan must not.
-    const blob = `zenigata: the body was ${"y".repeat(65_536)}`;
+    // position — quadratic. A narration line can carry one (a base64
+    // blob riding an error body), so the scan must not. The input is
+    // scaled so the two orders land far apart: the quadratic scan
+    // measured ~3.3s at 64 KiB, and its work squares with the input, so
+    // at 1 MiB it needs minutes; the linear scan is a millisecond at
+    // either size. The bound therefore asserts the order, not a speed —
+    // a slow runner clears it with the linear scan, and no runner
+    // clears it with the quadratic one.
+    const blob = `zenigata: the body was ${"y".repeat(1024 * 1024)}`;
     const started = Date.now();
     expect(redactSecrets(blob)).toBe(blob);
-    // 3.3s was the quadratic reading on this machine; the linear scan
-    // is a millisecond. The bound keeps the test honest without pinning
-    // a speed.
-    expect(Date.now() - started).toBeLessThan(500);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });

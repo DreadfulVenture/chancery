@@ -79,8 +79,16 @@ export function createSweeper(deps: {
   sessions: SessionDriver;
   logger: Logger;
   clock: Clock;
+  /**
+   * Called when a pass's session step reports the session gone —
+   * disposed here, or found already gone. The status page's transcript
+   * cache (server.ts) binds this: the disposal is the one moment the
+   * composed view can change, so the entry drops and the next page
+   * view re-reads.
+   */
+  onSessionGone?: (sessionId: string) => void;
 }): Sweeper {
-  const { config, sessions, logger, clock } = deps;
+  const { config, sessions, logger, clock, onSessionGone } = deps;
 
   const disposeSession = async (
     sessionId: string,
@@ -92,12 +100,14 @@ export function createSweeper(deps: {
       logger.info(
         `retention sweep: disposed the expired session ${sessionId} (${repo}#${pr})`,
       );
+      onSessionGone?.(sessionId);
       return "done";
     } catch (error) {
       if (isSessionAlreadyGone(error)) {
         logger.info(
           `retention sweep: session ${sessionId} (${repo}#${pr}) is already gone; skipping`,
         );
+        onSessionGone?.(sessionId);
         return "noop";
       }
       logger.error(

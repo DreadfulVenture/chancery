@@ -81,6 +81,7 @@ import type { MemoryGateway } from "./contracts/memory.js";
 import type { ForgeAdapter } from "./contracts/forge.js";
 import type { SessionDriver } from "./contracts/session.js";
 import type { SessionTurn } from "./contracts/session.js";
+import { capUtf8 } from "./utf8-cap.js";
 
 type ReviewRequestedEvent = Extract<ForgeEvent, { kind: "review_requested" }>;
 type ReplyEvent = Extract<ForgeEvent, { kind: "reply" }>;
@@ -133,8 +134,12 @@ const capTurnText = (text: string, prefix: string): string => {
   if (Buffer.byteLength(text, "utf8") <= room) {
     return text;
   }
-  const cut = Buffer.from(text, "utf8").subarray(0, room);
-  return cut.toString("utf8") + TRANSCRIPT_TURN_MARKER;
+  // The cut walks back to a codepoint boundary (capUtf8): a dangle the
+  // decoder paid back as a replacement character would inflate the
+  // rendered line past the view cap, and an over-cap line drops whole
+  // in the composer below — the newest turn would vanish from the view
+  // because it was merely huge.
+  return capUtf8(text, room) + TRANSCRIPT_TURN_MARKER;
 };
 
 /**
@@ -202,26 +207,62 @@ const readTranscriptView = async (
 };
 
 /**
- * The page's run rows, each failed row extended with its transcript
- * view: only failed runs carrying a retained session read one, and the
- * reads run in parallel, each bounded. Every other row renders exactly
- * as before. All of it is page-only render data — /status's pinned
- * shape gains nothing.
+ * The composed transcript views, cached per session. A failed run's
+ * session is frozen between settle and sweep — its turns cannot change —
+ * so composing the view again on every page view re-issues a live
+ * driver read per failed row in the window for a text that cannot
+ * change. Each entry keys on the session id and holds the view beside
+ * the row outcome it was read under, so a settlement that flips the
+ * projection row under the same session id (the retry policy's one
+ * re-run re-sets the row it re-ran) re-reads instead of serving a stale
+ * view. Two invalidations keep it honest: the sweeper drops the entry
+ * when its pass reports the session gone — the one moment the composed
+ * text can change, the view flipping to swept — and each render prunes
+ * entries whose session no row in the window carries anymore. Only the
+ * settled answers cache (found, swept): an unavailable read is a
+ * transient fact and stays uncached, so the next view retries it the
+ * way the uncached page always did. The reads still run in parallel,
+ * each bounded, and every row renders exactly as before — all of it is
+ * page-only render data, /status's pinned shape gains nothing.
  */
+interface TranscriptCacheEntry {
+  outcome: string;
+  view: TranscriptView;
+}
+
 const pageRunRows = async (
   rows: RunDraftsView[],
   sessions: SessionDriver,
-): Promise<RunDraftsView[]> =>
-  Promise.all(
-    rows.map(async (row) =>
-      row.failure === undefined || row.sessionId === undefined
-        ? row
-        : {
-            ...row,
-            transcript: await readTranscriptView(row.sessionId, sessions),
-          },
-    ),
+  cache: Map<string, TranscriptCacheEntry>,
+): Promise<RunDraftsView[]> => {
+  const rendered = await Promise.all(
+    rows.map(async (row) => {
+      if (row.failure === undefined || row.sessionId === undefined) {
+        return row;
+      }
+      const cached = cache.get(row.sessionId);
+      if (cached !== undefined && cached.outcome === row.outcome) {
+        return { ...row, transcript: cached.view };
+      }
+      const view = await readTranscriptView(row.sessionId, sessions);
+      if (view.state !== "unavailable") {
+        cache.set(row.sessionId, { outcome: row.outcome, view });
+      }
+      return { ...row, transcript: view };
+    }),
   );
+  // The runs window bounds the cache: an entry whose session no row in
+  // this render carries has left the window and drops here.
+  const windowSessions = new Set(
+    rows.flatMap((row) => (row.sessionId === undefined ? [] : [row.sessionId])),
+  );
+  for (const sessionId of cache.keys()) {
+    if (!windowSessions.has(sessionId)) {
+      cache.delete(sessionId);
+    }
+  }
+  return rendered;
+};
 
 /**
  * Whether the forge adapter answers at all: any HTTP response — even a
@@ -406,6 +447,11 @@ export async function startServer(
   // into the ring, redacted at capture, for the human page's log tail.
   const logRing = deps.logRing ?? new LogRing();
   const logger = narratingLogger(logRing, deps.logger ?? consoleLogger);
+  /**
+   * The composed transcript views the page's failed rows render from,
+   * cached per session until the sweep disposes it (see pageRunRows).
+   */
+  const transcriptCache = new Map<string, TranscriptCacheEntry>();
   const reviewPipeline = deps.runReview ?? runReview;
   const replyPipeline = deps.runReply ?? runReply;
   /** Process start; the status surface's uptime anchors on this moment. */
@@ -460,6 +506,13 @@ export async function startServer(
     sessions: deps.sessions,
     logger,
     clock: deps.sweepClock ?? systemClock,
+    // The transcript cache's invalidation hand: the sweep reporting a
+    // session gone is the one moment the composed view can change, so
+    // the entry drops and the next page view re-reads (the gone note
+    // lands instead of a stale transcript).
+    onSessionGone: (sessionId) => {
+      transcriptCache.delete(sessionId);
+    },
   });
   const bootSweep = sweeper.sweepOnce(bootLines).catch((error) => {
     // The per-record work above never throws; only the walk can. The
@@ -894,6 +947,7 @@ export async function startServer(
               await pageRunRows(
                 statusDb.recentRunsWithWallTime(),
                 deps.sessions,
+                transcriptCache,
               ),
               // The PR cells' links ride the same page-only rule: the
               // forge's base URL renders the links and the re-request

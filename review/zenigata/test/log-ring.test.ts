@@ -85,6 +85,26 @@ describe("the narration ring", () => {
     );
   });
 
+  it("caps a line whose cut lands mid-codepoint at the boundary, under the byte cap", () => {
+    const ring = new LogRing();
+    // room = LIMIT - marker; the one-byte spacer shifts the three-byte
+    // codepoints so the cut lands inside one. The unfixed cap paid the
+    // dangle back as a 3-byte replacement character: the stored line
+    // exceeded its own cap, and the eviction loop dropped it — the
+    // store died empty.
+    const room = LOG_RING_BYTE_LIMIT - lineBytes(LOG_RING_TRUNCATION_MARKER);
+    ring.push(`x${"日".repeat(Math.ceil((room - 1) / 3))}`);
+    const tail = ring.tail();
+    expect(tail).toHaveLength(1);
+    expect(lineBytes(tail[0] as string)).toBeLessThanOrEqual(
+      LOG_RING_BYTE_LIMIT,
+    );
+    // The boundary trim dropped the partial codepoint: no replacement
+    // character rode the cut.
+    expect(tail[0]).not.toContain("\uFFFD");
+    expect(tail[0]?.endsWith(LOG_RING_TRUNCATION_MARKER)).toBe(true);
+  });
+
   it("redacts a credentialed URL at capture, before storage", () => {
     const ring = new LogRing();
     ring.push(
