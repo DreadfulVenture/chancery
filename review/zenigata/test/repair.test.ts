@@ -21,7 +21,7 @@ import {
 /**
  * A valid JSON source text: the body carries literal braces and an
  * American-style phrase close, so its JSON text contains the valid
- * `,\"` bytes the model transposed in worktree-manager #29.
+ * `,\"` bytes the model transposed in bedlam #29.
  */
 const INTENDED =
   '{"verdict": "REQUEST_CHANGES", "body": "the map call: {\\"k\\": v} then \\"the close,\\" note", "comments": []}';
