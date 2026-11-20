@@ -2,8 +2,8 @@
 
 - **Status**: Draft
 - **Provenance**:
-  - Authored: the chancery director, at Nik's request to generalize the watcher design
-  - Edited: Nik (asked for a readability rewrite; asked that this record be an ADR, not an implementation plan;
+  - Authored: the chancery director, at the operator's request to generalize the watcher design
+  - Edited: the operator (asked for a readability rewrite; asked that this record be an ADR, not an implementation plan;
     2026-11-19)
   - Approved: none
 
