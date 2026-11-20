@@ -654,20 +654,20 @@ condition instead of an action.
 
 **Signs to watch:** sentences carrying chains of clauses on colons and semicolons:
 
- - a colon announcing a verdict
- - semicolons stringing coordinate clauses into one breath
- - a paragraph where nothing ends on a plain period until the last
+- a colon announcing a verdict
+- semicolons stringing coordinate clauses into one breath
+- a paragraph where nothing ends on a plain period until the last
 
 One single construction doesn't trigger this, the density of the chained clauses in close proximity is the signal.
 
-**Problem:** a model assembles each sentence with announced and chained clauses. A person would write these as
-separate sentences with uneven lengths and emphasis points.
+**Problem:** a model assembles each sentence with announced and chained clauses. A person would write these as separate
+sentences with uneven lengths and emphasis points.
 
-**The test:** 
+**The test:**
 
-Read the paragraph aloud and count the chains. When every sentence carries two or more joined clauses, split the
-worst of them into sentences, and stop there. A paragraph containing only uniform short sentences is an overcorrection,
-and as per the rhythm rule in PERSONALITY AND SOUL, paragraphs must contain varied length sentences.
+Read the paragraph aloud and count the chains. When every sentence carries two or more joined clauses, split the worst
+of them into sentences, and stop there. A paragraph containing only uniform short sentences is an overcorrection, and as
+per the rhythm rule in PERSONALITY AND SOUL, paragraphs must contain varied length sentences.
 
 **Before** (a dense review of queue-runner, an invented daemon that executes jobs from a shared queue):
 
@@ -678,8 +678,8 @@ and as per the rhythm rule in PERSONALITY AND SOUL, paragraphs must contain vari
 
 **After** (the same review, the chained clauses as separate sentences):
 
-> The runner will execute whatever lands in the queue, so the queue's write permission should be secured. Today
-> it requires a deploy key, which would need to be stolen to exploit it. This loosens that restriction.
+> The runner will execute whatever lands in the queue, so the queue's write permission should be secured. Today it
+> requires a deploy key, which would need to be stolen to exploit it. This loosens that restriction.
 
 ---
 
