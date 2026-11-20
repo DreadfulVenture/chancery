@@ -16,6 +16,12 @@ permission:
   opencode_worktree_create: allow
   opencode_worktree_list: allow
   opencode_worktree_remove: deny
+  director_dispatch: allow
+  director_steer: allow
+  manifest_write: allow
+  manifest_drop: allow
+  worktree_add: allow
+  worktree_remove: allow
   bash:
     "*": ask
     "git status*": allow

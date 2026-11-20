@@ -738,6 +738,87 @@ in
         default = "${home}/.config/opencode/commands";
         description = "Directory OpenCode scans for global commands, one `<name>.md` per file.";
       };
+
+      # The deny-by-default floor for the director tooling, as data for the
+      # deployment that owns the opencode config. Rules are the permission
+      # ruleset's shape - { action, resource, effect }, last match wins, both
+      # sides wildcard-matched - and a tool-level deny names the tool as the
+      # action with "*" as the resource, which is how the map shape in an
+      # agent or config file migrates too. The floor denies the six mutating
+      # director tools and the question tool to every agent; the director
+      # agent's own definition re-allows the six its job needs, and an
+      # agent's rules compose after the config's, so the allow wins. The
+      # list and that re-allow live in this repo and move in lockstep: a
+      # rule here without its counterpart allow in
+      # coordinate/director/agent/director.md strips a tool from the
+      # director agent, so both halves of a pair ride the same change.
+      permissionRules = mkOption {
+        type = types.listOf (
+          types.submodule {
+            options = {
+              action = mkOption {
+                type = types.str;
+                description = "The action glob the rule matches; a tool name for tool-level rules.";
+              };
+              resource = mkOption {
+                type = types.str;
+                description = "The resource glob the rule matches; \"*\" for a whole-tool rule.";
+              };
+              effect = mkOption {
+                type = types.enum [
+                  "allow"
+                  "deny"
+                  "ask"
+                ];
+                description = "What happens when the rule matches.";
+              };
+            };
+          }
+        );
+        default = [
+          {
+            action = "director_dispatch";
+            resource = "*";
+            effect = "deny";
+          }
+          {
+            action = "director_steer";
+            resource = "*";
+            effect = "deny";
+          }
+          {
+            action = "manifest_write";
+            resource = "*";
+            effect = "deny";
+          }
+          {
+            action = "manifest_drop";
+            resource = "*";
+            effect = "deny";
+          }
+          {
+            action = "worktree_add";
+            resource = "*";
+            effect = "deny";
+          }
+          {
+            action = "worktree_remove";
+            resource = "*";
+            effect = "deny";
+          }
+          {
+            action = "question";
+            resource = "*";
+            effect = "deny";
+          }
+        ];
+        description = ''
+          Permission rules the deployment's opencode config is built from -
+          the deny-by-default floor for the director tooling. Rendering them
+          into the config's permission ruleset belongs to the deployment
+          that owns that config; nothing here writes it.
+        '';
+      };
     };
   };
 
