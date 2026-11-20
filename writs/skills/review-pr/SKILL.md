@@ -490,11 +490,11 @@ the plan path last, as the absolute path `echo` printed, on its own line. The li
 have it -- a Slack or Linear review link resolves to the PR only through a lookup you did and he didn't.
 
 **Humanize before you show it.** The user cannot mark up text he cannot read, so the draft he first sees has already
-been through the `humanizer` skill. Before the chat message goes out, read `/humanizer` and run its full process on the
-review body and every comment payload, including the closing "what makes this obviously AI-generated?" audit and the
-revision after it, then write the result into the plan file. Keeping the patterns in mind or recalling them from memory
-does not count as running it. Put the assessment and the audit in the chat message, briefly, so the user can see the
-pass happened instead of having to ask.
+been through the `humanizer` skill. Before the chat message goes out, load `humanizer-report` and run its full process
+on the review body and every comment payload, including the closing "what makes this obviously AI-generated?" audit and
+the revision after it, then write the result into the plan file. Keeping the patterns in mind or recalling them from
+memory does not count as running it. Put the assessment and the audit in the chat message, briefly, so the user can see
+the pass happened instead of having to ask.
 
 Chat is also where the **product impact** goes -- what the change reaches and where a human would want to look, since
 the user reads it to orient their own review pass rather than to refine it. Name the surface area that moves (which

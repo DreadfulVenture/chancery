@@ -191,8 +191,8 @@ not belong.
 - Keep genuine verification caveats. "We did not re-check that finding ourselves" and "we did not narrow it further" are
   information, not self-defense.
 
-Then run `humanizer` over the prose. Leave the entry list, tables, and section structure alone; parallel structure is
-what makes a log scannable.
+Then run `humanizer-report` over the prose. Leave the entry list, tables, and section structure alone; parallel
+structure is what makes a log scannable.
 
 ### 8. File it
 

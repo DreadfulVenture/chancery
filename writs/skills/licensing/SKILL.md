@@ -62,7 +62,7 @@ In order:
 4. State the fence honestly: what in the source is platform-specific and what is portable here. Take the map's wording
    as the pattern — comment and row name the lifted piece and the chancery-owned rest in the same breath ("the
    dead-target refusal's opening clause …; the rest is ours"). A prose port states the same fence in place, as the
-   humanizer skill's Attribution section does: upstream named, license preserved, local divergence listed.
+   humanizer's NOTICE.md does: upstream named, license preserved, local divergence listed.
 
 ## Before committing
 

@@ -102,10 +102,10 @@ spec; on the archetype path the file just read is.
 ### 5. Humanize and judge
 
 Filing an issue publishes under the user's name, so the text goes through the outbound process in full: draft, then
-actually invoke `humanizer` and run its whole process on this exact text including the closing audit and the revision
-after it, then compose the finished text as it will appear. Whether the ticket is worth filing at all is the agent's own
-judgment, made on the composed text. The removed wait is not a license to file more — never file to fill a queue, and
-never let the absence of the wait pull a marginal ticket out.
+actually invoke `humanizer-report` and run its whole process on this exact text including the closing audit and the
+revision after it, then compose the finished text as it will appear. Whether the ticket is worth filing at all is the
+agent's own judgment, made on the composed text. The removed wait is not a license to file more — never file to fill a
+queue, and never let the absence of the wait pull a marginal ticket out.
 
 **Prefix the payload.** `Agent-generated:`, a blank line, then the content — the description is published text just like
 a PR review body, and the prefix marks agent-written text wherever it posts, so a ticket filed from work the agent did

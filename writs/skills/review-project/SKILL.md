@@ -142,9 +142,9 @@ The file is `<project-hyphenated>-project-review-<hex>.md`, with `isProject: tru
 Before quoting, re-pull the description and the milestones from the tracker so the quotes stay verbatim. The lens states
 the calls.
 
-**Humanize before writing.** Actually invoke the `humanizer` skill and run its full process on the payload, including
-the closing "what makes this obviously AI-generated?" audit and the revision after it. Recalling the patterns does not
-count. The prose that lands in the file is the humanized version.
+**Humanize before writing.** Actually invoke the `humanizer-report` skill and run its full process on the payload,
+including the closing "what makes this obviously AI-generated?" audit and the revision after it. Recalling the patterns
+does not count. The prose that lands in the file is the humanized version.
 
 **Prefix the payload.** `Agent-generated:`, a blank line, then the content. Include it in the draft shown for
 confirmation, not just at post time.

@@ -43,8 +43,6 @@ The text usually arrives one of three ways:
 3. **Voice calibration sample** — user provides an additional sample of their own writing (inline or by file path) and
    asks you to match it. Read the sample first, then rewrite. See the Voice Calibration section below.
 
-Always show the rewrite to the user. For file edits, show a diff or the changed section — don't silently overwrite.
-
 ## Your task
 
 Everything this skill asks for is a condition the finished text should meet, not a change you owe the text. Where the
@@ -799,23 +797,11 @@ Assess against all of it the way you check the patterns: state what fires and th
    cycling (11). Reach for a natural-sounding connector and you pull in "actually", "additionally" and the rest of the
    pattern 7 list. Give a fragment a subject and you animate the nearest noun (29). Revert any edit that trades one
    pattern for another.
-8. Present a draft humanized version with the citation against each change.
-9. Prompt yourself: "What makes the below so obviously AI generated?"
-10. Answer briefly with the remaining tells, or "nothing".
-11. If there were tells, prompt yourself: "Now make it not obviously AI generated," and revise.
-12. Present the final version.
-13. If the text came from a file, apply the edit — targeted per section, or a full rewrite — and show the user what
-    changed.
-
-## Output Format
-
-Provide:
-
-1. The assessment: what fails, and where. If nothing fails, say so and stop here.
-2. Draft rewrite, with a citation against each change
-3. "What makes the below so obviously AI generated?" (brief bullets, or "nothing")
-4. Final rewrite
-5. A brief summary of changes made (optional, if helpful)
+8. Apply the edits - targeted per section when the text lives in a file, or a full rewrite; the pass ends with the edits
+   landed.
+9. Run the anti-AI question on the result ("What makes the below so obviously AI generated?"), answer briefly, and
+   revise once if there are tells. No presentation: the operator asked for the text to be fixed, not to adjudicate the
+   edits.
 
 ## Full Example
 
