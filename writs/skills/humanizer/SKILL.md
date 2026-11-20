@@ -4,8 +4,7 @@ description:
   Strip AI-isms from text and rewrite with a natural human voice. Use when the user asks to humanize, de-AI, de-slop, or
   un-ChatGPT a piece of text; rewrite a draft (blog post, essay, PR description, docs, memo, email, tweet, resume
   bullet) so it does not sound LLM-generated; match their voice in writing they are producing; or review text for AI
-  tells before publishing. Based on Wikipedia's "Signs of AI writing" guide and the base writing guidelines
-  (writs/instructions/writing.md in the chancery repo).
+  tells before publishing. Anchored to the house writing source (writs/instructions/writing.md in the chancery repo).
 version: 2.5.1
 author: Siqi Chen (@blader, https://github.com/blader/humanizer)
 license: MIT
@@ -13,9 +12,9 @@ license: MIT
 
 # Humanizer: Remove AI Writing Patterns
 
-Identify and remove signs of AI-generated text to make writing sound natural and human. Based on Wikipedia's "Signs of
-AI writing" guide (maintained by WikiProject AI Cleanup), derived from observations of thousands of AI-generated text
-instances.
+Identify and remove signs of AI-generated text to make writing sound natural and human. The patterns below come from a
+body of observation documented in the file's NOTICE.md; the house writing source (writs/instructions/writing.md) sets
+the standard this skill works to.
 
 **Key insight:** LLMs use statistical algorithms to guess what should come next. The result tends toward the most
 statistically likely completion, which is how the telltale patterns below get baked in.
@@ -53,10 +52,12 @@ text already meets it, there is nothing to do and you leave it alone.
 
 When given text to humanize:
 
-1. **Assess before you change anything** — go through the 29 patterns below, the checklist in the Process section, and
+1. **Assess before you change anything** — go through the 30 patterns below, the checklist in the Process section, and
    the three faults in the base writing guidelines section, and write down which ones the text fails, and where.
 2. **If nothing fails, say so and stop** — name what you checked and report that the text came back clean. That is a
-   result. It is not a sign you failed to look hard enough.
+   result. It is not a sign you failed to look hard enough. One read stands above the rule check: before calling text
+   clean, apply pattern 30's test (read it aloud; count the chained clauses), because the rules are the floor and a
+   paragraph can pass every one of them and still fail the read.
 3. **Act only on what failed, and cite it** — every edit names the pattern number or checklist item it fixes. An edit
    you cannot attach to something in the assessment does not get made, however much better it sounds. Shorter, punchier
    and plainer synonym are not items on any list here.
@@ -649,9 +650,42 @@ condition instead of an action.
 
 ---
 
+### 30. Clause Density
+
+**Signs to watch:** sentences carrying chains of clauses on colons and semicolons:
+
+ - a colon announcing a verdict
+ - semicolons stringing coordinate clauses into one breath
+ - a paragraph where nothing ends on a plain period until the last
+
+One single construction doesn't trigger this, the density of the chained clauses in close proximity is the signal.
+
+**Problem:** a model assembles each sentence with announced and chained clauses. A person would write these as
+separate sentences with uneven lengths and emphasis points.
+
+**The test:** 
+
+Read the paragraph aloud and count the chains. When every sentence carries two or more joined clauses, split the
+worst of them into sentences, and stop there. A paragraph containing only uniform short sentences is an overcorrection,
+and as per the rhythm rule in PERSONALITY AND SOUL, paragraphs must contain varied length sentences.
+
+**Before** (a dense review of queue-runner, an invented daemon that executes jobs from a shared queue):
+
+> The design keeps trusting the submitter: the runner executes whatever lands in the queue. The failure is structural,
+> not incidental: the submitted script runs as chosen; the run record carries a submitter-supplied name; the
+> notifications fire on run state. Today the same forgery needs a stolen deploy key; after the change, it needs only
+> queue access: the queue's write bit is the whole credential.
+
+**After** (the same review, the chained clauses as separate sentences):
+
+> The runner will execute whatever lands in the queue, so the queue's write permission should be secured. Today
+> it requires a deploy key, which would need to be stolen to exploit it. This loosens that restriction.
+
+---
+
 ## The base writing guidelines
 
-Below the 29 patterns sits the standard they exist on: `writs/instructions/writing.md`, the house writing source. It
+Below the 30 patterns sits the standard they exist on: `writs/instructions/writing.md`, the house writing source. It
 loads from the repo tree — the OpenCode config's instructions entry and the Cursor rule pair both read it as a file;
 this section carries what an invocation needs without it. Clearing the tells is the floor, and the finished text clears
 on the first read.
@@ -673,7 +707,7 @@ Assess against all of it the way you check the patterns: name what fires and the
 
 1. Read the input text carefully, loading the file first if that's where it lives.
 2. Decide whether it is a document of record under CLAIM PRESERVATION, and say which.
-3. Assess it against the 29 patterns above and the three faults in the base writing guidelines section. Write down what
+3. Assess it against the 30 patterns above and the three faults in the base writing guidelines section. Write down what
    fires and the sentence it fires on.
 4. Assess it against this checklist, the same way. Each line is a property the text either already has or does not:
    - Sounds natural when read aloud
@@ -799,28 +833,3 @@ Provide:
 - Removed filler phrases and persuasive framing ("In order to", "At its core")
 - Removed generic positive conclusion ("the future looks bright", "exciting times lie ahead")
 - Made the voice more personal and less "assembled" (varied rhythm, fewer placeholders)
-
-## Attribution
-
-This skill is ported from [blader/humanizer](https://github.com/blader/humanizer) (MIT licensed), which is itself based
-on [Wikipedia: Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing), maintained by
-WikiProject AI Cleanup. The patterns documented there come from observations of thousands of instances of AI-generated
-text on Wikipedia.
-
-Original author: Siqi Chen ([@blader](https://github.com/blader)). Original repo: https://github.com/blader/humanizer
-(version 2.5.1). The patterns, personality/soul section, and full worked example are preserved verbatim from the source,
-except as noted below. The Hermes Agent port's tool references in the "How to use it" and "Process" sections
-(`read_file` / `patch` / `write_file`) are gone, since the skill runs on hosts that name those tools differently. MIT
-license preserved.
-
-Local divergence from upstream: the process assesses the text against the patterns and the checklist before changing
-anything, stops there when nothing fails, and requires each edit to cite what it fixes. CLAIM PRESERVATION is new.
-Upstream's pattern 17, Title Case in Headings, is dropped and the ones after it renumbered. Pattern 29, False Actors, is
-new. Pattern 13 gains the boundary between fragments that hide an actor and fragments that are merely short, and its
-Before/After pair is replaced, since upstream's "No configuration file needed" is the second kind. Pattern 13 also gains
-the "Worth Xing" recommendation and its before/after. The checklist and PERSONALITY AND SOUL are unchanged. The base
-writing guidelines section is local: the skill anchors its standard to the house writing source
-(writs/instructions/writing.md), assesses its three faults in the process, and carries its work-report shape.
-
-Key insight from Wikipedia: "LLMs use statistical algorithms to guess what should come next. The result tends toward the
-most statistically likely result that applies to the widest variety of cases."
