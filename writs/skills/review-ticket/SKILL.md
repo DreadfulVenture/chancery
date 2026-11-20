@@ -1,10 +1,11 @@
 ---
 name: review-ticket
 description: >-
-  Review a Linear or Jira ticket as a buildable spec before anyone writes the code: extract the claims it makes about
-  the tree, verify each one against main, trace the blast radius of the code it touches, and land a single markup-able
-  review in a plan file. Use when given a ticket URL or identifier and asked to review, evaluate, or sanity-check it, or
-  when the user runs /review-ticket.
+  Review a ticket as a buildable spec before anyone writes the code: extract the claims it makes about the tree, verify
+  each one against main, trace the blast radius of the code it touches, and land a single markup-able review in a plan
+  file. Tracker-agnostic: load the lens skill for the tracker at hand alongside this skill (the Linear and Jira lenses
+  are the ones written so far). Use when given a ticket URL or identifier and asked to review, evaluate, or sanity-check
+  it, or when the user runs /review-ticket.
 ---
 
 # Review ticket
@@ -17,8 +18,8 @@ first only to know what to go check.
 
 ## Inputs
 
-A Linear URL, a bare identifier like `ABC-212`, or a Jira link. Fetch a Linear ticket with the MCP `get_issue` tool
-(`includeRelations: true`); use the Atlassian tools for Jira.
+A tracker URL or a bare identifier like `ABC-212`. The lens for the ticket's tracker states the fetch: which tool reads
+the ticket, with which options, and what comes back with it.
 
 ## Workflow
 
@@ -38,8 +39,8 @@ A Linear URL, a bare identifier like `ABC-212`, or a Jira link. Fetch a Linear t
 
 ### 0. Resolve the ticket and the repo
 
-The repo is not in the ticket. A project name in the ticket usually implies the repo. A GitHub PR attachment, on the
-rare ticket that has one, names the repo outright. Ask if neither settles it.
+The repo is not in the ticket. A project name in the ticket usually implies the repo. A PR attachment, on the rare
+ticket that has one, names the repo outright. Ask if neither settles it.
 
 Verification only reads `main`, so work in the base clone. No worktree needed.
 
@@ -200,7 +201,7 @@ todos:
     content: Apply markup on the review; re-humanize any text that moves
     status: pending
   - id: post
-    content: After explicit go-ahead on the verbatim text, post the comment
+    content: After explicit go-ahead on the verbatim text, post the review
     status: pending
 isProject: false
 ---
@@ -209,11 +210,12 @@ isProject: false
 The file holds the comment payload and nothing else. Everything written for the user's own understanding goes in chat.
 Nothing about how the review went goes here; that has its own file, see step 10.
 
-**One comment, not many.** Linear and Jira have no inline comments on a description, so the whole review is a single
-payload in a single fenced block. Anchor each finding by quoting the author's wording verbatim under a header naming the
-section it sits in, so the reader can tell what is being objected to without a line number. Re-fetch the description
-before writing those quotes rather than reconstructing them from memory, because a misquote reads as a misunderstanding
-of the spec. Lead with the findings that would change the design.
+**One comment, not many.** A tracker's discussion lives as comments beside the ticket, not inline on the description, so
+there is no line number to anchor to: the whole review is a single payload in a single fenced block. Anchor each finding
+by quoting the author's wording verbatim under a header naming the section it sits in, so the reader can tell what is
+being objected to without a line number. Re-fetch the description before writing those quotes rather than reconstructing
+them from memory - the lens states the re-pull - because a misquote reads as a misunderstanding of the spec. Lead with
+the findings that would change the design.
 
 **No verdict.** This is feedback on a ticket, not a gate. There is nothing to approve and nothing to reject, and
 borrowing `APPROVE` or `REQUEST CHANGES` from a PR review imports a ceremony the tracker does not have. Open with what
@@ -273,9 +275,11 @@ these?" wants information, while "is anyone arguing it is the same?" wants a sec
 
 ### 9. Post on approval
 
-Confirm the verbatim text, then post what the fenced block contains, byte for byte. On Cursor, leave plan mode first;
-elsewhere, ask the user to switch out of it if posting is blocked. Writing the plan file is not a request to review it,
-and approving the plan is not approval to send. Nothing about the review process comes up before this.
+Post the review where the ask landed, as the tracker's comment on the ticket. A review is a document, and on a ticket
+the document's home is the ticket's discussion; the lens carries the proven mechanics and the known traps for its
+tracker. Confirm the verbatim text, then post what the fenced block contains, byte for byte. On Cursor, leave plan mode
+first; elsewhere, ask the user to switch out of it if posting is blocked. Writing the plan file is not a request to
+review it, and approving the plan is not approval to send. Nothing about the review process comes up before this.
 
 ### 10. Capture what the corrections taught
 
@@ -316,3 +320,17 @@ something sharper than either. A skill gaining a bullet per correction is unread
 
 **One worked example per rule.** Examples are what make these actionable, so keep the most vivid and swap rather than
 append when a better one arrives. Rules get more general as evidence accumulates, not longer.
+
+## Lenses
+
+The workflow is tracker-agnostic: it speaks of the ticket, its claims, its touch points, and its discussion, and never
+names a product. The tracker-specific instructions live in lens skills - one skill per tracker, loaded by its ID through
+the skill tool:
+
+- `review-ticket-linear` - the ticket lives in Linear.
+- `review-ticket-jira` - the ticket lives in Jira.
+
+Load the lens for the tracker at hand alongside this skill, and run the workflow with the lens's deltas applied. Where a
+lens and this workflow disagree, the lens wins on its own subject matter: the calls to make, the input forms the tracker
+accepts, and how the review is delivered there. A tracker with no lens yet runs the workflow plain, naming its own tools
+as you go - write the lens down afterward, so the next run starts from it.
