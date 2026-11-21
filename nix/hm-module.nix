@@ -42,13 +42,10 @@ let
   pluginPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.memory-store-plugin;
   assetsPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.memory-store-opencode;
   # The writs' reminder plugins ship as flat scanned-plugin files, one
-  # package each; the director ships as one plugin folder the module links
-  # whole into the scanned plugins directory — the plugin registers its
-  # agent, skills, and commands at load, and its agent definition rides
-  # that package (PRJ-453, since the folder shape).
+  # package each. The director is its own product with its own module
+  # (coordinate/director/module.nix) and links nothing from here.
   planReminderPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.plan-reminder;
   discoveryReminderPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.discovery-reminder;
-  directorPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.director;
   # The wake CLI is its own product surface (PRJ-383 review 189), not the
   # memory plugin's, so the bin rides its own package onto PATH.
   ocWakePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.oc-wake;
@@ -743,87 +740,6 @@ in
         default = "${home}/.config/opencode/commands";
         description = "Directory OpenCode scans for global commands, one `<name>.md` per file.";
       };
-
-      # The deny-by-default floor for the director tooling, as data for the
-      # deployment that owns the opencode config. Rules are the permission
-      # ruleset's shape - { action, resource, effect }, last match wins, both
-      # sides wildcard-matched - and a tool-level deny names the tool as the
-      # action with "*" as the resource, which is how the map shape in an
-      # agent or config file migrates too. The floor denies the six mutating
-      # director tools and the question tool to every agent; the director
-      # agent's own definition re-allows the six its job needs, and an
-      # agent's rules compose after the config's, so the allow wins. The
-      # list and that re-allow live in this repo and move in lockstep: a
-      # rule here without its counterpart allow in
-      # coordinate/director/agent/director.md strips a tool from the
-      # director agent, so both halves of a pair ride the same change.
-      permissionRules = mkOption {
-        type = types.listOf (
-          types.submodule {
-            options = {
-              action = mkOption {
-                type = types.str;
-                description = "The action glob the rule matches; a tool name for tool-level rules.";
-              };
-              resource = mkOption {
-                type = types.str;
-                description = "The resource glob the rule matches; \"*\" for a whole-tool rule.";
-              };
-              effect = mkOption {
-                type = types.enum [
-                  "allow"
-                  "deny"
-                  "ask"
-                ];
-                description = "What happens when the rule matches.";
-              };
-            };
-          }
-        );
-        default = [
-          {
-            action = "director_dispatch";
-            resource = "*";
-            effect = "deny";
-          }
-          {
-            action = "director_steer";
-            resource = "*";
-            effect = "deny";
-          }
-          {
-            action = "manifest_write";
-            resource = "*";
-            effect = "deny";
-          }
-          {
-            action = "manifest_drop";
-            resource = "*";
-            effect = "deny";
-          }
-          {
-            action = "worktree_add";
-            resource = "*";
-            effect = "deny";
-          }
-          {
-            action = "worktree_remove";
-            resource = "*";
-            effect = "deny";
-          }
-          {
-            action = "question";
-            resource = "*";
-            effect = "deny";
-          }
-        ];
-        description = ''
-          Permission rules the deployment's opencode config is built from -
-          the deny-by-default floor for the director tooling. Rendering them
-          into the config's permission ruleset belongs to the deployment
-          that owns that config; nothing here writes it.
-        '';
-      };
     };
   };
 
@@ -834,6 +750,24 @@ in
   # value from it is not.
   config = mkIf cfg.enable (
     lib.mkMerge [
+      # The director plugin stopped installing with the OpenCode client: it
+      # has its own module now (homeManagerModules.director, the
+      # services.director option tree). A host that pulls this flake
+      # without importing the new module loses the director agent, the
+      # skills, and the commands in new sessions, and nothing else says
+      # why, so the warning names the switch at the next rebuild. A host
+      # that imports the module deliberately turns the warning off with
+      # the option itself.
+      (mkIf (cfg.opencode.enable && (config.services.director or null) == null) {
+        warnings = [
+          ''
+            The director plugin installs through services.director now
+            (homeManagerModules.director). Import that module and set
+            services.director.enable = true, or new OpenCode sessions
+            lose the director agent, skills, and commands.
+          ''
+        ];
+      })
       (mkIf isDarwin {
         # The plist is recorded in the generation so that whoever installs the
         # module can see, by diffing one generation against the next, that the
@@ -927,22 +861,6 @@ in
                 "${lib.removePrefix "${home}/" cfg.rulesDir}/delivery.md".source =
                   ../writs/instructions/delivery.md;
               }
-              //
-                # The director is one plugin folder: its package is the
-                # artifact, linked whole into the scanned plugins directory.
-                # The plugin registers its agent, skills, and commands at
-                # load, so no per-file links ride the deployment, and the
-                # package.json at the folder root makes OpenCode load it
-                # through its exports like a published package. The folder
-                # is a watched config root, so a rebuild is picked up the
-                # way the other scanned plugins are; a running session keeps
-                # the version it loaded. Settings ride an object-form
-                # `plugins` entry naming this exact path, spelled as it
-                # sits on disk — the director package's README carries the
-                # rule and why.
-                {
-                  "${lib.removePrefix "${home}/" cfg.opencode.pluginDir}/director".source = directorPackage;
-                }
               //
                 fileLinks cfg.opencode.pluginDir ../memory/opencode-client pluginPackage "share/opencode/plugins"
                   [

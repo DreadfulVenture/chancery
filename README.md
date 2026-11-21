@@ -223,11 +223,13 @@ Without the option the watcher disables itself and logs how to set it. It must n
 `plugins/` directory, or it loads twice.
 
 The other non-memory plugins load the same two ways. The reminders ride the scanned plugins directory like the memory
-plugin — `plan-reminder` and `discovery-reminder` ship as flat files the module links out of their packages — and the
-director ships as one plugin folder the module links whole into the scanned plugins directory. The plugin registers its
-agent, skills, and commands at load, so no per-file links ride the deployment; settings ride an object-form `plugins`
-entry naming that linked directory, spelled exactly as it sits on disk (the directory's own README carries the rule and
-why).
+plugin — `plan-reminder` and `discovery-reminder` ship as flat files the module links out of their packages. The
+director is its own product with its own module: `homeManagerModules.director` exposes `services.director.enable` (and
+`package`, `pluginDir`, and the `permissionRules` floor), installs with no memory dependency at all, and links the built
+plugin folder whole into the scanned plugins directory — the plugin registers its agent, skills, and commands at load,
+so no per-file links ride the deployment; settings ride an object-form `plugins` entry naming that linked directory,
+spelled exactly as it sits on disk (the directory's own README carries the rule and why). The floor's permission rules
+render from `services.director.permissionRules`.
 
 ### Running the daemon as a system service (hosts without home-manager)
 

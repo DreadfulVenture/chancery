@@ -32,6 +32,11 @@
         # reimplementing the wiring against this repo's layout.
         homeManagerModules.default = import ./nix/hm-module.nix { inherit self; };
 
+        # The director is its own product with its own module. The plugin
+        # doesn't use the daemon, so a host imports it independently, and
+        # the two deployments stay decoupled.
+        homeManagerModules.director = import ./coordinate/director/module.nix { inherit self; };
+
         # The Zenigata review bot's NixOS module.
         nixosModules.zenigata = import ./nix/zenigata-module.nix;
 
@@ -398,6 +403,10 @@
                 # that perSystem is still producing, and the evaluation loops.
                 modules = [
                   (import ./nix/hm-module.nix { inherit self; })
+                  # The director module rides the same evaluation (enabled),
+                  # so the pair-import path gets covered and the memory
+                  # module's migration warning stays out of the log.
+                  (import ./coordinate/director/module.nix { inherit self; })
                   {
                     home = {
                       username = "ci";
@@ -413,7 +422,53 @@
                       cursor.enable = true;
                       opencode.enable = true;
                     };
+                    services.director = {
+                      enable = true;
+                      package = config.packages.director;
+                    };
                   }
+                ];
+              }).activationPackage;
+
+            # The director module's own eval check: nothing else exercises
+            # its wiring, so this generation fails here when the link or
+            # the floor's default drifts from what the tests assume.
+            director-module =
+              (inputs.home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  (import ./coordinate/director/module.nix { inherit self; })
+                  {
+                    home = {
+                      username = "ci";
+                      homeDirectory = "/home/ci";
+                      stateVersion = "25.05";
+                      enableNixpkgsReleaseCheck = false;
+                    };
+                    services.director = {
+                      enable = true;
+                      package = config.packages.director;
+                    };
+                  }
+                  (
+                    { config, lib, ... }:
+                    let
+                      link = config.home.file.".config/opencode/plugins/director" or null;
+                      floor = config.services.director.permissionRules;
+                      problems =
+                        (lib.optional (link == null) "the director module wrote no plugins-dir link")
+                        ++ (lib.optional (
+                          (lib.length floor) != 7
+                        ) "the director module's permissionRules default is not the seven-rule floor");
+                    in
+                    {
+                      home.file."director-module-eval-check".text =
+                        if problems == [ ] then
+                          "The director module's defaults are intact."
+                        else
+                          builtins.throw (lib.concatStringsSep "; " problems);
+                    }
+                  )
                 ];
               }).activationPackage;
           };

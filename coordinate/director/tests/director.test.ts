@@ -135,7 +135,7 @@ function fakeContext(
     model: { providerID: string; id: string };
   }> = [];
   const switchedAgents: Array<{ sessionID: string; agent: string }> = [];
-  // The registration domains, shaped like the host's: the agent editor
+  // The registration domains, shaped like the host's. The agent editor
   // upserts from the same default Info the host starts a missing agent
   // from, so a test asserts the exact fields the module sets on top of it.
   const agents = new Map<string, Record<string, any>>();
@@ -3762,7 +3762,7 @@ test("an unresolvable base, a non-git directory, and an omitted base each behave
 
 // The guidance registration: the plugin reads its agent definition, the
 // three orchestration skills, and the two commands from the files that
-// ride the package beside the module, and registers them through the
+// ride the package beside the module. It registers them through the
 // host's agent, skill, and command domains at setup. The files below
 // resolve beside the module, exactly as setup resolves them, so these
 // tests read the shipped bytes.

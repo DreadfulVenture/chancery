@@ -20,6 +20,11 @@ beside itself, so the packaged layout mirrors the source layout: `agent/`, `skil
 ~/.config/opencode/plugins/director -> <the built folder>
 ```
 
+The home-manager wiring does exactly that: import the flake's `homeManagerModules.director` and set
+`services.director.enable = true;` (the `pluginDir` option relocates the link; `permissionRules` carries the
+deny-by-default floor for deployments that render their own opencode config). The module installs independently of the
+memory stack.
+
 OpenCode discovers package directories there, so every session gets the surface; the directory is a watched config root,
 so a rebuild is picked up the way the other scanned plugins are. A running session keeps the version it loaded; new
 sessions pick up the new build.

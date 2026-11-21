@@ -10,10 +10,10 @@
 # with the module at the root as the server part. A deployment links this
 # directory into its scanned plugins directory (the watched config root,
 # so a rebuild is picked up the way the other scanned plugins are); the
-# plugin registers its agent, skills, and commands in setup, so no
-# per-file links ride the deployment. The module has no npm dependencies —
-# node builtins only — and reads its bundled files relative to itself, so
-# the artifact layout must mirror the source layout below.
+# plugin registers its agent, skills, and commands in setup, so the
+# deployment doesn't link anything per file. The module doesn't have npm
+# dependencies (node builtins only) and reads its bundled files relative
+# to itself, so the artifact layout must mirror the source layout below.
 {
   lib,
   runCommand,

@@ -1127,8 +1127,9 @@ const readSchema = {
 const setup = async (ctx: HostContext): Promise<() => void> => {
   // The debug switch rides the plugin options (the object-form config
   // entry); a discovered plugin carries none, so it defaults off. The
-  // environment is not read: a client runs with whatever its editor was
-  // launched from, so a deployment that wants this set names the plugin.
+  // module doesn't read the environment: a client runs with whatever its
+  // editor was launched from, so a deployment that wants this set lists
+  // the plugin in its config.
   const configLevel = String(ctx.options?.logLevel ?? "").toLowerCase();
   const debug = (op: string, attrs: Record<string, unknown>): void => {
     if (configLevel !== "debug") return;
@@ -1140,15 +1141,16 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     );
   };
 
-  // The director's guidance surface: the agent definition, the three
-  // orchestration skills, and the two commands ride the package beside the
-  // module and are registered here, so a deployment links one folder and
-  // the host gets the whole surface. Registration is an enhancement, not a
-  // load requirement — the tools and the mail leg run without these
-  // domains (a host whose surface lacks one, and the tests' fake, carry
-  // none) — so a missing domain or a malformed file is said and skipped,
-  // never fatal. The files resolve beside the module, which is why the
-  // packaged artifact must mirror the source layout (package.nix).
+  // The director's guidance surface rides the package beside the module:
+  // the agent definition, the three orchestration skills, and the two
+  // commands. This block registers all of it, so a deployment links one
+  // folder and the host gets the whole surface. Registration is an
+  // enhancement, not a load requirement. The tools and the mail leg run
+  // without these domains (a host whose surface lacks one, and the tests'
+  // fake, carry none). A missing domain or a malformed file gets logged
+  // and skipped; the load doesn't fail. The files resolve beside the
+  // module, which is why the packaged artifact must mirror the source
+  // layout (package.nix).
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   try {
     const definition = loadAgentDefinition(
@@ -1156,27 +1158,28 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     );
     await ctx.agent?.transform((editor) => {
       // The upsert is the host's contract: update creates the agent from
-      // Info.default(id) when the id is missing, then applies the callback
-      // (packages/core/src/agent.ts:80; upstream #45841). The file link
-      // that used to guarantee the agent is gone, so this registration is
-      // the agent's only path into a deployment.
+      // Info.default(id) when the id is missing, then applies the
+      // callback (the update branch in packages/core/src/agent.ts;
+      // upstream #45841). The file link that used to guarantee the agent
+      // is gone, so this registration is the agent's only path into a
+      // deployment.
       editor.update("director", (agent: any) => {
         if (definition.description !== undefined)
           agent.description = definition.description;
         if (definition.mode !== undefined) agent.mode = definition.mode;
         agent.system = definition.system;
-        // The push lands the shipped rules after the host's default set,
-        // and the host evaluates last-match-wins (Permission.evaluate's
-        // findLast, packages/core/src/permission.ts:98), so the shipped
-        // denies hold. A consumer's own agents.director rules load after
-        // configured plugins and land after these, so the consumer wins
-        // per rule.
+        // The rules land after the host's default set, and the host
+        // evaluates last-match-wins (Permission.evaluate takes the last
+        // rule matching the action and resource, in
+        // packages/core/src/permission.ts), so the shipped denies hold. A
+        // consumer's own agents.director rules load after configured
+        // plugins and land after these, so the consumer wins per rule.
         agent.permissions.push(...definition.permissions);
         if (definition.request && agent.request)
           Object.assign(agent.request.body, definition.request.body);
       });
-      // Inside the transform: a host without the domain never runs it, so
-      // the span cannot claim a registration that did not happen.
+      // Inside the transform: a host without the domain doesn't run it,
+      // so the span cannot claim a registration that did not happen.
       debug("agent.registered", {});
     });
   } catch (error) {
@@ -1232,7 +1235,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
             if (command.agent !== undefined && ctx.session.switchAgent) {
               // The absent domain is the documented degrade: the prompt
               // fires for the session's current agent. A failed switch is
-              // not a degrade — it propagates and the command fails named,
+              // not a degrade; it propagates and the command fails named,
               // instead of running its template as the wrong agent.
               await ctx.session.switchAgent({
                 sessionID: invocation.sessionID,
