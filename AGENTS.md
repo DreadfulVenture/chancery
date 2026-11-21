@@ -44,6 +44,11 @@ through the `skill` tool with that ID. A repo-relative path (`writs/skills/human
 checkout; deployed rule files live in the operator's home directory, where the repo tree does not follow. In chat, the
 operator loads a skill by mentioning it as `@skill-id`.
 
+Skills ship from `writs/skills` to the deployed clients. Repo-specific skills that must NOT ship globally live in
+`.agents/skills/` in the repo tree instead — an in-repo home a checkout resolves but the deployment story never carries
+(the chancery licensing lens is there, because it describes this repo's own provenance system). Record any new home a
+skill takes here, so the delivery story and the tree tell one story.
+
 ## State that keeps needing line math lives in the director plugin's manifest surface
 
 When a working state — a run manifest, a plan, a slice's fact sheet — starts needing exact-match edits, `grep -n`, or
