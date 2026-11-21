@@ -52,10 +52,10 @@ workers. Dispatch and steering are plugin calls on this session:
 - `director_worker_status(sessionID)` reads a session's live state (busy or idle, its last outcome, the dispatch stamp);
   convenience only, never authoritative over the worktree.
 
-The exact shapes and semantics live in the module's own doc lines (plugin/director.ts). The dispatcher returns before
-the worker's first turn runs: each turn end files a report and wakes this session with a fixed notice (the worker
-session and the unread count) — call `report_read` for the bodies. Worker text never arrives in context on its own; it
-reaches the model only as a `report_read` tool result, never as stdout.
+The exact shapes and semantics live in the module's own doc lines (coordinate/director/director.ts). The dispatcher
+returns before the worker's first turn runs: each turn end files a report and wakes this session with a fixed notice
+(the worker session and the unread count) — call `report_read` for the bodies. Worker text never arrives in context on
+its own; it reaches the model only as a `report_read` tool result, never as stdout.
 
 **Failure reports.** A pulled report that says turn-not-completed is a dead turn: re-dispatch. The upstream can hiccup
 independent of anything the brief said.

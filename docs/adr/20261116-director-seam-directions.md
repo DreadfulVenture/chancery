@@ -9,10 +9,10 @@
 
 ## Context
 
-The director module (`plugin/director.ts`, PRJ-317) lets director sessions dispatch and steer worker sessions in-process
-over the host session API. Three directions of traffic meet there: down (coordinator to worker), up (worker result back
-to coordinator), and peer (coordinator to coordinator). The up direction shipped as push: each turn end was mailed to
-the director's session as a synthetic message, full text inside a `<system-reminder>` envelope.
+The director module (`coordinate/director/director.ts`, PRJ-317) lets director sessions dispatch and steer worker
+sessions in-process over the host session API. Three directions of traffic meet there: down (coordinator to worker), up
+(worker result back to coordinator), and peer (coordinator to coordinator). The up direction shipped as push: each turn
+end was mailed to the director's session as a synthetic message, full text inside a `<system-reminder>` envelope.
 
 Two facts made push the wrong shape for up:
 

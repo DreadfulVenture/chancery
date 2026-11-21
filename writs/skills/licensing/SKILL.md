@@ -85,5 +85,5 @@ skill tool:
 
 Load the lens for the repo at hand alongside this skill, and run the discipline with the lens's record applied. Where a
 lens and this skill disagree, the lens wins on its own subject matter: the repo's concrete provenance system. A repo
-with no lens yet runs the discipline plain, reading its artifacts as you go — write the lens down afterward, so the next
-run starts from it.
+with no lens yet runs the discipline plain, reading its artifacts as you go — write the lens down afterward as a skill
+under `.agents/skills/` in the repo tree, so the next run starts from it.
