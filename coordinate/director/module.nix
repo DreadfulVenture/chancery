@@ -66,14 +66,18 @@ in
     # action with "*" as the resource, which is how the map shape in an
     # agent or config file migrates too. The floor denies the six mutating
     # director tools and the question tool to every agent; the director
-    # agent's own definition re-allows the six its job needs, and an
-    # agent's rules compose after the config's, so the allow wins. The
-    # list and that re-allow live in this repo and move in lockstep: a
-    # rule here without its counterpart allow in agent/director.md strips
-    # a tool from the director agent, so both halves of a pair ride the
-    # same change. (The host evaluates last-match-wins: the host's
-    # Permission.evaluate takes the last rule matching the action and
-    # resource, in the opencode tree.)
+    # agent's own definition re-allows the six its job needs. The allow
+    # does not win by composition order: a plugin-registered agent's own
+    # rules land before the config-level rules. It wins because the
+    # plugin registers a late agent transform from the session.prompt
+    # hook, whose appends replay after the config plugin's appends on
+    # every agent rebuild, so the definition's allows are the last
+    # matching rules. The list and that re-allow live in this repo and
+    # move in lockstep: a rule here without its counterpart allow in
+    # agent/director.md strips a tool from the director agent, so both
+    # halves of a pair ride the same change. (The host evaluates
+    # last-match-wins: the host's Permission.evaluate takes the last
+    # rule matching the action and resource, in the opencode tree.)
     permissionRules = mkOption {
       type = types.listOf (
         types.submodule {

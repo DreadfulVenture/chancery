@@ -612,7 +612,54 @@ test("the re-assert registers one late transform, on the first prompt only, and 
   assert.deepEqual(fixture.hookDisposals, ["prompt"]);
 });
 
+test("a failed re-assert retries on the next prompt: one late transform lands after the failure", async () => {
+  const logs: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    // The agent domain throws on the hook's first fire and works after.
+    const realTransform = fixture.ctx.agent.transform;
+    let calls = 0;
+    fixture.ctx.agent.transform = async (fn: unknown) => {
+      calls += 1;
+      if (calls === 1) throw new Error("transform refused");
+      return realTransform(fn);
+    };
+    const before = fixture.agentTransforms.length;
+    await fixture.fireHook("prompt", {
+      sessionID: "ses-a",
+      messageID: "msg-1",
+    });
+    assert.equal(fixture.agentTransforms.length, before);
+    assert.equal(
+      logs.filter((line) => line.includes("permission re-assert failed"))
+        .length,
+      1,
+    );
+    // The next prompt retries: the transform registers, exactly once,
+    // and later prompts push nothing further.
+    await fixture.fireHook("prompt", {
+      sessionID: "ses-a",
+      messageID: "msg-2",
+    });
+    assert.equal(fixture.agentTransforms.length, before + 1);
+    await fixture.fireHook("prompt", {
+      sessionID: "ses-a",
+      messageID: "msg-3",
+    });
+    assert.equal(fixture.agentTransforms.length, before + 1);
+  } finally {
+    console.error = originalError;
+    await cleanup?.();
+  }
+});
+
 test("a host without a prompt hook logs the error and skips the re-assert: no late transform, and the strip stands", async () => {
+  const logs: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
   const fixture = fakeContext();
   delete (fixture.ctx.session as Record<string, unknown>).hook;
   const cleanup = await plugin.setup(fixture.ctx);
@@ -633,7 +680,13 @@ test("a host without a prompt hook logs the error and skips the re-assert: no la
       fixture.lastRule("director", "director_dispatch")?.effect,
       "deny",
     );
+    assert.ok(
+      logs.some((line) =>
+        line.includes("[director] permission re-assert unavailable"),
+      ),
+    );
   } finally {
+    console.error = originalError;
     await cleanup?.();
   }
 });

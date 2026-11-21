@@ -246,6 +246,9 @@ interface SessionDomain {
   // transform here (PRJ-469). A host without this hook logs the error
   // below and skips the re-assert, so the config floor's deny strips the
   // write-half tools from the director agent's catalog as before the fix.
+  // The callback's input is the host's SessionPrompt shape, whose
+  // messageID is required there, not optional — verified in-tree at
+  // packages/plugin/src/effect/session.ts:16 (SessionPrompt interface).
   hook?(
     name: string,
     callback: (input: {
@@ -1305,11 +1308,15 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   // plugin's appends the definition's rules last on every rebuild,
   // forever: the definition's allows become the last matching rule and
   // the tools survive the strip check. The registration is one-time per
-  // activation (a flag, not a per-prompt push); a plugin reload brings a
-  // fresh activation whose own first prompt registers its own transform —
-  // duplicate rules are harmless under last-match-wins. A host without
-  // the prompt hook logs the error below and skips the re-assert, so the
-  // strip stands as before this fix.
+  // activation: the handler flips the flag synchronously, before the
+  // awaited transform, and resets it in the catch, so the check-and-set
+  // runs in the handler fiber across no await — two concurrent first
+  // prompts cannot both register, and a failed transform retries on the
+  // next prompt. A plugin reload brings a fresh activation whose own
+  // first prompt registers its own transform — duplicate rules are
+  // harmless under last-match-wins. A host without the prompt hook, or
+  // without an agent domain to transform, logs the error below and skips
+  // the re-assert, so the strip stands as before this fix.
   let reasserted = false;
   let hookRegistration: { dispose: () => Promise<void> } | undefined;
   try {
@@ -1320,16 +1327,20 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     }
     hookRegistration =
       (await ctx.session?.hook?.("prompt", async () => {
-        if (reasserted || directorPermissions.length === 0) return;
+        if (!ctx.agent || reasserted || directorPermissions.length === 0)
+          return;
+        // The flag flips before the await: the check-and-set is
+        // synchronous in this fiber, so a concurrent prompt sees it set.
+        reasserted = true;
         try {
-          await ctx.agent?.transform((editor) => {
+          await ctx.agent.transform((editor) => {
             editor.update("director", (agent: any) => {
               agent.permissions.push(...directorPermissions);
             });
           });
-          reasserted = true;
           debug("agent.permissions.reasserted", {});
         } catch (error) {
+          reasserted = false;
           // Not flagged as reasserted: the next prompt retries. A
           // persistent failure logs once per prompt, which is the
           // visible shape of a broken re-assert.
