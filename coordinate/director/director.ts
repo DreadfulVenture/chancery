@@ -239,6 +239,23 @@ interface SessionDomain {
   // drive-project re-targets the session it runs in to the director agent;
   // the command degrades to a plain prompt when the surface lacks it.
   switchAgent?(input: { sessionID: string; agent: string }): Promise<unknown>;
+  // The prompt hook fires inside the prompt request, awaited, before the
+  // runner builds the session's tool snapshot
+  // (packages/core/src/session/prompt.ts hooks.trigger → admission.admit →
+  // execution.wake). The permission re-assert registers its late agent
+  // transform here (PRJ-469). A host without this hook logs the error
+  // below and skips the re-assert, so the config floor's deny strips the
+  // write-half tools from the director agent's catalog as before the fix.
+  hook?(
+    name: string,
+    callback: (input: {
+      sessionID: string;
+      messageID: string;
+      prompt?: unknown;
+      metadata?: Record<string, unknown>;
+      delivery?: unknown;
+    }) => Promise<void> | void,
+  ): Promise<{ dispose: () => Promise<void> }>;
 }
 
 // The plugin options ride the object-form config entry; a discovered
@@ -1152,10 +1169,16 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   // module, which is why the packaged artifact must mirror the source
   // layout (package.nix).
   const moduleDir = dirname(fileURLToPath(import.meta.url));
+  // The definition's permission entries, kept for the permission
+  // re-assert below. Empty when the agent file failed to load: the
+  // re-assert then has nothing to re-assert and doesn't register
+  // anything.
+  let directorPermissions: AgentDefinition["permissions"] = [];
   try {
     const definition = loadAgentDefinition(
       readFileSync(join(moduleDir, "agent", "director.md"), "utf8"),
     );
+    directorPermissions = definition.permissions;
     await ctx.agent?.transform((editor) => {
       // The upsert is the host's contract: update creates the agent from
       // Info.default(id) when the id is missing, then applies the
@@ -1259,6 +1282,64 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     });
   } catch (error) {
     console.error(`[director] command registration skipped: ${error}`);
+  }
+
+  // PRJ-469: the permission re-assert. A plugin-registered agent's own
+  // rules land before the config-level rules, because the host replays
+  // agent transforms in registration order and the config agent plugin
+  // (post-internal, packages/core/src/plugin/internal.ts) registers after
+  // every external plugin — so on the merged array a config-level
+  // wildcard deny is the last matching rule and tool.ts whollyDisabled()
+  // strips the tools from the director agent's catalog, on every opencode
+  // version (byte-identical v2.2.5 through dev). A markdown-file agent
+  // gets its own rules appended after the config ones and wins; the
+  // director agent, registered by this plugin, does not.
+  //
+  // The correction re-asserts the parity the file agent gets. The
+  // session.prompt hook fires inside the prompt request — awaited, before
+  // admission and wake, so before the runner builds the first tool
+  // snapshot (packages/core/src/session/prompt.ts; the runner's drain
+  // starts one tick after wake) — and inside it this activation registers
+  // a NEW agent transform. Transforms replay in registration order on
+  // every agent-state rebuild, so one registered after the config
+  // plugin's appends the definition's rules last on every rebuild,
+  // forever: the definition's allows become the last matching rule and
+  // the tools survive the strip check. The registration is one-time per
+  // activation (a flag, not a per-prompt push); a plugin reload brings a
+  // fresh activation whose own first prompt registers its own transform —
+  // duplicate rules are harmless under last-match-wins. A host without
+  // the prompt hook logs the error below and skips the re-assert, so the
+  // strip stands as before this fix.
+  let reasserted = false;
+  let hookRegistration: { dispose: () => Promise<void> } | undefined;
+  try {
+    if (!ctx.session?.hook) {
+      console.error(
+        `[director] permission re-assert unavailable: the host session domain doesn't have a prompt hook, so the re-assert can't register — the config floor's deny keeps stripping the write-half tools from the director agent`,
+      );
+    }
+    hookRegistration =
+      (await ctx.session?.hook?.("prompt", async () => {
+        if (reasserted || directorPermissions.length === 0) return;
+        try {
+          await ctx.agent?.transform((editor) => {
+            editor.update("director", (agent: any) => {
+              agent.permissions.push(...directorPermissions);
+            });
+          });
+          reasserted = true;
+          debug("agent.permissions.reasserted", {});
+        } catch (error) {
+          // Not flagged as reasserted: the next prompt retries. A
+          // persistent failure logs once per prompt, which is the
+          // visible shape of a broken re-assert.
+          console.error(`[director] permission re-assert failed: ${error}`);
+        }
+      })) ?? undefined;
+  } catch (error) {
+    console.error(
+      `[director] permission re-assert registration skipped: ${error}`,
+    );
   }
 
   // Children this activation delivers for, and the text buffered toward the
@@ -2991,6 +3072,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   return () => {
     controller.abort();
     void Promise.resolve(registration?.dispose?.());
+    void Promise.resolve(hookRegistration?.dispose?.());
   };
 };
 

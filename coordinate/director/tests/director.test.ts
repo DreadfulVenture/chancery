@@ -159,6 +159,79 @@ function fakeContext(
     path: string;
     content: string;
   }> = [];
+  // The agent transforms in registration order, and a replay that models
+  // the host's agent state: every read after a change rebuilds from the
+  // defaults and replays every registered transform in insertion order
+  // (packages/core/src/state.ts). Immediate application models one
+  // replay; replayAgents() runs the whole chain again, so a test that
+  // registers a transform between two replays sees the host's ordering.
+  const agentTransforms: Array<
+    (editor: {
+      update: (
+        id: string,
+        update: (agent: Record<string, any>) => void,
+      ) => void;
+    }) => void
+  > = [];
+  const applyAgentTransform = (
+    fn: (editor: {
+      update: (
+        id: string,
+        update: (agent: Record<string, any>) => void,
+      ) => void;
+    }) => void,
+  ) => {
+    agentTransforms.push(fn);
+    fn({
+      update: (id, update) => {
+        const current = agents.get(id) ?? defaultAgent(id);
+        agents.set(id, current);
+        update(current);
+      },
+    });
+  };
+  const replayAgents = () => {
+    agents.clear();
+    for (const fn of agentTransforms) {
+      fn({
+        update: (id, update) => {
+          const current = agents.get(id) ?? defaultAgent(id);
+          agents.set(id, current);
+          update(current);
+        },
+      });
+    }
+  };
+  // The last matching rule for an action, the host's evaluation
+  // (Permission.evaluate's findLast over the merged ruleset; Wildcard
+  // matching is exact for the names these tests use).
+  const lastRule = (
+    agentId: string,
+    action: string,
+  ): { action: string; resource: string; effect: string } | undefined => {
+    const rules = agents.get(agentId)?.permissions ?? [];
+    for (let i = rules.length - 1; i >= 0; i -= 1) {
+      const rule = rules[i] as {
+        action: string;
+        resource: string;
+        effect: string;
+      };
+      if (rule.action === action || rule.action === "*") return rule;
+    }
+    return undefined;
+  };
+  // The session hooks the module registered, with a fire helper per name.
+  const hooks: Array<{
+    name: string;
+    callback: (input: unknown) => Promise<void> | void;
+  }> = [];
+  const hookDisposals: string[] = [];
+  const fireHook = async (name: string, input: unknown) => {
+    for (const hook of hooks) {
+      if (hook.name !== name) continue;
+      await hook.callback(input);
+    }
+  };
   const commands: Array<{
     name: string;
     description?: string;
@@ -251,6 +324,17 @@ function fakeContext(
         switchedAgents.push(structuredClone(input));
         return undefined;
       },
+      hook: async (
+        name: string,
+        callback: (input: unknown) => Promise<void> | void,
+      ) => {
+        hooks.push({ name, callback });
+        return {
+          dispose: async () => {
+            hookDisposals.push(name);
+          },
+        };
+      },
       synthetic: async (input: Mail) => {
         mails.push(structuredClone(input));
       },
@@ -264,13 +348,7 @@ function fakeContext(
           ) => void;
         }) => void,
       ) => {
-        fn({
-          update: (id, update) => {
-            const current = agents.get(id) ?? defaultAgent(id);
-            agents.set(id, current);
-            update(current);
-          },
-        });
+        applyAgentTransform(fn);
         return undefined;
       },
     },
@@ -385,11 +463,17 @@ function fakeContext(
     switched,
     switchedAgents,
     agents,
+    agentTransforms,
     skills,
     commands,
     mails,
     emit,
     order,
+    hooks,
+    hookDisposals,
+    fireHook,
+    replayAgents,
+    lastRule,
   };
 }
 
@@ -441,6 +525,117 @@ test("setup registers exactly the director tool family", async () => {
     "worktree_list",
     "worktree_remove",
   ]);
+});
+
+// The config floor the real deployment ships: the write-half actions and
+// question, each a wildcard-resource deny (module.nix permissionRules).
+const CONFIG_FLOOR: Array<{
+  action: string;
+  resource: string;
+  effect: string;
+}> = [
+  { action: "director_dispatch", resource: "*", effect: "deny" },
+  { action: "director_steer", resource: "*", effect: "deny" },
+  { action: "manifest_write", resource: "*", effect: "deny" },
+  { action: "manifest_drop", resource: "*", effect: "deny" },
+  { action: "worktree_add", resource: "*", effect: "deny" },
+  { action: "worktree_remove", resource: "*", effect: "deny" },
+  { action: "question", resource: "*", effect: "deny" },
+];
+
+test("the permission re-assert lands the director's allows after the config floor's denies on every rebuild", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    // The config agent plugin registers after every external plugin, so
+    // its appends replay after the module's boot transform
+    // (packages/core/src/plugin/internal.ts puts it in the post-internal
+    // list). The floor's denies are therefore the last word before the
+    // re-assert, exactly the shipped defect.
+    fixture.agentTransforms.push((editor) =>
+      editor.update("director", (agent) =>
+        agent.permissions.push(...structuredClone(CONFIG_FLOOR)),
+      ),
+    );
+    await fixture.replayAgents();
+    assert.equal(
+      fixture.lastRule("director", "director_dispatch")?.effect,
+      "deny",
+    );
+    // The first prompt of the server's life fires the hook; the late
+    // transform registers inside it, replaying after the config transform.
+    await fixture.fireHook("prompt", {
+      sessionID: "ses-first",
+      messageID: "msg-1",
+    });
+    await fixture.replayAgents();
+    for (const action of [
+      "director_dispatch",
+      "director_steer",
+      "manifest_write",
+      "manifest_drop",
+      "worktree_add",
+      "worktree_remove",
+    ]) {
+      assert.equal(
+        fixture.lastRule("director", action)?.effect,
+        "allow",
+        action,
+      );
+    }
+    // The floor's other denies stay last where the definition doesn't
+    // have an entry.
+    assert.equal(fixture.lastRule("director", "question")?.effect, "deny");
+    // And a rebuild without the hook's session changes nothing: the late
+    // transform is registered, not a one-time edit.
+    await fixture.replayAgents();
+    assert.equal(
+      fixture.lastRule("director", "director_dispatch")?.effect,
+      "allow",
+    );
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("the re-assert registers one late transform, on the first prompt only, and its hook disposes with teardown", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  const before = fixture.agentTransforms.length;
+  await fixture.fireHook("prompt", { sessionID: "ses-a", messageID: "msg-1" });
+  const afterFirst = fixture.agentTransforms.length;
+  assert.equal(afterFirst, before + 1);
+  await fixture.fireHook("prompt", { sessionID: "ses-b", messageID: "msg-2" });
+  await fixture.fireHook("prompt", { sessionID: "ses-c", messageID: "msg-3" });
+  assert.equal(fixture.agentTransforms.length, afterFirst);
+  await cleanup?.();
+  assert.deepEqual(fixture.hookDisposals, ["prompt"]);
+});
+
+test("a host without a prompt hook logs the error and skips the re-assert: no late transform, and the strip stands", async () => {
+  const fixture = fakeContext();
+  delete (fixture.ctx.session as Record<string, unknown>).hook;
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    fixture.agentTransforms.push((editor) =>
+      editor.update("director", (agent) =>
+        agent.permissions.push(...structuredClone(CONFIG_FLOOR)),
+      ),
+    );
+    await fixture.replayAgents();
+    await fixture.fireHook("prompt", {
+      sessionID: "ses-first",
+      messageID: "msg-1",
+    });
+    await fixture.replayAgents();
+    assert.equal(fixture.hooks.length, 0);
+    assert.equal(
+      fixture.lastRule("director", "director_dispatch")?.effect,
+      "deny",
+    );
+  } finally {
+    await cleanup?.();
+  }
 });
 
 test("dispatch creates the worker in the directory, stamps the coordinator, and queues the brief", async () => {
