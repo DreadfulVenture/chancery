@@ -123,7 +123,9 @@
 // silent; the pump can be torn down by the same shutdown before it sends.
 
 import { execFile } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // The director module's tools as the host's ToolEditor sees them: a plain JSON Schema
 // object for `input`, and an execute the host calls with the raw tool
@@ -220,7 +222,11 @@ interface SessionDomain {
     sessionID: string;
     model: { providerID: string; id: string; variant?: string };
   }): Promise<unknown>;
-  prompt(input: { sessionID: string; text: string }): Promise<unknown>;
+  prompt(input: {
+    sessionID: string;
+    text: string;
+    delivery?: string;
+  }): Promise<unknown>;
   synthetic(input: {
     sessionID: string;
     text: string;
@@ -230,10 +236,60 @@ interface SessionDomain {
   // director_sessions and the worktree removal's live-session check
   // require the enumeration surface and fail named when it is absent.
   list?(input?: { cursor?: string }): Promise<any>;
+  // drive-project re-targets the session it runs in to the director agent;
+  // the command degrades to a plain prompt when the surface lacks it.
+  switchAgent?(input: { sessionID: string; agent: string }): Promise<unknown>;
+}
+
+// The plugin options ride the object-form config entry; a discovered
+// plugin has none. The director's one knob is the debug switch below.
+type PluginOptions = { logLevel?: unknown };
+
+// The registration domains, optional like every surface the module reads:
+// the tools and the mail leg are the load requirement; the agent, skills,
+// and commands registered from the shipped files are the enhancement, and
+// a host without a domain (or the tests' fake) runs without them.
+interface AgentDomain {
+  transform(
+    callback: (editor: {
+      update: (id: string, fn: (agent: any) => void) => void;
+    }) => unknown,
+  ): Promise<unknown>;
+}
+
+interface SkillDomain {
+  transform(
+    callback: (editor: {
+      add: (skill: {
+        id: string;
+        name: string;
+        description?: string;
+        path: string;
+        content: string;
+      }) => void;
+    }) => unknown,
+  ): Promise<unknown>;
+}
+
+interface CommandDomain {
+  transform(
+    callback: (editor: {
+      add: (definition: {
+        name: string;
+        description?: string;
+        execute: (invocation: {
+          sessionID: string;
+          prompt?: { text?: unknown };
+          delivery?: string;
+        }) => Promise<void>;
+      }) => void;
+    }) => unknown,
+  ): Promise<unknown>;
 }
 
 interface HostContext {
   location?: { directory?: string; project?: { directory?: string } };
+  options?: PluginOptions;
   storage: StorageDomain;
   session: SessionDomain;
   tool: {
@@ -244,6 +300,9 @@ interface HostContext {
   event: {
     subscribe(input: { signal: AbortSignal }): AsyncIterable<HostEvent>;
   };
+  agent?: AgentDomain;
+  skill?: SkillDomain;
+  command?: CommandDomain;
 }
 
 const STAMP = "chancery";
@@ -288,6 +347,344 @@ const stampOf = (metadata: any): string | null =>
 // byte-identical for the family.
 export function mailEnvelope(lines: string[]): string {
   return `<system-reminder>\n${lines.join("\n")}\n</system-reminder>`;
+}
+
+// The shipped guidance files' frontmatter, parsed strictly. The grammar is
+// the subset these files carry — line-based maps indented in two-space
+// steps, quoted or bare scalars, numbers, and the folded or literal block
+// scalars — and anything else is an error, not a guess. The host never
+// re-parses these files (the plugin hands it the parsed values), so this
+// parser is the single decoding step and every field it accepts is
+// deliberate. Exported for the tests and the package load check.
+type FrontmatterValue = string | number | Record<string, FrontmatterValue>;
+
+export class FrontmatterError extends Error {}
+
+export function parseFrontmatter(text: string): {
+  data: Record<string, FrontmatterValue>;
+  body: string;
+} {
+  if (!text.startsWith("---\n"))
+    throw new FrontmatterError("the file does not open with a --- fence");
+  const lines = text.split("\n");
+  let close = -1;
+  for (let index = 1; index < lines.length; index += 1) {
+    if (lines[index] === "---") {
+      close = index;
+      break;
+    }
+  }
+  if (close === -1)
+    throw new FrontmatterError("the frontmatter fence never closes");
+  const data = parseMap(lines.slice(1, close), 0, 0).data;
+  return { data, body: lines.slice(close + 1).join("\n") };
+}
+
+function parseMap(
+  lines: string[],
+  start: number,
+  indent: number,
+): { data: Record<string, FrontmatterValue>; next: number } {
+  const data: Record<string, FrontmatterValue> = {};
+  let index = start;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line.trim() === "") {
+      index += 1;
+      continue;
+    }
+    const lineIndent = indentOf(lines, index);
+    if (lineIndent < indent) return { data, next: index };
+    if (lineIndent !== indent)
+      throw new FrontmatterError(
+        `unexpected frontmatter indentation (wanted ${indent}, found ${lineIndent}): ${JSON.stringify(line)}`,
+      );
+    const entry = parseEntry(line, indent);
+    if (entry === null)
+      throw new FrontmatterError(
+        `unparsable frontmatter line: ${JSON.stringify(line)}`,
+      );
+    if (entry.block) {
+      const [value, consumed] = parseBlockScalar(
+        lines,
+        index + 1,
+        indent,
+        entry.block,
+      );
+      data[entry.key] = value;
+      index = consumed;
+    } else if (entry.inline === undefined) {
+      const nested = parseMap(lines, index + 1, indent + 2);
+      data[entry.key] = nested.data;
+      index = nested.next;
+    } else {
+      data[entry.key] = entry.inline;
+      index += 1;
+    }
+  }
+  return { data, next: index };
+}
+
+function indentOf(lines: string[], index: number): number {
+  const line = lines[index];
+  const spaces = line.length - line.trimStart().length;
+  if (spaces % 2 !== 0)
+    throw new FrontmatterError(
+      `frontmatter indentation is not a two-space step: ${JSON.stringify(line)}`,
+    );
+  return spaces;
+}
+
+// One `key: value` line. Returns null when the line is not an entry; the
+// inline value is undefined when the value continues on deeper lines or in
+// a block scalar.
+function parseEntry(
+  line: string,
+  indent: number,
+): {
+  key: string;
+  inline?: FrontmatterValue;
+  block?: { marker: ">" | "|"; chomp: "strip" | "clip" };
+} | null {
+  const rest = line.slice(indent);
+  let key: string;
+  let after: string;
+  if (rest.startsWith('"') || rest.startsWith("'")) {
+    const quote = rest[0];
+    const end = rest.indexOf(quote, 1);
+    if (end === -1) return null;
+    key = rest.slice(1, end);
+    after = rest.slice(end + 1);
+  } else {
+    const colon = rest.indexOf(":");
+    if (colon === -1) return null;
+    key = rest.slice(0, colon);
+    after = rest.slice(colon);
+  }
+  if (!after.startsWith(":")) return null;
+  const value = after.slice(1).trim();
+  if (value === "") return { key };
+  if (value === ">" || value === "|" || value === ">-" || value === "|-") {
+    return {
+      key,
+      block: {
+        marker: value[0] as ">" | "|",
+        chomp: value.endsWith("-") ? "strip" : "clip",
+      },
+    };
+  }
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    return { key, inline: value.slice(1, -1) };
+  }
+  if (/^-?\d+(\.\d+)?$/.test(value)) return { key, inline: Number(value) };
+  // A plain scalar: the rest of the line. YAML bars the indicator
+  // characters from starting one and reserves " #" for an inline comment;
+  // both are errors here rather than reinterpretations.
+  if (/^[&*!>%@`#[\]{},]|^-\s/.test(value)) return null;
+  if (/(^|\s)#/.test(value)) return null;
+  return { key, inline: value };
+}
+
+// A block scalar's lines: every line indented deeper than the key (blank
+// lines included), stripped of their common indent, then kept (|) or
+// folded (>) per the marker. Folding turns the break between two content
+// lines into one space and a blank line into a newline; chomping strips
+// (-) or clips one trailing newline.
+function parseBlockScalar(
+  lines: string[],
+  start: number,
+  keyIndent: number,
+  block: { marker: ">" | "|"; chomp: "strip" | "clip" },
+): [string, number] {
+  let index = start;
+  const collected: Array<string | null> = [];
+  let contentIndent: number | null = null;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line.trim() === "") {
+      collected.push(null);
+      index += 1;
+      continue;
+    }
+    const lineIndent = line.length - line.trimStart().length;
+    if (lineIndent <= keyIndent) break;
+    contentIndent ??= lineIndent;
+    if (lineIndent < contentIndent) break;
+    collected.push(line.slice(contentIndent));
+    index += 1;
+  }
+  while (collected.length && collected[collected.length - 1] === null)
+    collected.pop();
+  let value: string;
+  if (block.marker === "|") {
+    value = collected.map((line) => line ?? "").join("\n");
+  } else {
+    value = "";
+    let pending = 0;
+    for (const line of collected) {
+      if (line === null) {
+        pending += 1;
+        continue;
+      }
+      if (value === "") value = line;
+      else if (pending === 0) value += ` ${line}`;
+      else value += `${"\n".repeat(pending)}${line}`;
+      pending = 0;
+    }
+  }
+  if (block.chomp === "clip") value += "\n";
+  return [value, index];
+}
+
+// V1 action names onto the v2 tool actions, the same mapping the host
+// applies when it reads a legacy agent file (normalizeAction,
+// packages/core/src/v1/config/migrate.ts), so the shipped rules keep
+// matching whatever spelling the floor uses.
+function normalizeAction(action: string): string {
+  if (action === "write" || action === "patch" || action === "apply_patch")
+    return "edit";
+  if (action === "task") return "subagent";
+  if (action === "bash") return "shell";
+  return action;
+}
+
+export type AgentDefinition = {
+  description?: string;
+  mode?: string;
+  system: string;
+  permissions: Array<{ action: string; resource: string; effect: string }>;
+  request?: { body?: Record<string, unknown> };
+};
+
+// The agent definition file's frontmatter, mapped onto the host's
+// Agent.Info fields. The permission map's shape is the legacy one (an
+// action to a bare effect, or to a resource/effect map); temperature rides
+// the request body overlay the same way the host's own migration puts it.
+export function loadAgentDefinition(text: string): AgentDefinition {
+  const { data, body } = parseFrontmatter(text);
+  const allowed = ["description", "mode", "temperature", "permission"];
+  const unknown = Object.keys(data).filter((key) => !allowed.includes(key));
+  if (unknown.length)
+    throw new FrontmatterError(
+      `unknown agent frontmatter fields: ${unknown.join(", ")}`,
+    );
+  const definition: AgentDefinition = { system: body.trim(), permissions: [] };
+  if (data.description !== undefined && typeof data.description !== "string")
+    throw new FrontmatterError("description must be a string");
+  if (typeof data.description === "string")
+    definition.description = data.description;
+  if (data.mode !== undefined && typeof data.mode !== "string")
+    throw new FrontmatterError("mode must be a string");
+  if (typeof data.mode === "string") {
+    if (!["primary", "subagent", "all"].includes(data.mode))
+      throw new FrontmatterError(`unknown agent mode: ${data.mode}`);
+    definition.mode = data.mode;
+  }
+  const temperature = data.temperature;
+  if (temperature !== undefined && typeof temperature !== "number")
+    throw new FrontmatterError("temperature must be a number");
+  if (temperature !== undefined) definition.request = { body: { temperature } };
+  const permissionMap = data.permission;
+  if (permissionMap !== undefined) {
+    if (typeof permissionMap !== "object" || permissionMap === null)
+      throw new FrontmatterError("permission must be a map");
+    for (const [action, rule] of Object.entries(permissionMap)) {
+      const normalized = normalizeAction(action);
+      if (typeof rule === "string") {
+        definition.permissions.push({
+          action: normalized,
+          resource: "*",
+          effect: effectOf(rule),
+        });
+        continue;
+      }
+      if (typeof rule !== "object" || rule === null)
+        throw new FrontmatterError(
+          `permission for ${action} must be an effect or a map`,
+        );
+      for (const [resource, effect] of Object.entries(rule)) {
+        if (typeof effect !== "string")
+          throw new FrontmatterError(
+            `permission effect for ${action} ${resource} must be a string`,
+          );
+        definition.permissions.push({
+          action: normalized,
+          resource,
+          effect: effectOf(effect),
+        });
+      }
+    }
+  }
+  return definition;
+}
+
+function effectOf(effect: string): string {
+  if (!["allow", "deny", "ask"].includes(effect))
+    throw new FrontmatterError(`unknown permission effect: ${effect}`);
+  return effect;
+}
+
+export type SkillDefinition = {
+  name: string;
+  description?: string;
+  body: string;
+};
+
+// A skill file's frontmatter: exactly the two fields the shipped skills
+// carry. Exported for the tests and the package load check.
+export function loadSkillDefinition(text: string): SkillDefinition {
+  const { data, body } = parseFrontmatter(text);
+  const unknown = Object.keys(data).filter(
+    (key) => key !== "name" && key !== "description",
+  );
+  if (unknown.length)
+    throw new FrontmatterError(
+      `unknown skill frontmatter fields: ${unknown.join(", ")}`,
+    );
+  if (typeof data.name !== "string")
+    throw new FrontmatterError("skill frontmatter needs a name");
+  if (data.description !== undefined && typeof data.description !== "string")
+    throw new FrontmatterError("description must be a string");
+  const definition: SkillDefinition = { name: data.name, body: body.trim() };
+  if (typeof data.description === "string")
+    definition.description = data.description;
+  return definition;
+}
+
+export type CommandFile = {
+  name: string;
+  description?: string;
+  agent?: string;
+  template: string;
+};
+
+// A command file's frontmatter: exactly description and agent, and the
+// body as the prompt template. The file's stem is the command name.
+// Exported for the tests and the package load check.
+export function loadCommandDefinition(file: string, text: string): CommandFile {
+  const { data, body } = parseFrontmatter(text);
+  const unknown = Object.keys(data).filter(
+    (key) => key !== "description" && key !== "agent",
+  );
+  if (unknown.length)
+    throw new FrontmatterError(
+      `unknown command frontmatter fields in ${file}: ${unknown.join(", ")}`,
+    );
+  if (data.description !== undefined && typeof data.description !== "string")
+    throw new FrontmatterError(`${file}: description must be a string`);
+  if (data.agent !== undefined && typeof data.agent !== "string")
+    throw new FrontmatterError(`${file}: agent must be a string`);
+  const definition: CommandFile = {
+    name: file.replace(/\.md$/, ""),
+    template: body.trim(),
+  };
+  if (typeof data.description === "string")
+    definition.description = data.description;
+  if (typeof data.agent === "string") definition.agent = data.agent;
+  return definition;
 }
 
 function describe(sessionID: string, entry: WorkerEntry | ReportRow): string {
@@ -728,7 +1125,11 @@ const readSchema = {
 };
 
 const setup = async (ctx: HostContext): Promise<() => void> => {
-  const configLevel = (process.env.MEMORY_SPAN_LOG || "").toLowerCase();
+  // The debug switch rides the plugin options (the object-form config
+  // entry); a discovered plugin carries none, so it defaults off. The
+  // environment is not read: a client runs with whatever its editor was
+  // launched from, so a deployment that wants this set names the plugin.
+  const configLevel = String(ctx.options?.logLevel ?? "").toLowerCase();
   const debug = (op: string, attrs: Record<string, unknown>): void => {
     if (configLevel !== "debug") return;
     const parts = Object.entries(attrs).map(
@@ -738,6 +1139,124 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       `${new Date().toISOString()} level=debug op=${op} ${parts.join(" ")}`,
     );
   };
+
+  // The director's guidance surface: the agent definition, the three
+  // orchestration skills, and the two commands ride the package beside the
+  // module and are registered here, so a deployment links one folder and
+  // the host gets the whole surface. Registration is an enhancement, not a
+  // load requirement — the tools and the mail leg run without these
+  // domains (a host whose surface lacks one, and the tests' fake, carry
+  // none) — so a missing domain or a malformed file is said and skipped,
+  // never fatal. The files resolve beside the module, which is why the
+  // packaged artifact must mirror the source layout (package.nix).
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  try {
+    const definition = loadAgentDefinition(
+      readFileSync(join(moduleDir, "agent", "director.md"), "utf8"),
+    );
+    await ctx.agent?.transform((editor) => {
+      // The upsert is the host's contract: update creates the agent from
+      // Info.default(id) when the id is missing, then applies the callback
+      // (packages/core/src/agent.ts:80; upstream #45841). The file link
+      // that used to guarantee the agent is gone, so this registration is
+      // the agent's only path into a deployment.
+      editor.update("director", (agent: any) => {
+        if (definition.description !== undefined)
+          agent.description = definition.description;
+        if (definition.mode !== undefined) agent.mode = definition.mode;
+        agent.system = definition.system;
+        // The push lands the shipped rules after the host's default set,
+        // and the host evaluates last-match-wins (Permission.evaluate's
+        // findLast, packages/core/src/permission.ts:98), so the shipped
+        // denies hold. A consumer's own agents.director rules load after
+        // configured plugins and land after these, so the consumer wins
+        // per rule.
+        agent.permissions.push(...definition.permissions);
+        if (definition.request && agent.request)
+          Object.assign(agent.request.body, definition.request.body);
+      });
+      // Inside the transform: a host without the domain never runs it, so
+      // the span cannot claim a registration that did not happen.
+      debug("agent.registered", {});
+    });
+  } catch (error) {
+    console.error(`[director] agent registration skipped: ${error}`);
+  }
+
+  try {
+    const skills = ["orchestrate", "dispatch-worker", "steer-worker"].map(
+      (id) => {
+        const path = join(moduleDir, "skills", id, "SKILL.md");
+        return {
+          id,
+          path,
+          skill: loadSkillDefinition(readFileSync(path, "utf8")),
+        };
+      },
+    );
+    await ctx.skill?.transform((editor) => {
+      for (const { id, path, skill } of skills) {
+        editor.add({
+          id,
+          name: skill.name,
+          ...(skill.description === undefined
+            ? {}
+            : { description: skill.description }),
+          path,
+          content: skill.body,
+        });
+        debug("skill.registered", { id });
+      }
+    });
+  } catch (error) {
+    console.error(`[director] skill registration skipped: ${error}`);
+  }
+
+  try {
+    const commands = ["drive-project.md", "status-report.md"].map((file) => {
+      const path = join(moduleDir, "commands", file);
+      return loadCommandDefinition(file, readFileSync(path, "utf8"));
+    });
+    await ctx.command?.transform((editor) => {
+      for (const command of commands) {
+        editor.add({
+          name: command.name,
+          ...(command.description === undefined
+            ? {}
+            : { description: command.description }),
+          execute: async (invocation) => {
+            const arguments_ =
+              typeof invocation.prompt?.text === "string"
+                ? invocation.prompt.text
+                : "";
+            if (command.agent !== undefined && ctx.session.switchAgent) {
+              // The absent domain is the documented degrade: the prompt
+              // fires for the session's current agent. A failed switch is
+              // not a degrade — it propagates and the command fails named,
+              // instead of running its template as the wrong agent.
+              await ctx.session.switchAgent({
+                sessionID: invocation.sessionID,
+                agent: command.agent,
+              });
+            }
+            await ctx.session.prompt({
+              sessionID: invocation.sessionID,
+              // The function replacement form: a string replacement honors
+              // the $$ and $& patterns, and an argument carrying them
+              // would reach the director rewritten.
+              text: command.template.replaceAll("$ARGUMENTS", () => arguments_),
+              ...(invocation.delivery === undefined
+                ? {}
+                : { delivery: invocation.delivery }),
+            });
+          },
+        });
+        debug("command.registered", { name: command.name });
+      }
+    });
+  } catch (error) {
+    console.error(`[director] command registration skipped: ${error}`);
+  }
 
   // Children this activation delivers for, and the text buffered toward the
   // next mail. Only workers whose session lives in this activation's

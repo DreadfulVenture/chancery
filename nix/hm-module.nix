@@ -42,9 +42,10 @@ let
   pluginPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.memory-store-plugin;
   assetsPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.memory-store-opencode;
   # The writs' reminder plugins ship as flat scanned-plugin files, one
-  # package each; the director ships as a directory plugin the deployment
-  # names in its config, and its agent definition rides that package
-  # (PRJ-453) — the module links only the agent from it.
+  # package each; the director ships as one plugin folder the module links
+  # whole into the scanned plugins directory — the plugin registers its
+  # agent, skills, and commands at load, and its agent definition rides
+  # that package (PRJ-453, since the folder shape).
   planReminderPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.plan-reminder;
   discoveryReminderPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.discovery-reminder;
   directorPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.director;
@@ -925,12 +926,23 @@ in
                 "${lib.removePrefix "${home}/" cfg.rulesDir}/writing.md".source = ../writs/instructions/writing.md;
                 "${lib.removePrefix "${home}/" cfg.rulesDir}/delivery.md".source =
                   ../writs/instructions/delivery.md;
-                # The director agent ships from the director package
-                # (PRJ-453); the rest of the agents come from the writs tree
-                # through the assets package below.
-                "${lib.removePrefix "${home}/" cfg.opencode.agentsDir}/director.md".source =
-                  "${directorPackage}/share/opencode/agents/director.md";
               }
+              //
+                # The director is one plugin folder: its package is the
+                # artifact, linked whole into the scanned plugins directory.
+                # The plugin registers its agent, skills, and commands at
+                # load, so no per-file links ride the deployment, and the
+                # package.json at the folder root makes OpenCode load it
+                # through its exports like a published package. The folder
+                # is a watched config root, so a rebuild is picked up the
+                # way the other scanned plugins are; a running session keeps
+                # the version it loaded. Settings ride an object-form
+                # `plugins` entry naming this exact path, spelled as it
+                # sits on disk — the director package's README carries the
+                # rule and why.
+                {
+                  "${lib.removePrefix "${home}/" cfg.opencode.pluginDir}/director".source = directorPackage;
+                }
               //
                 fileLinks cfg.opencode.pluginDir ../memory/opencode-client pluginPackage "share/opencode/plugins"
                   [

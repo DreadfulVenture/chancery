@@ -318,6 +318,43 @@
               " && touch "$out"
             '';
 
+            # The director's own surface load: the packaged entry must be a
+            # plugin OpenCode can activate (id, setup), and the packaged
+            # agent definition and skills must parse with the module's own
+            # strict parser — a layout slip or a malformed file is a build
+            # failure instead of a plugin the host silently skips.
+            director-loads = pkgs.runCommand "director-loads-check" { } ''
+              ${pkgs.nodejs_24}/bin/node --input-type=module -e "
+                import { readFileSync } from 'node:fs';
+                const root = '${config.packages.director}';
+                const plugin = (await import(root + '/index.ts')).default;
+                if (plugin?.id !== 'director' || typeof plugin.setup !== 'function') {
+                  console.error('the packaged director entry loaded, but exports no plugin with id director and a setup function');
+                  process.exit(1);
+                }
+                const { loadAgentDefinition, loadSkillDefinition, loadCommandDefinition } = await import(root + '/index.ts');
+                const agent = loadAgentDefinition(readFileSync(root + '/agent/director.md', 'utf8'));
+                if (agent.mode !== 'primary' || agent.permissions.length === 0 || agent.system.length === 0) {
+                  console.error('the packaged agent definition parsed, but carries no mode, permissions, or system prompt');
+                  process.exit(1);
+                }
+                for (const id of ['orchestrate', 'dispatch-worker', 'steer-worker']) {
+                  const skill = loadSkillDefinition(readFileSync(root + '/skills/' + id + '/SKILL.md', 'utf8'));
+                  if (skill.name !== id || skill.body.length === 0) {
+                    console.error('the packaged ' + id + ' skill parsed, but carries no body or a mismatched name');
+                    process.exit(1);
+                  }
+                }
+                for (const file of ['drive-project.md', 'status-report.md']) {
+                  const command = loadCommandDefinition(file, readFileSync(root + '/commands/' + file, 'utf8'));
+                  if (command.name !== file.slice(0, -3) || command.template.length === 0) {
+                    console.error('the packaged ' + file + ' parsed, but carries no template or a mismatched name');
+                    process.exit(1);
+                  }
+                }
+              " && touch "$out"
+            '';
+
             # The watcher loads from its configured plugins entry; a copy in the
             # scanned plugins dir would load it a second time: two pollers over
             # the same stamped watches. director.ts names the watcher

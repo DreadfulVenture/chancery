@@ -52,8 +52,8 @@ Produce a compact, scannable report containing:
 
 ## Reporting discipline (comply by construction)
 
-Follow the reporting rules in `skills/orchestrate/SKILL.md` and `skills/steer-worker/SKILL.md`: make the report
-self-contained (name the lane/repo, state where each signal came from, and include the evidence needed to understand it
-cold), compute and state status at send time from live tool output, never re-present answered gates or standing grants
-as open, and never deliver or reference content via a coordinator manifest/run artifact. If a signal cannot be
-retrieved, state that fact plainly rather than guessing.
+Follow the reporting rules the `orchestrate` and `steer-worker` skills carry: make the report self-contained (name the
+lane/repo, state where each signal came from, and include the evidence needed to understand it cold), compute and state
+status at send time from live tool output, never re-present answered gates or standing grants as open, and never deliver
+or reference content via a coordinator manifest/run artifact. If a signal cannot be retrieved, state that fact plainly
+rather than guessing.

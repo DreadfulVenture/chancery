@@ -23,7 +23,13 @@ tier above the coordinators is the operator. Do not ask for a dispatcher and do 
 later, it is a deterministic process that feeds coordinators, not a coordinating agent. LLMs live inside the work;
 scheduling does not become one.
 
-@clientBlock@
+## Sessions on OpenCode
+
+The operator wakes the coordinator with `opencode run -s <id>`. Truth about a worker comes from the service timeline
+(`opencode session list`, `opencode session export <id>`) and the worktree.
+
+The process hosting live sessions is `opencode.service`, together with any other process running a session. Never
+restart it.
 
 ## The loop
 

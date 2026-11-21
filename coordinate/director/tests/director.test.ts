@@ -12,7 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import plugin from "../director.ts";
+import plugin, {
+  FrontmatterError,
+  loadAgentDefinition,
+  loadCommandDefinition,
+  loadSkillDefinition,
+  parseFrontmatter,
+} from "../director.ts";
+import { readFileSync } from "node:fs";
 
 // The director module as OpenCode hosts it: setup() registers tools through a
 // ToolEditor and subscribes to the event stream; the tools run against the
@@ -111,16 +118,55 @@ function fakeHost() {
 // single activation is also the worker's own location activation.
 function fakeContext(
   listRows: SessionRow[] = [],
-  options: { host?: ReturnType<typeof fakeHost>; directory?: string } = {},
+  options: {
+    host?: ReturnType<typeof fakeHost>;
+    directory?: string;
+    pluginOptions?: Record<string, unknown>;
+  } = {},
 ) {
   const host = options.host ?? fakeHost();
   const directory = options.directory ?? "/tmp/worktree-a";
   const { sessions, mails, emit, kv } = host;
   const created: Array<Record<string, any>> = [];
-  const prompts: Array<{ sessionID: string; text: string }> = [];
+  const prompts: Array<{ sessionID: string; text: string; delivery?: string }> =
+    [];
   const switched: Array<{
     sessionID: string;
     model: { providerID: string; id: string };
+  }> = [];
+  const switchedAgents: Array<{ sessionID: string; agent: string }> = [];
+  // The registration domains, shaped like the host's: the agent editor
+  // upserts from the same default Info the host starts a missing agent
+  // from, so a test asserts the exact fields the module sets on top of it.
+  const agents = new Map<string, Record<string, any>>();
+  const defaultAgent = (id: string): Record<string, any> => ({
+    id,
+    name: id,
+    mode: "primary",
+    hidden: false,
+    permissions: [
+      { action: "*", resource: "*", effect: "allow" },
+      { action: "read", resource: "*.env", effect: "ask" },
+      { action: "read", resource: "*.env.*", effect: "ask" },
+      { action: "read", resource: "*.env.example", effect: "allow" },
+    ],
+    request: { settings: {}, headers: {}, body: {} },
+  });
+  const skills: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    path: string;
+    content: string;
+  }> = [];
+  const commands: Array<{
+    name: string;
+    description?: string;
+    execute: (invocation: {
+      sessionID: string;
+      prompt?: { text?: unknown };
+      delivery?: string;
+    }) => Promise<void>;
   }> = [];
   // The call log across the session domain, so a test can assert the order
   // the dispatch tool fires legs in (create, switchModel, prompt).
@@ -132,6 +178,7 @@ function fakeContext(
       directory,
       project: { directory },
     },
+    options: options.pluginOptions,
     tool: {
       transform: async (
         fn: (editor: { add: (tool: ToolDef) => void }) => void,
@@ -191,13 +238,82 @@ function fakeContext(
         data: structuredClone(listRows),
         cursor: {},
       }),
-      prompt: async (input: { sessionID: string; text: string }) => {
+      prompt: async (input: {
+        sessionID: string;
+        text: string;
+        delivery?: string;
+      }) => {
         order.push("prompt");
         prompts.push(structuredClone(input));
         return { id: `msg-${prompts.length}`, sessionID: input.sessionID };
       },
+      switchAgent: async (input: { sessionID: string; agent: string }) => {
+        switchedAgents.push(structuredClone(input));
+        return undefined;
+      },
       synthetic: async (input: Mail) => {
         mails.push(structuredClone(input));
+      },
+    },
+    agent: {
+      transform: async (
+        fn: (editor: {
+          update: (
+            id: string,
+            update: (agent: Record<string, any>) => void,
+          ) => void;
+        }) => void,
+      ) => {
+        fn({
+          update: (id, update) => {
+            const current = agents.get(id) ?? defaultAgent(id);
+            agents.set(id, current);
+            update(current);
+          },
+        });
+        return undefined;
+      },
+    },
+    skill: {
+      transform: async (
+        fn: (editor: {
+          add: (skill: {
+            id: string;
+            name: string;
+            description?: string;
+            path: string;
+            content: string;
+          }) => void;
+        }) => void,
+      ) => {
+        fn({
+          add: (skill) => {
+            skills.push(skill);
+          },
+        });
+        return undefined;
+      },
+    },
+    command: {
+      transform: async (
+        fn: (editor: {
+          add: (definition: {
+            name: string;
+            description?: string;
+            execute: (invocation: {
+              sessionID: string;
+              prompt?: { text?: unknown };
+              delivery?: string;
+            }) => Promise<void>;
+          }) => void;
+        }) => void,
+      ) => {
+        fn({
+          add: (definition) => {
+            commands.push(definition);
+          },
+        });
+        return undefined;
       },
     },
     storage: {
@@ -267,6 +383,10 @@ function fakeContext(
     created,
     prompts,
     switched,
+    switchedAgents,
+    agents,
+    skills,
+    commands,
     mails,
     emit,
     order,
@@ -3637,5 +3757,287 @@ test("an unresolvable base, a non-git directory, and an omitted base each behave
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// The guidance registration: the plugin reads its agent definition, the
+// three orchestration skills, and the two commands from the files that
+// ride the package beside the module, and registers them through the
+// host's agent, skill, and command domains at setup. The files below
+// resolve beside the module, exactly as setup resolves them, so these
+// tests read the shipped bytes.
+
+test("setup registers the director agent from the shipped definition file", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const agent = fixture.agents.get("director");
+    assert.ok(agent, "the director agent was registered");
+    // The file's own fields, mapped onto the host's Agent.Info shape.
+    assert.equal(
+      agent.description,
+      "Project coordinator: drives the orchestration loop for objectives handed to this session",
+    );
+    assert.equal(agent.mode, "primary");
+    assert.equal(agent.request.body.temperature, 0.2);
+    assert.ok(
+      agent.system.includes("You are the user's director"),
+      "the file's body rides as the system prompt",
+    );
+    // The permission map, migrated action names included: task is the v2
+    // subagent action and bash is shell.
+    const rules = agent.permissions;
+    const find = (action: string, resource: string) =>
+      rules.find(
+        (rule: { action: string; resource: string }) =>
+          rule.action === action && rule.resource === resource,
+      );
+    assert.equal(find("subagent", "*")?.effect, "deny");
+    assert.equal(find("subagent", "implementer")?.effect, "allow");
+    assert.equal(find("edit", "*")?.effect, "deny");
+    assert.equal(find("edit", "*.md")?.effect, "allow");
+    assert.equal(find("opencode_session_move", "*")?.effect, "deny");
+    assert.equal(find("shell", "*")?.effect, "ask");
+    assert.equal(find("shell", "git status*")?.effect, "allow");
+    // The host's default rules ride ahead of the shipped ones; the
+    // last-match rule evaluation gives the shipped ones precedence.
+    assert.deepEqual(rules[0], {
+      action: "*",
+      resource: "*",
+      effect: "allow",
+    });
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("setup registers exactly the three orchestration skills from the shipped files", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    assert.deepEqual(
+      fixture.skills.map((skill: { id: string }) => skill.id).sort(),
+      ["dispatch-worker", "orchestrate", "steer-worker"],
+    );
+    const orchestrate = fixture.skills.find(
+      (skill: { id: string }) => skill.id === "orchestrate",
+    );
+    assert.equal(orchestrate.name, "orchestrate");
+    // The folded description reads as one continuous string, the way the
+    // host's own YAML fold renders it.
+    assert.ok(
+      orchestrate.description.startsWith("The coordinator's operating loop"),
+    );
+    assert.ok(!orchestrate.description!.includes("\n"));
+    // The content is the body only: no frontmatter, no client marker.
+    assert.ok(orchestrate.content.startsWith("# Orchestrate"));
+    assert.ok(!orchestrate.content.includes("@clientBlock@"));
+    assert.ok(
+      orchestrate.path.endsWith(join("skills", "orchestrate", "SKILL.md")),
+    );
+    for (const skill of fixture.skills) {
+      assert.ok(
+        skill.path.startsWith("/"),
+        `skill path is absolute: ${skill.path}`,
+      );
+      assert.ok(skill.content.length > 0, `${skill.id} carries content`);
+    }
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("setup registers the two commands; drive-project retargets the session at the director", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    assert.deepEqual(
+      fixture.commands.map((command: { name: string }) => command.name).sort(),
+      ["drive-project", "status-report"],
+    );
+    const drive = fixture.commands.find(
+      (command: { name: string }) => command.name === "drive-project",
+    )!;
+    assert.equal(
+      drive.description,
+      "Re-wake the director session and continue via its orchestration loop",
+    );
+    await drive.execute({
+      sessionID: "ses-caller",
+      prompt: { text: "finish the export feature" },
+      delivery: "queue",
+    });
+    // The frontmatter's agent field first, then the template with every
+    // $ARGUMENTS placeholder filled.
+    assert.deepEqual(fixture.switchedAgents, [
+      { sessionID: "ses-caller", agent: "director" },
+    ]);
+    assert.equal(fixture.prompts.length, 1);
+    assert.equal(fixture.prompts[0].sessionID, "ses-caller");
+    assert.equal(fixture.prompts[0].delivery, "queue");
+    assert.ok(
+      fixture.prompts[0].text.startsWith("Re-wake or continue the director"),
+    );
+    assert.ok(fixture.prompts[0].text.includes("finish the export feature"));
+    assert.ok(!fixture.prompts[0].text.includes("$ARGUMENTS"));
+
+    // status-report carries no agent field: no switch, a plain prompt.
+    const report = fixture.commands.find(
+      (command: { name: string }) => command.name === "status-report",
+    )!;
+    assert.ok(report.description!.startsWith("Produce a lane status report"));
+    await report.execute({
+      sessionID: "ses-caller",
+      prompt: { text: "" },
+    });
+    assert.equal(fixture.switchedAgents.length, 1);
+    assert.equal(fixture.prompts.length, 2);
+    assert.ok(fixture.prompts[1].text.startsWith("Produce a self-contained"));
+    assert.ok(fixture.prompts[1].text.includes("Arguments:"));
+    // A missing delivery rides as its absence, not as an invented value.
+    assert.equal("delivery" in fixture.prompts[1], false);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("the debug switch rides the plugin options, not the environment", async () => {
+  const lines: string[] = [];
+  const originalError = console.error;
+  console.error = (...parts: unknown[]) => {
+    lines.push(parts.join(" "));
+  };
+  try {
+    const fixture = fakeContext([], { pluginOptions: { logLevel: "debug" } });
+    const cleanup = await plugin.setup(fixture.ctx);
+    await cleanup?.();
+    assert.ok(
+      lines.some((line) => line.includes("op=agent.registered")),
+      `the debug log carries the registration spans: ${lines.join("\n")}`,
+    );
+
+    // Without options (the discovered plugin's shape) the same setup is
+    // silent.
+    lines.length = 0;
+    const quiet = fakeContext();
+    const quietCleanup = await plugin.setup(quiet.ctx);
+    await quietCleanup?.();
+    assert.deepEqual(lines, []);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("the frontmatter parser and the loaders reject malformed files named", () => {
+  const readShipped = (...parts: string[]) =>
+    readFileSync(join(import.meta.dirname, "..", ...parts), "utf8");
+
+  // The shipped files parse, so the strict grammar below is the one they
+  // actually use.
+  const agent = loadAgentDefinition(readShipped("agent", "director.md"));
+  assert.equal(agent.mode, "primary");
+  const skill = loadSkillDefinition(
+    readShipped("skills", "steer-worker", "SKILL.md"),
+  );
+  assert.equal(skill.name, "steer-worker");
+
+  assert.throws(() => parseFrontmatter("no fence here\n"), FrontmatterError);
+  assert.throws(() => parseFrontmatter("---\nkey: value\n"), FrontmatterError);
+  assert.throws(
+    () => loadAgentDefinition("---\ndescription: x\nsurprise: 1\n---\nbody"),
+    /unknown agent frontmatter fields: surprise/,
+  );
+  assert.throws(
+    () => loadAgentDefinition("---\ndescription: 4\n---\nbody"),
+    /description must be a string/,
+  );
+  assert.throws(
+    () => loadAgentDefinition("---\nmode: 42\n---\nbody"),
+    /mode must be a string/,
+  );
+  assert.throws(
+    () => loadAgentDefinition("---\nmode: sideways\n---\nbody"),
+    /unknown agent mode/,
+  );
+  assert.throws(
+    () =>
+      loadAgentDefinition(
+        '---\npermission:\n  task:\n    "*": sideways\n---\nbody',
+      ),
+    /unknown permission effect/,
+  );
+  assert.throws(
+    () => loadSkillDefinition("---\nname: x\nextra: y\n---\nbody"),
+    /unknown skill frontmatter fields: extra/,
+  );
+  assert.throws(
+    () => loadSkillDefinition("---\nname: x\ndescription: 4\n---\nbody"),
+    /description must be a string/,
+  );
+  assert.throws(
+    () => loadCommandDefinition("x.md", "---\nagent: 42\n---\nbody"),
+    /x\.md: agent must be a string/,
+  );
+  assert.throws(
+    () =>
+      loadCommandDefinition("x.md", "---\ndescription: y\nextra: 1\n---\nbody"),
+    /unknown command frontmatter fields in x\.md: extra/,
+  );
+});
+
+test("command arguments ride verbatim: the $$ and $& replacement patterns are not interpreted", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const drive = fixture.commands.find(
+      (command: { name: string }) => command.name === "drive-project",
+    )!;
+    await drive.execute({
+      sessionID: "ses-caller",
+      prompt: { text: "check the $$out and $& escaping" },
+    });
+    assert.equal(fixture.prompts.length, 1);
+    assert.ok(
+      fixture.prompts[0].text.includes("check the $$out and $& escaping"),
+      "the arguments reach the director exactly as typed",
+    );
+    assert.ok(!fixture.prompts[0].text.includes("$ARGUMENTS"));
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("a failed agent switch fails the command named instead of prompting as the wrong agent", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    fixture.ctx.session.switchAgent = async () => {
+      throw new Error("switch refused");
+    };
+    const drive = fixture.commands.find(
+      (command: { name: string }) => command.name === "drive-project",
+    )!;
+    await assert.rejects(
+      drive.execute({ sessionID: "ses-caller", prompt: { text: "x" } }),
+      /switch refused/,
+    );
+    assert.equal(fixture.prompts.length, 0);
+
+    // The absent domain stays the documented degrade: no switch, prompt
+    // fires anyway.
+    const plain = fakeContext();
+    plain.ctx.session.switchAgent = undefined;
+    const plainCleanup = await plugin.setup(plain.ctx);
+    try {
+      const drive2 = plain.commands.find(
+        (command: { name: string }) => command.name === "drive-project",
+      )!;
+      await drive2.execute({ sessionID: "ses-caller", prompt: { text: "x" } });
+      assert.equal(plain.prompts.length, 1);
+    } finally {
+      await plainCleanup?.();
+    }
+  } finally {
+    await cleanup?.();
   }
 });

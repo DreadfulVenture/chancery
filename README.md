@@ -38,7 +38,8 @@ the PagerDuty source turns PagerDuty incidents into mail the same way. Its desig
 
 An OpenCode plugin (`coordinate/director`) that gives director sessions their coordination tools: dispatching and
 steering worker sessions over the host's session API, reading their turn reports as they finish, and a shared manifest
-store for run state. The package ships the director agent definition beside it.
+store for run state. The package ships the director agent definition, the orchestration skills, and the commands beside
+it, and registers the whole surface when it loads.
 
 ### oc-wake
 
@@ -223,9 +224,10 @@ Without the option the watcher disables itself and logs how to set it. It must n
 
 The other non-memory plugins load the same two ways. The reminders ride the scanned plugins directory like the memory
 plugin — `plan-reminder` and `discovery-reminder` ship as flat files the module links out of their packages — and the
-director is a directory plugin the deployment names in its config (no options needed):
-`{ "package": "<store path>/lib/director" }`. Its agent definition ships from that package and the module links it into
-the agents directory.
+director ships as one plugin folder the module links whole into the scanned plugins directory. The plugin registers its
+agent, skills, and commands at load, so no per-file links ride the deployment; settings ride an object-form `plugins`
+entry naming that linked directory, spelled exactly as it sits on disk (the directory's own README carries the rule and
+why).
 
 ### Running the daemon as a system service (hosts without home-manager)
 
