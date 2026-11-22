@@ -10,13 +10,15 @@
 // the read asks for triggered only, and the rows are filtered triggered
 // again after the read.
 //
-// No source abstraction lives between the two sources. This is the
-// second concrete source (Forgejo, PagerDuty), and it rides the
-// watcher's existing shape — the same poll pass, the same stamp
-// machinery (each service's claims row is a `chancery.watches` row on
-// the target session's stamp, beside the forge watches'), the same
-// mark-first mail-second discipline. A third source is the one that
-// earns the pattern's extraction; two do not.
+// No source abstraction lives between the sources. This is the second
+// concrete source (Forgejo, PagerDuty, then Linear in PRJ-475), and it
+// rides the watcher's existing shape — the same poll pass, the same
+// stamp machinery (each service's claims row is a `chancery.watches`
+// row on the target session's stamp, beside the forge watches'), the
+// same mark-first mail-second discipline. The extraction the pattern
+// earns is the watcher kernel's source contract
+// (docs/adr/20261119-watcher-family.md), and both legs migrate onto it
+// in later slices; the Linear source rides the same legacy shape.
 //
 // The trigger is a new incident, not a state change. An incident that is
 // already triggered when a service's claims row is first written wakes

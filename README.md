@@ -31,8 +31,9 @@ Its forge adapter (`review/forgejo-adapter`) receives the forge's webhooks; its 
 
 An OpenCode plugin (`watch/mail-watcher`) that watches event sources and delivers what it sees as session mail. The
 forge source watches Forgejo runs and wakes its session when a pull-request review arrives after the watch registers;
-the PagerDuty source turns PagerDuty incidents into mail the same way. Its design record is
-`docs/adr/20261119-watcher-family.md`.
+the PagerDuty source turns PagerDuty incidents into mail the same way; the Linear source turns ticket changes on watched
+Linear projects into mail under the same temporal rule — a ticket's changes wake only from its registration cursor
+onward, never the pre-registration backlog. Its design record is `docs/adr/20261119-watcher-family.md`.
 
 ### the director
 
@@ -216,8 +217,9 @@ plan mode from launching the implementer subagent, which runs with its own permi
 the plan agent's own restrictions.
 
 `mail-watcher` is not linked by the module. It needs `options.watcher` (the forge's credential and poll cadence, and the
-PagerDuty mapping), and OpenCode gives options only to plugins its config names, so the package ships it as a directory
-plugin at `lib/mail-watcher`. A deployment adds that path to its OpenCode `plugins` with the option set, for example
+PagerDuty and Linear mappings), and OpenCode gives options only to plugins its config names, so the package ships it as
+a directory plugin at `lib/mail-watcher`. A deployment adds that path to its OpenCode `plugins` with the option set, for
+example
 `{ "package": "<store path>/lib/mail-watcher", "options": { "watcher": { "forgeUrl": "https://forge.example.com" } } }`.
 Without the option the watcher disables itself and logs how to set it. It must not also be copied into a scanned
 `plugins/` directory, or it loads twice.
@@ -241,12 +243,12 @@ product's `cursor-client/`, installed at the `clients/cursor` layout the daemon 
 behalf: no launchd agent, no systemd unit, no client registration. The sibling packages round out the suite
 (`.#memory-hub`, the sync relay; `.#memory-store-plugin`, the OpenCode capture plugin; `.#zenigata`, the pull-request
 review bot; `.#forgejo-adapter`, its forge adapter; `.#mail-watcher`, the OpenCode plugin that reports watched Forgejo
-runs as session mail and wakes its session on pull-request reviews that arrive after the watch registers — never on the
-backlog the PR already carried, never on an unsubmitted draft; `.#director`, the coordination plugin; and the writs'
-reminder plugins, `.#plan-reminder` and `.#discovery-reminder`). A host without home-manager runs the daemon straight
-out of that package, with the recipe its own module uses on Linux — `<app-src>` below is the package's
-`lib/memory-store` path, and the recipe points the daemon's package imports at it via `PYTHONPATH`, the package's import
-root:
+runs as session mail, wakes its session on pull-request reviews that arrive after the watch registers — never on the
+backlog the PR already carried, never on an unsubmitted draft — and turns PagerDuty incidents and Linear ticket changes
+into mail the same way; `.#director`, the coordination plugin; and the writs' reminder plugins, `.#plan-reminder` and
+`.#discovery-reminder`). A host without home-manager runs the daemon straight out of that package, with the recipe its
+own module uses on Linux — `<app-src>` below is the package's `lib/memory-store` path, and the recipe points the
+daemon's package imports at it via `PYTHONPATH`, the package's import root:
 
 ```sh
 export UV_PYTHON=<nixpkgs python>/bin/python3.12

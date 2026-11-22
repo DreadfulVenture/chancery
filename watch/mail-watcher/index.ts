@@ -63,10 +63,17 @@
 // not seen wakes the mapped session exactly once. Its claims rows carry
 // kind "pagerduty" on the target session's stamp; they are config-owned,
 // so adoption never takes them into this registry and the poll pass
-// re-ensures each of them from the config. It rides the kernel as a
-// legacy leg — not yet migrated to the source contract (a later slice)
-// — writing its own row family through the kernel's stamp machinery,
-// exactly as it did before the kernel existed.
+// re-ensures each of them from the config. The Linear source rides the
+// same shape a third time (PRJ-475, linear.ts): the operator maps each
+// watched Linear project to a director session, the pass reads the
+// project's issues under each row's registration-time cursor (the
+// temporal filter — pre-registration history never wakes), and each
+// ticket change the claims have not seen wakes the mapped session. Its
+// claims rows carry kind "linear" on the target session's stamp,
+// config-owned the same way. Both ride the kernel as legacy legs — not
+// yet migrated to the source contract (later slices) — writing their
+// own row families through the kernel's stamp machinery, exactly as
+// they did before the kernel existed.
 //
 // Mail and stamps reuse the director package's. The envelope is imported —
 // one mail-leg definition for the family, never a fork — across the deployed
@@ -159,13 +166,18 @@ import { parsePullList } from "./pr-state.js";
 // the kernel as a legacy leg until its migration onto the source
 // contract (a later slice).
 import { PagerDutySource } from "./pagerduty.ts";
+// The Linear source (PRJ-475): the watcher's third source, riding the
+// kernel as a legacy leg in the PagerDuty source's shape until its
+// migration onto the source contract (a later slice).
+import { LinearSource } from "./linear.ts";
 
 const WATCH_KINDS = new Set(["run", "pr", "branch", "pr-reviews"]);
-// The PagerDuty source's claims rows (kind "pagerduty") also ride the
-// `chancery.watches` stamp — stamped on the session the config names —
-// but they are config-owned: the poll pass re-ensures each of them from
-// the config every pass (pagerduty.ts), so adoption never takes them
-// into the registry, and the kinds above are all the registry polls. No
+// The PagerDuty and Linear sources' claims rows (kinds "pagerduty" and
+// "linear") also ride the `chancery.watches` stamp — stamped on the
+// session the config names — but they are config-owned: the poll pass
+// re-ensures each of them from the config every pass (pagerduty.ts,
+// linear.ts), so adoption never takes them into the registry, and the
+// kinds above are all the registry polls. No
 // pass resets or rewrites the rows it does not adopt — that is the
 // claims row's at-most-once floor (review 339's 16307): adoption reads
 // without writing, every stamp write goes through the kernel's
@@ -1452,6 +1464,7 @@ const setup = async (ctx) => {
   // sharing the memo; the PagerDuty source rides as a legacy leg until
   // its migration onto the contract (a later slice).
   let pagerduty: PagerDutySource | null = null;
+  let linear: LinearSource | null = null;
   const kernel = createWatcherKernel({
     ctx,
     debug,
@@ -1463,6 +1476,12 @@ const setup = async (ctx) => {
         id: "pagerduty",
         poll: async () => {
           if (pagerduty) await pagerduty.poll();
+        },
+      },
+      {
+        id: "linear",
+        poll: async () => {
+          if (linear) await linear.poll();
         },
       },
     ],
@@ -1500,6 +1519,25 @@ const setup = async (ctx) => {
   if (pagerdutyConfig) {
     pagerduty = new PagerDutySource({
       config: pagerdutyConfig,
+      ctx,
+      debug,
+      patchStamps,
+      readStamps,
+      isStopped: kernel.isStopped,
+      failedWrites: kernel.failedWrites,
+    });
+  }
+
+  // The Linear source: built beside the PagerDuty leg, polling the same
+  // pass through its kernel leg. A config the source cannot serve (no
+  // token, no watchable projects, an unusable url) reads null and the
+  // other sources carry on alone; readConfig has already said why on
+  // its named line. The stamp machinery is the kernel's own, passed in,
+  // not forked.
+  const linearConfig = LinearSource.readConfig(ctx);
+  if (linearConfig) {
+    linear = new LinearSource({
+      config: linearConfig,
       ctx,
       debug,
       patchStamps,
