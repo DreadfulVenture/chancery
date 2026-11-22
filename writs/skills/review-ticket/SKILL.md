@@ -333,4 +333,5 @@ the skill tool:
 Load the lens for the tracker at hand alongside this skill, and run the workflow with the lens's deltas applied. Where a
 lens and this workflow disagree, the lens wins on its own subject matter: the calls to make, the input forms the tracker
 accepts, and how the review is delivered there. A tracker with no lens yet runs the workflow plain, naming its own tools
-as you go - write the lens down afterward, so the next run starts from it.
+as you go - write the lens down afterward in writs/skills, where this file's lenses sit and ship, so the next run starts
+from it.

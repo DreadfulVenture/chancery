@@ -60,6 +60,25 @@ type SessionRow = {
 
 const settleOnce = () => new Promise((resolve) => setTimeout(resolve, 2));
 
+// Swap console.error for a collector and restore the original when the
+// body ends, even on a throw. The swap is process-global, so it holds only
+// under sequential execution: the body must run to completion inside this
+// call, with no concurrent test or in-flight work logging through the
+// swapped console.error — node:test runs these bodies sequentially, which
+// is the assumption this helper pins. The body receives the log lines.
+async function captureErrorLogs(
+  body: (logs: string[]) => Promise<void>,
+): Promise<void> {
+  const logs: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  try {
+    await body(logs);
+  } finally {
+    console.error = originalError;
+  }
+}
+
 async function waitFor(probe: () => boolean, limit = 200): Promise<void> {
   for (let i = 0; i < limit && !probe(); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2));
@@ -612,83 +631,113 @@ test("the re-assert registers one late transform, on the first prompt only, and 
   assert.deepEqual(fixture.hookDisposals, ["prompt"]);
 });
 
-test("a failed re-assert retries on the next prompt: one late transform lands after the failure", async () => {
-  const logs: string[] = [];
-  const originalError = console.error;
-  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+test("a prompt firing while a first re-assert is still in flight registers exactly one late transform", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
   try {
-    // The agent domain throws on the hook's first fire and works after.
+    // The agent transform yields before completing, so the second hook
+    // fire genuinely interleaves with the first's awaited transform
+    // instead of queueing behind a completed registration.
     const realTransform = fixture.ctx.agent.transform;
-    let calls = 0;
     fixture.ctx.agent.transform = async (fn: unknown) => {
-      calls += 1;
-      if (calls === 1) throw new Error("transform refused");
+      await settleOnce();
       return realTransform(fn);
     };
     const before = fixture.agentTransforms.length;
-    await fixture.fireHook("prompt", {
+    // Both hook fires are in flight before either is awaited: the second
+    // starts while the first's transform is still running.
+    const first = fixture.fireHook("prompt", {
       sessionID: "ses-a",
       messageID: "msg-1",
     });
-    assert.equal(fixture.agentTransforms.length, before);
-    assert.equal(
-      logs.filter((line) => line.includes("permission re-assert failed"))
-        .length,
-      1,
-    );
-    // The next prompt retries: the transform registers, exactly once,
-    // and later prompts push nothing further.
-    await fixture.fireHook("prompt", {
-      sessionID: "ses-a",
+    const second = fixture.fireHook("prompt", {
+      sessionID: "ses-b",
       messageID: "msg-2",
     });
-    assert.equal(fixture.agentTransforms.length, before + 1);
-    await fixture.fireHook("prompt", {
-      sessionID: "ses-a",
-      messageID: "msg-3",
-    });
+    await Promise.all([first, second]);
+    // The flag flips synchronously before the awaited transform, so the
+    // concurrent fire sees it set and registers nothing. The pre-fix
+    // ordering — flag set after the transform — lets both fires pass the
+    // check and register two late transforms, failing this assertion.
     assert.equal(fixture.agentTransforms.length, before + 1);
   } finally {
-    console.error = originalError;
     await cleanup?.();
   }
 });
 
+test("a failed re-assert retries on the next prompt: one late transform lands after the failure", async () => {
+  await captureErrorLogs(async (logs) => {
+    const fixture = fakeContext();
+    const cleanup = await plugin.setup(fixture.ctx);
+    try {
+      // The agent domain throws on the hook's first fire and works after.
+      const realTransform = fixture.ctx.agent.transform;
+      let calls = 0;
+      fixture.ctx.agent.transform = async (fn: unknown) => {
+        calls += 1;
+        if (calls === 1) throw new Error("transform refused");
+        return realTransform(fn);
+      };
+      const before = fixture.agentTransforms.length;
+      await fixture.fireHook("prompt", {
+        sessionID: "ses-a",
+        messageID: "msg-1",
+      });
+      assert.equal(fixture.agentTransforms.length, before);
+      assert.equal(
+        logs.filter((line) => line.includes("permission re-assert failed"))
+          .length,
+        1,
+      );
+      // The next prompt retries: the transform registers, exactly once,
+      // and later prompts push nothing further.
+      await fixture.fireHook("prompt", {
+        sessionID: "ses-a",
+        messageID: "msg-2",
+      });
+      assert.equal(fixture.agentTransforms.length, before + 1);
+      await fixture.fireHook("prompt", {
+        sessionID: "ses-a",
+        messageID: "msg-3",
+      });
+      assert.equal(fixture.agentTransforms.length, before + 1);
+    } finally {
+      await cleanup?.();
+    }
+  });
+});
+
 test("a host without a prompt hook logs the error and skips the re-assert: no late transform, and the strip stands", async () => {
-  const logs: string[] = [];
-  const originalError = console.error;
-  console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
-  const fixture = fakeContext();
-  delete (fixture.ctx.session as Record<string, unknown>).hook;
-  const cleanup = await plugin.setup(fixture.ctx);
-  try {
-    fixture.agentTransforms.push((editor) =>
-      editor.update("director", (agent) =>
-        agent.permissions.push(...structuredClone(CONFIG_FLOOR)),
-      ),
-    );
-    await fixture.replayAgents();
-    await fixture.fireHook("prompt", {
-      sessionID: "ses-first",
-      messageID: "msg-1",
-    });
-    await fixture.replayAgents();
-    assert.equal(fixture.hooks.length, 0);
-    assert.equal(
-      fixture.lastRule("director", "director_dispatch")?.effect,
-      "deny",
-    );
-    assert.ok(
-      logs.some((line) =>
-        line.includes("[director] permission re-assert unavailable"),
-      ),
-    );
-  } finally {
-    console.error = originalError;
-    await cleanup?.();
-  }
+  await captureErrorLogs(async (logs) => {
+    const fixture = fakeContext();
+    delete (fixture.ctx.session as Record<string, unknown>).hook;
+    const cleanup = await plugin.setup(fixture.ctx);
+    try {
+      fixture.agentTransforms.push((editor) =>
+        editor.update("director", (agent) =>
+          agent.permissions.push(...structuredClone(CONFIG_FLOOR)),
+        ),
+      );
+      await fixture.replayAgents();
+      await fixture.fireHook("prompt", {
+        sessionID: "ses-first",
+        messageID: "msg-1",
+      });
+      await fixture.replayAgents();
+      assert.equal(fixture.hooks.length, 0);
+      assert.equal(
+        fixture.lastRule("director", "director_dispatch")?.effect,
+        "deny",
+      );
+      assert.ok(
+        logs.some((line) =>
+          line.includes("[director] permission re-assert unavailable"),
+        ),
+      );
+    } finally {
+      await cleanup?.();
+    }
+  });
 });
 
 test("dispatch creates the worker in the directory, stamps the coordinator, and queues the brief", async () => {

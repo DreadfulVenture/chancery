@@ -247,8 +247,9 @@ interface SessionDomain {
   // below and skips the re-assert, so the config floor's deny strips the
   // write-half tools from the director agent's catalog as before the fix.
   // The callback's input is the host's SessionPrompt shape, whose
-  // messageID is required there, not optional — verified in-tree at
-  // packages/plugin/src/effect/session.ts:16 (SessionPrompt interface).
+  // messageID is required there, not optional — verified in the opencode
+  // tree, in the SessionPrompt interface
+  // (packages/plugin/src/effect/session.ts).
   hook?(
     name: string,
     callback: (input: {
@@ -1311,12 +1312,16 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   // activation: the handler flips the flag synchronously, before the
   // awaited transform, and resets it in the catch, so the check-and-set
   // runs in the handler fiber across no await — two concurrent first
-  // prompts cannot both register, and a failed transform retries on the
-  // next prompt. A plugin reload brings a fresh activation whose own
-  // first prompt registers its own transform — duplicate rules are
-  // harmless under last-match-wins. A host without the prompt hook, or
-  // without an agent domain to transform, logs the error below and skips
-  // the re-assert, so the strip stands as before this fix.
+  // prompts cannot both register. A failed transform retries on the next
+  // prompt when prompts don't overlap; a prompt firing while a failing
+  // transform is still in flight sees the flag set and skips, so its
+  // retry lands on the prompt after next. A plugin reload brings a fresh
+  // activation whose own first prompt registers its own transform —
+  // duplicate rules are harmless under last-match-wins. A host without
+  // the prompt hook logs the error below once at registration and skips
+  // the re-assert; a host with the hook but no agent domain to transform
+  // returns silently per prompt, where a per-prompt log would spam. The
+  // strip stands as before this fix either way.
   let reasserted = false;
   let hookRegistration: { dispose: () => Promise<void> } | undefined;
   try {
