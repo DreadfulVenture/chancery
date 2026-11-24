@@ -19,11 +19,18 @@
 # $variables that a substitute-style step would eat.
 {
   lib,
+  pkgs,
   runCommand,
   writeText,
 }:
 
 let
+  # The agenix-secrets skill ships only this SKILL.md plus the built
+  # helper: the helper's python source, tests, and README live in the
+  # helper's package directory (tool/agenix-secrets/), and the binary the
+  # skill's examples invoke is derived from that source there.
+  ageEnvSecretHelper = pkgs.callPackage ../tool/agenix-secrets/package.nix { };
+
   clients = [
     "cursor"
     "opencode"
@@ -79,6 +86,10 @@ let
       # writs/instructions/writing.md: both copies are build-time artifacts
       # of it and cannot drift.
       cp ${../writs/instructions/writing.md} "$out/share/skills.${host}/humanizer/writing.md"
+      # The agenix-secrets helper: the skill tree carries only SKILL.md,
+      # so the bin directory does not exist until this copy creates it.
+      mkdir -p "$out/share/skills.${host}/agenix-secrets/bin"
+      cp ${ageEnvSecretHelper}/bin/age-env-secret "$out/share/skills.${host}/agenix-secrets/bin/age-env-secret"
     ''
     + lib.concatStrings (
       map (name: ''

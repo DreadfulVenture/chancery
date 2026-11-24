@@ -35,6 +35,11 @@ test-runtime-compat: ## Run the zenigata runtime compat check against the packag
 	@out=$$(nix build .#zenigata-runtime --no-link --print-out-paths | tail -1) && \
 	node review/zenigata/test/runtime-compat-run.ts --runtime "$$out"
 
+.PHONY: test-agenix
+test-agenix: ## Run the agenix-secrets helper tests in the nix sandbox (no dev-shell dependencies)
+	@system=$$(nix eval --raw --impure --expr 'builtins.currentSystem') && \
+	nix build .#checks.$$system.agenix-secrets --no-link --print-out-paths > /dev/null
+
 .PHONY: memory-dev
 memory-dev: ## Boot the local development stack
 	@./memory/store/memory_store/scripts/memory-dev

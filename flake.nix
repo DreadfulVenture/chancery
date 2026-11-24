@@ -310,6 +310,7 @@
             plan-reminder = pkgs.callPackage ./writs/plan-reminder/package.nix { };
             discovery-reminder = pkgs.callPackage ./writs/discovery-reminder/package.nix { };
             oc-wake = pkgs.callPackage ./wake/oc-wake/package.nix { };
+            agenix-secrets-helper = pkgs.callPackage ./tool/agenix-secrets/package.nix { };
           };
 
           checks = {
@@ -449,6 +450,12 @@
               fi
               touch "$out"
             '';
+
+            # The agenix-secrets helper's suite, defined with the package it
+            # tests (see tool/agenix-secrets/package.nix): real
+            # encrypt/decrypt cycles in the nix sandbox, never in the dev
+            # shell or a published runtime.
+            agenix-secrets = config.packages.agenix-secrets-helper.suite;
 
             # The module carries two service backends and only one of them has a
             # person running it daily. `nix flake check` covers the current

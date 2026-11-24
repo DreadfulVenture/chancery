@@ -33,7 +33,10 @@ A fresh worktree needs one `nix develop` run before its first push, or the share
 New source code is TypeScript. Raw JavaScript does not enter the repo without the operator's express approval (ruled
 2026-11-19): no new `.js` sources, no new extensionless JS scripts. The existing raw js — the mail-watcher's modules and
 the oc-wake bin — converts to TypeScript; until a file converts, edits to it ride the conversion instead of growing the
-js surface. The loader is not a constraint: opencode runs on Bun, which imports TypeScript natively.
+js surface. The loader is not a constraint: opencode runs on Bun, which imports TypeScript natively. `tool/` is the home
+for agent-operating tools — `agenix-secrets` is its first product — and its helper is python, the one new-language
+exception: it ships as a nix-built binary from `tool/agenix-secrets/package.nix`, and python is a sanctioned repo
+language (memory/store runs it).
 
 ## Skill references resolve at runtime
 
