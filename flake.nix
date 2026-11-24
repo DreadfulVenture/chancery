@@ -101,6 +101,10 @@
               instructions = [
                 "~/.local/services/memory/contract.md"
                 "~/.local/services/chancery/rules/writing.md"
+                "~/.local/services/chancery/rules/code.md"
+                "~/.local/services/chancery/rules/comments.md"
+                "~/.local/services/chancery/rules/communication.md"
+                "~/.local/services/chancery/rules/review.md"
                 "~/.local/services/memory/data/memory-floor.md"
               ];
             };

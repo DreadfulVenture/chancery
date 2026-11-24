@@ -860,6 +860,12 @@ in
                 "${lib.removePrefix "${home}/" cfg.rulesDir}/writing.md".source = ../writs/instructions/writing.md;
                 "${lib.removePrefix "${home}/" cfg.rulesDir}/delivery.md".source =
                   ../writs/instructions/delivery.md;
+                "${lib.removePrefix "${home}/" cfg.rulesDir}/code.md".source = ../writs/instructions/code.md;
+                "${lib.removePrefix "${home}/" cfg.rulesDir}/comments.md".source =
+                  ../writs/instructions/comments.md;
+                "${lib.removePrefix "${home}/" cfg.rulesDir}/communication.md".source =
+                  ../writs/instructions/communication.md;
+                "${lib.removePrefix "${home}/" cfg.rulesDir}/review.md".source = ../writs/instructions/review.md;
               }
               //
                 fileLinks cfg.opencode.pluginDir ../memory/opencode-client pluginPackage "share/opencode/plugins"
