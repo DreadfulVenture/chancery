@@ -360,9 +360,12 @@ function blindPrompt(input: {
   return `${input.persona}
 
 You are running the blind first pass of a pull-request review. Judge the
-change below on its own merits, from the diff alone against its base
-branch. You have not seen the pull-request title, body, or discussion;
-do not speculate about them.
+change on its own merits, against its base branch. You sit in the review
+worktree: read the code around the diff, and run a command when a finding
+needs the evidence. You have not seen the pull-request title, body, or
+discussion; do not fetch or speculate about them. The pull request's own
+commit messages and refs are withheld from this pass too: judge the code,
+not the author's claims about it.
 
 Repository: ${input.repo}, PR ${input.pr}, head ${input.headRef} @ ${input.headSha}, base ${input.baseRef}.
 

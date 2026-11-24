@@ -88,13 +88,15 @@ copyFileSync(agentMd, join(agentDir, "zenigata-reviewer.md"));
 // first, and a file-defined agent's own rules land after the floor's, so
 // they win at the serve's last-match rule evaluation. The allow-all row
 // here is the evidence surface for that asymmetry: the worker's `read`
-// tool call runs under the deny-all config floor. The one-line values
-// keep the YAML multiline-scalar gotcha away.
+// tool call runs under the deny-all config floor. The frontmatter carries
+// no `name` key: with `permissions` present the decode takes the native
+// path, where the file's name is the agent id and an unsupported `name`
+// key would log a warning on every run. The one-line values keep the YAML
+// multiline-scalar gotcha away.
 writeFileSync(
   join(agentDir, "zt-worker.md"),
   [
     "---",
-    "name: zt-worker",
     "description: The compatibility harness's file-defined subagent child",
     "mode: subagent",
     "permissions:",

@@ -2,15 +2,22 @@
  * The scripted OpenAI-compatible server the zenigata runtime compatibility
  * check spins up (PRJ-479). The packaged serve's harness config registers it
  * as a custom provider through opencode's bundled openai-compatible package,
- * so a prompt round-trip and a delegated review pass run against the real
- * serve with no network and no credentials.
+ * so a prompt round-trip, a delegated review pass, and the reviewer's own
+ * tool grants run against the real serve with no network and no credentials.
  *
  * Scripted by model name, stateless:
  *   reviewer — one assistant text turn ("runtime compat round-trip"),
- *              unless the prompt asks for delegation, where it returns a
- *              `subagent` tool call for the harness's zt-worker agent and,
- *              once the tool result is in the messages, the parent's final
- *              text.
+ *              unless the prompt drives a tool: a delegation prompt returns
+ *              a `subagent` tool call for the harness's zt-worker agent, a
+ *              shell prompt returns a `shell` tool call echoing the shell
+ *              marker, and a docs prompt returns a `webfetch` tool call
+ *              against this mock's own /docs/handbook (PRJ-496). Once the
+ *              tool result is in the messages, the parent's final text
+ *              names its probe, and the parent's tool-result content is
+ *              recorded under GET /events as a "parent-tool" row saying
+ *              whether the expected marker came back — that row is how the
+ *              test asserts the file-defined reviewer's own grants won over
+ *              the config floor's deny-all.
  *   worker   — first call returns a `read` tool call for the target file
  *              (env ZT_MOCK_READ_TARGET), delayed 2s; once the tool result
  *              is in the messages it returns the child's report text. The
@@ -27,7 +34,9 @@
  * The check also points the serve's catalog source (OPENCODE_MODELS_URL) at
  * this server: GET /experimental/v2.0/api.json serves the minimal catalog
  * file, so the serve's model catalog populates and refreshes over loopback
- * with no network.
+ * with no network. GET /docs/handbook serves the local docs fake the
+ * reviewer's webfetch proof fetches — loopback only, inside the harness's
+ * no_proxy, never a live docs site.
  */
 
 import {
@@ -44,15 +53,26 @@ const CHILD_TEXT = "child report text";
 const CHILD_DELAY_MS = Number(process.env.ZT_MOCK_CHILD_DELAY_MS ?? 2000);
 const ROUNDTRIP_TEXT = "runtime compat round-trip";
 
-/** The request records: chat turns, their completions, and one
+/** The reviewer-grant probes' markers and finals: the shell command's echo,
+ * the docs fake's page, and the parent text each final turn reports. */
+const SHELL_MARKER = "zt-compat-shell-ok";
+const DOCS_MARKER = "zt-compat-docs-fake";
+const SHELL_FINAL_TEXT = "compat shell ran and returned the marker";
+const DOCS_FINAL_TEXT = "compat docs page fetched and read";
+const DOCS_PAGE = `${DOCS_MARKER}: the reviewer fetched the local docs fake`;
+
+/** The request records: chat turns, their completions, one
  * "worker-read" row per child's second model call, saying whether the
- * child's `read` tool call returned the marker file's content. */
+ * child's `read` tool call returned the marker file's content, and one
+ * "parent-tool" row per reviewer probe's final call, saying whether the
+ * grant's tool call returned its marker. */
 interface MockEvent {
-  kind: "chat" | "chat-done" | "worker-read";
+  kind: "chat" | "chat-done" | "worker-read" | "parent-tool";
   model?: string;
   waitedMs?: number;
   sawToolResult?: boolean;
   toolCalls?: number;
+  tool?: string;
   succeeded?: boolean;
   at: number;
 }
@@ -62,7 +82,11 @@ const events: MockEvent[] = [];
 interface ChatBody {
   model: string;
   stream?: boolean;
-  messages: Array<{ role: string; content: unknown }>;
+  messages: Array<{
+    role: string;
+    content: unknown;
+    tool_calls?: Array<{ id?: string; function?: { name?: string } }>;
+  }>;
 }
 
 function toolResultText(body: ChatBody): string {
@@ -88,9 +112,11 @@ function sawToolResult(body: ChatBody): boolean {
   return body.messages.some((m) => m.role === "tool");
 }
 
-/** The parent reviewer's script: delegate only when the prompt asks. The
- * worker child reads the target file with the `read` tool before it
- * reports, so the child's tool grant is exercised on every run. */
+/** The parent reviewer's script: the round-trip turn unless the prompt
+ * drives a tool — the delegation probe, the shell probe, or the docs
+ * probe. The worker child reads the target file with the `read` tool
+ * before it reports, so the child's tool grant is exercised on its run;
+ * the parent's grant probes are exercised on the shell and docs turns. */
 function choose(body: ChatBody): Scripted {
   const model = body.model;
   if (model === "worker") {
@@ -125,40 +151,113 @@ function choose(body: ChatBody): Scripted {
     };
   }
   if (model === "reviewer") {
-    if (sawToolResult(body)) {
-      return { content: FINAL_TEXT, finish: "stop" };
-    }
     const lastUser = [...body.messages]
       .reverse()
       .find((m) => m.role === "user");
-    const asks =
-      typeof lastUser?.content === "string" &&
-      /delegate/i.test(lastUser.content);
-    if (!asks) {
-      return { content: ROUNDTRIP_TEXT, finish: "stop" };
+    const asks = typeof lastUser?.content === "string" ? lastUser.content : "";
+    if (sawToolResult(body)) {
+      // The parent's final turn: the tool result is in. The evidence row
+      // goes out unconditionally on this turn, the way the worker-read
+      // rows do, with `succeeded` computed from the marker's presence —
+      // so a lost grant records its failure here and the test's event
+      // asserts stay reachable. The row's tool is the call that precedes
+      // the result; the delegated flow's `subagent` result (the
+      // background notice) carries no marker, so its row reads
+      // succeeded false and nothing asserts on it.
+      const result = toolResultText(body);
+      const calls = [...body.messages]
+        .reverse()
+        .find(
+          (m) =>
+            m.role === "assistant" &&
+            Array.isArray(m.tool_calls) &&
+            m.tool_calls.length > 0,
+        );
+      const tool = calls?.tool_calls?.[0]?.function?.name ?? "unknown";
+      const marker =
+        tool === "shell"
+          ? SHELL_MARKER
+          : tool === "webfetch"
+            ? DOCS_MARKER
+            : undefined;
+      events.push({
+        kind: "parent-tool",
+        tool,
+        succeeded: marker === undefined ? false : result.includes(marker),
+        at: Date.now(),
+      });
+      if (result.includes(SHELL_MARKER)) {
+        return { content: SHELL_FINAL_TEXT, finish: "stop" };
+      }
+      if (result.includes(DOCS_MARKER)) {
+        return { content: DOCS_FINAL_TEXT, finish: "stop" };
+      }
+      return { content: FINAL_TEXT, finish: "stop" };
     }
-    return {
-      toolCalls: [
-        {
-          id: "call_subagent_1",
-          type: "function",
-          function: {
-            name: "subagent",
-            arguments: JSON.stringify({
-              agent: "zt-worker",
-              description: "compat probe",
-              prompt:
-                "Read the harness's target file with the read tool, then report the child text and nothing else.",
-            }),
+    if (/delegate/i.test(asks)) {
+      return {
+        toolCalls: [
+          {
+            id: "call_subagent_1",
+            type: "function",
+            function: {
+              name: "subagent",
+              arguments: JSON.stringify({
+                agent: "zt-worker",
+                description: "compat probe",
+                prompt:
+                  "Read the harness's target file with the read tool, then report the child text and nothing else.",
+              }),
+            },
           },
-        },
-      ],
-      finish: "tool_calls",
-    };
+        ],
+        finish: "tool_calls",
+      };
+    }
+    if (/shell/i.test(asks)) {
+      // The shell probe: a foreground echo (no background key — a call
+      // pending across turn end is the park posture the runtime forbids),
+      // whose output carries the marker. The session's own cwd is the
+      // serve's project directory, so no workdir is sent.
+      return {
+        toolCalls: [
+          {
+            id: "call_shell_1",
+            type: "function",
+            function: {
+              name: "shell",
+              arguments: JSON.stringify({
+                command: `echo ${SHELL_MARKER}`,
+              }),
+            },
+          },
+        ],
+        finish: "tool_calls",
+      };
+    }
+    if (/docs/i.test(asks)) {
+      // The docs probe: a webfetch against this mock's own /docs/handbook
+      // fake — the bound port is only known here, at request time.
+      return {
+        toolCalls: [
+          {
+            id: "call_fetch_1",
+            type: "function",
+            function: {
+              name: "webfetch",
+              arguments: JSON.stringify({
+                url: `http://127.0.0.1:${boundPort}/docs/handbook`,
+              }),
+            },
+          },
+        ],
+        finish: "tool_calls",
+      };
+    }
+    return { content: ROUNDTRIP_TEXT, finish: "stop" };
   }
   return { content: `zt-mock: no script for model ${model}`, finish: "stop" };
 }
-
 /** One streaming response, OpenAI SSE shape. */
 function writeStream(
   res: ServerResponse,
@@ -319,15 +418,27 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       res.end(catalog ? readFileSync(catalog, "utf8") : "{}");
       return;
     }
+    if (req.method === "GET" && req.url?.startsWith("/docs/handbook")) {
+      // The docs fake the reviewer's webfetch proof fetches: plain text,
+      // loopback only, inside the harness's no_proxy.
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(`${DOCS_PAGE}\n`);
+      return;
+    }
     res.writeHead(404);
     res.end("{}");
   });
 });
 
+/** This server's own bound port, set at listen and read only through
+ * choose(), so the scripted webfetch call can name this very mock. */
+let boundPort = 0;
+
 const port = Number(process.env.ZT_MOCK_PORT ?? 0);
 server.listen(port, "127.0.0.1", () => {
   const bound = server.address()?.port;
   if (bound === undefined) return;
+  boundPort = bound;
   const file = process.env.ZT_MOCK_PORT_FILE;
   if (file) {
     writeFileSync(file, String(bound));

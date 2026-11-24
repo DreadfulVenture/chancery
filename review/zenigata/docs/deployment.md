@@ -160,12 +160,29 @@ default is what ships when nobody overrides.
 
 The package ships the review agent's definition at `<package>/share/zenigata/agent/reviewer.md`. When the module's
 `agentFile` is set, the module publishes a copy of that definition at `/etc/zenigata/agent/<agentName>.md`; a change to
-the definition lands at the next system rebuild. The agent runtime derives an agent's id from the file name, and the
-session driver selects the agent by id — publishing under `<agentName>.md` is what makes `ZENIGATA_AGENT` resolve.
-Registering the conf dir with the opencode service is the deployment's business: the opencode service config decides
-which directories it scans, and the module stays out of that wiring. The deployment must also scope the review session's
-tools at the opencode runtime's agent grants: the agent definition's "no connection to the forge, the checkout, or the
-network" line is prompt-level instruction, not policy, and the runtime's tool grants are what actually enforce it.
+the definition lands at the next system rebuild. The agent runtime derives an agent's id from the definition file's
+name, and the session driver selects the agent by id — publishing under `<agentName>.md` is what makes `ZENIGATA_AGENT`
+resolve. Registering the conf dir with the opencode service is the deployment's business: the opencode service config
+decides which directories it scans, and the module stays out of that wiring.
+
+The definition carries its own policy: the `permissions` block in its frontmatter grants the reviewer's working tools —
+reading, globbing, grepping, running shell commands, and looking up reference material on the network, plus the subagent
+delegation the passes use. A file-defined agent's rules land after the runtime's config floor and win, so the definition
+is the operative grant map and every deployment carries it without re-allowing anything. The authoring actions (`edit`,
+`write`, `patch`) stay denied as tool mounts, and one misuse rides behind them as a denial: a trailing `shell` row
+refuses `git push*` commands. That denial matches the command text the shell tool checks as its permission resource —
+the raw command string, per command segment (verified against the 2.3.0 source) — so it catches commands spelled
+`git push …` and not a push that starts differently; the no-push invariant does not rest on the row alone.
+
+The grants do not make the reviewer harmless. `shell` on `*` subsumes every authoring tool — redirection, `git apply`,
+`rm` — so a build writing through the shell is the grant working, and "the review reports, it does not rewrite the tree"
+is the definition's prompt-level instruction, not policy. The forge exclusion has the same two layers: no session tool
+is forge-wired and the integrations/MCP/plugin channels stay denied at the policy level, while the bot's forge adapter
+stays the only forge surface the pipeline has — and the closure holds on an environmental precondition the deployment
+carries: the serve environment stays credential-free, with no forge credential in reach and no push access anywhere, and
+the per-PR review worktree is disposable. Pass 1's fence on the pull request's own commit messages and refs is
+instruction-level too: the permission system gates tools, not arguments, so the grants run git freely and the
+definition's discipline is what withholds the author's claims from the blind pass.
 
 ## The runtime package
 
@@ -181,13 +198,15 @@ whatever the lock has now, and the packaged binary reports it at any time. The d
 pairing. The compatibility check is the gate: every lock refresh that moves the branch's opencode runs the
 delegated-pass settle test against the new serve on the build.
 
-The config the package ships is the neutral, product-owned floor: it denies every tool except the subagent delegation
-the passes use (a headless serve has nobody to answer a permission ask, so the floor denies instead), refuses
-integrations, MCP servers, and plugins at the policy level — deliberately not `integration.use`, whose deny also covers
-providers served from local config and would take out the deployment's own model route — and turns sharing and
-self-update off. The deployment-only wiring — the model route with the gateway's virtual-key attribution, the serve's
-address and password, the agent-definition directories it scans — is the deployment's layer; the package's
-`opencodeConfigPath` passthru names where the config lands inside it.
+The config the package ships is the neutral, product-owned floor: it keeps a global deny with the subagent delegation
+carve-out after it (a headless serve has nobody to answer a permission ask, so the floor denies instead of asking) and
+refuses integrations, MCP servers, and plugins at the policy level — deliberately not `integration.use`, whose deny also
+covers providers served from local config and would take out the deployment's own model route — and turns sharing and
+self-update off. The reviewer agent's own definition carries its working grants (reads, searches and globs, shell
+commands, web lookups, subagent delegation): the file-defined agent's rules land after the floor and win, so the grants
+travel in the package and no deployment re-allows anything. The deployment-only wiring — the model route with the
+gateway's virtual-key attribution, the serve's address and password, the agent-definition directories it scans — is the
+deployment's layer; the package's `opencodeConfigPath` passthru names where the config lands inside it.
 
 ## Metrics
 

@@ -44,17 +44,32 @@ let
   # directories it scans are the deployment's layer.
   #
   # Schema facts verified against the v2.2.5 opencode source (PRJ-474
-  # confirmed decode unchanged into 2.3.0):
+  # confirmed decode unchanged into 2.3.0; action names re-read at the
+  # v2.3.0 tag for PRJ-496):
   #   - config-level `permissions` push onto every agent's ruleset, and the
-  #     LAST matching rule wins (Wildcard match on action and resource), so
-  #     the deny-all floor with the subagent carve-out after it lets the
-  #     review passes delegate and denies everything else;
+  #     LAST matching rule wins (Wildcard match on action and resource). A
+  #     file-defined agent's own frontmatter rules land after the floor
+  #     and win; a built-in agent's land before, under it. The deny-all
+  #     floor with the subagent carve-out after it therefore keeps the
+  #     review passes delegating and denies every other action, while the
+  #     reviewer's working grants (read, glob, grep, shell, webfetch,
+  #     websearch, subagent) ride its own definition (PRJ-496) and no
+  #     deployment re-allow is wanted; built-ins stay under the floor;
   #   - `deny` (never `ask`) is the headless posture: a serve session has
   #     nobody to answer an ask, and an ask parks the tool fiber (the
   #     PRJ-340 permission-park failure);
-  #   - the delegation tool's action name is `subagent` in 2.2.5;
-  #   - `websearch.use` did not exist as a policy action until 2.3.0, so
-  #     the websearch tool is denied by the permissions floor instead.
+  #   - the bash tool's action name is `shell` in 2.3.0 (`bash` is only an
+  #     input alias) and the delegation tool's is `subagent`;
+  #   - `websearch.use` did not exist as a policy action until 2.3.0. The
+  #     floor keeps the websearch tool denied for every agent without its
+  #     own grant; the reviewer's own grants allow the tool itself, whose
+  #     providers are account-keyless but call fixed external endpoints, so
+  #     real use rides the deployment's keys and no local fake can carry
+  #     it — the compat check's web-lookup proof runs through webfetch
+  #     instead. One unguarded edge: the lock-refresh gate proves the other
+  #     granted actions by behavior, but nothing in the driver exercises
+  #     websearch, so a serve that renamed the action would ship this
+  #     grant dead with nothing red.
   #   - `plugin.use` deny is safe for the serve's own machinery: internal
   #     config plugins are registered directly, outside the policy-gated
   #     load path.
@@ -77,9 +92,11 @@ let
       }
     ];
     # Platform-level refusals for the connections the review runtime must
-    # never make: the reviewer's grants already deny the tools, and these
-    # deny the channels (integrations, MCP servers, plugins) a tool grant
-    # cannot reach. Deliberately NOT `integration.use`: that action also
+    # never make: the reviewer's grants allow its working tools, and these
+    # deny the channels (integrations, MCP servers, plugins) no tool grant
+    # reaches — the forge stays the bot's adapter's surface because no
+    # session tool carries forge capability and no channel opens one.
+    # Deliberately NOT `integration.use`: that action also
     # covers providers and models supplied from local config rather than
     # an account, so its deny takes out the deployment's own model route
     # (the runtime's own compat check caught exactly that).

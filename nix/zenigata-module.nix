@@ -175,12 +175,17 @@ in
       default = "zenigata-reviewer";
       description = ''
         Agent name the session driver selects for every review and
-        reply session. Id resolution: under the legacy decode the
-        agent runtime derives the id from the definition file's
-        name, while today the definition's frontmatter `name`
-        carries the actual value — both must agree with
-        `ZENIGATA_AGENT`, so the file is published under this id and
-        its frontmatter name stays the same.
+        reply session. The packaged definition resolves to this id
+        through the native decode: with `permissions` in the
+        frontmatter, the agent runtime derives the id from the
+        definition file's name, so the file is published under this
+        id and that is what makes `ZENIGATA_AGENT` resolve. The
+        option's own caveat: `agentFile` publishes any definition,
+        and a definition whose frontmatter carries a key the native
+        schema lacks (a `name`) and no `permissions` takes the legacy
+        decode, where the frontmatter `name` carries the id instead —
+        keep whichever path a published definition takes in agreement
+        with `ZENIGATA_AGENT`.
       '';
     };
 

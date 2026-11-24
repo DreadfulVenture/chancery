@@ -8,6 +8,14 @@
  * subagent tool, where the driver's prompt settles while the child is
  * still working.
  *
+ * PRJ-496 adds the reviewer-grant proofs: the packaged agent definition
+ * ships its working grants in frontmatter, so the check runs the reviewer
+ * session's real shell command and a webfetch against the harness's local
+ * docs fake — both proving the file-defined reviewer's own grants won over
+ * the config floor's deny-all. The round-trip probe doubles as the boot
+ * canary: if the definition's frontmatter failed decode, this harness
+ * fails immediately with the agent the driver selects unresolved.
+ *
  * Run by the flake check (not the vitest suite): the harness boots the
  * packaged serve plus the scripted OpenAI-compatible mock
  * (test/fixtures/zt-openai-mock.ts) and invokes this file with node's type
@@ -118,6 +126,70 @@ assert.match(
   `the delegated pass settled without the subagent's report; output was ${JSON.stringify(delegatedOutput)}`,
 );
 await driver.dispose(delegated);
+
+// --- The reviewer's own grants (PRJ-496) ---------------------------------
+//
+// The packaged definition ships its working grants in frontmatter; a
+// file-defined agent's rules land after the config floor and win. Two
+// probes exercise them on the reviewer session itself: a real shell
+// command (the bash tool's action is `shell`) and a webfetch against the
+// local docs fake — never a live docs site. Each probe runs in its own
+// session, and the mock's parent-tool row records whether the tool result
+// carried the expected marker. The events feed is re-fetched after each
+// probe: the snapshot the delegated section read predates both, and the
+// rows must be read after their probe's rows exist.
+
+const shellSession = await driver.createSession(workDir, "zenigata-reviewer");
+await driver.prompt(
+  shellSession,
+  "Shell probe: run the shell command the script gives you.",
+);
+const shellOutput = await driver.readOutput(shellSession);
+assert.match(
+  shellOutput,
+  /compat shell ran/,
+  `the shell probe's final turn did not report the command's output: ${JSON.stringify(shellOutput)}`,
+);
+await driver.dispose(shellSession);
+
+const shellOk = (await (await fetch(mockEvents)).json()).filter(
+  (event: { kind: string; tool?: string }) =>
+    event.kind === "parent-tool" && event.tool === "shell",
+);
+assert.ok(
+  shellOk.length > 0,
+  "the reviewer never made its scripted shell tool call",
+);
+assert.ok(
+  shellOk.at(-1).succeeded === true,
+  "the shell tool call did not return the marker's echo: the reviewer's own grants did not win over the config floor",
+);
+
+const docsSession = await driver.createSession(workDir, "zenigata-reviewer");
+await driver.prompt(
+  docsSession,
+  "Docs probe: fetch the docs page the script names.",
+);
+const docsOutput = await driver.readOutput(docsSession);
+assert.match(
+  docsOutput,
+  /compat docs/,
+  `the docs probe's final turn did not report the fetched page: ${JSON.stringify(docsOutput)}`,
+);
+await driver.dispose(docsSession);
+
+const docsOk = (await (await fetch(mockEvents)).json()).filter(
+  (event: { kind: string; tool?: string }) =>
+    event.kind === "parent-tool" && event.tool === "webfetch",
+);
+assert.ok(
+  docsOk.length > 0,
+  "the reviewer never made its scripted webfetch tool call",
+);
+assert.ok(
+  docsOk.at(-1).succeeded === true,
+  "the webfetch tool call did not return the docs fake's page: the web-lookup grant did not win over the config floor",
+);
 
 console.log("zt runtime-compat: compat ok");
 process.exit(0);
