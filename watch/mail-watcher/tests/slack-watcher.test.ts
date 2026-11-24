@@ -10,6 +10,7 @@ import {
   floorOf,
   parseHistoryPage,
   readConfig,
+  slackClient,
   SlackSource,
   tsValue,
 } from "../slack.ts";
@@ -73,6 +74,15 @@ type SlackState = {
   calls: Array<{ path: string; query: URLSearchParams }>;
   auth: string[];
   outage: boolean;
+  // A rate-limited read: the next `rateLimitReads` conversations.history
+  // reads answer HTTP 429 naming `rateLimit` (seconds) as the
+  // Retry-After — the burst-overrun answer the live api gives.
+  rateLimit?: number;
+  rateLimitReads?: number;
+  // A failure window narrower than a pass: history reads past this many
+  // recorded calls fail with a 500 — the poll read lands, the prepare
+  // read fails.
+  failReadsAfter?: number;
   // An api-level failure (HTTP 200, ok:false) when set.
   apiError?: string;
   // A status phrase the failures carry — the redaction tripwire fills it.
@@ -119,6 +129,28 @@ async function startSlack(state: SlackState) {
         path: "conversations.history",
         query: url.searchParams,
       });
+      // The rate-limited read: a 429 naming the Retry-After, the burst
+      // overrun the live api answers with. The refused read counts as a
+      // call, so the client's retry shows as the next call.
+      if (state.rateLimitReads && state.rateLimitReads > 0) {
+        state.rateLimitReads -= 1;
+        res.writeHead(429, {
+          "content-type": "application/json",
+          "retry-after": String(state.rateLimit ?? 1),
+        });
+        res.end(JSON.stringify({ ok: false, error: "rate_limited" }));
+        return;
+      }
+      // The windowed failure: past this many calls the history read
+      // 500s — a window the poll read lands inside and the prepare read
+      // falls into.
+      if (
+        state.failReadsAfter !== undefined &&
+        state.calls.length > state.failReadsAfter
+      ) {
+        reject(500, "slack outage");
+        return;
+      }
       const asked = Number(url.searchParams.get("limit") ?? "") || 200;
       const limit = Math.max(1, Math.min(state.pageSize, asked));
       const oldest = url.searchParams.has("oldest")
@@ -900,9 +932,13 @@ test("readConfig: an absent block is silent, a present one carries token and url
     assert.deepEqual(logged, []);
 
     // The block's token wins; the url defaults to the public api base.
-    assert.deepEqual(readConfig({ slack: { token: SLACK_TOKEN } }), {
-      token: SLACK_TOKEN,
-      url: "https://slack.com/api",
+    // Cleared environment: a host carrying SLACK_API_URL must not read
+    // as the default's answer.
+    await withEnv({ SLACK_API_URL: undefined }, async () => {
+      assert.deepEqual(readConfig({ slack: { token: SLACK_TOKEN } }), {
+        token: SLACK_TOKEN,
+        url: "https://slack.com/api",
+      });
     });
 
     await withEnv(
@@ -1018,6 +1054,179 @@ test("a burst wider than the page wakes what it served and says the tail's loss 
   }
 });
 
+test("the slack client holds a 429's Retry-After, retries the read, and throws when the retry is refused too", async () => {
+  const state = slackState();
+  state.messages = [{ ts: tsAt(1), text: "the body", user: "U1" }];
+  const slack = await startSlack(state);
+  try {
+    const client = slackClient({ token: SLACK_TOKEN, url: slack.url });
+
+    // One refused read, then the api serves: the client holds the named
+    // second — not the fallback — and the retry carries the page.
+    state.rateLimit = 1;
+    state.rateLimitReads = 1;
+    const started = Date.now();
+    const answer = (await client.get("conversations.history", {
+      channel: CHANNEL_ID,
+      limit: 20,
+    })) as { messages: Array<{ ts: string }> };
+    const held = Date.now() - started;
+    assert.ok(held >= 900, `the retry waited the named second (${held}ms)`);
+    assert.ok(
+      held < 10_000,
+      `the hold named the header's second, not a fallback (${held}ms)`,
+    );
+    assert.deepEqual(
+      answer.messages.map((row) => row.ts),
+      [tsAt(1)],
+    );
+
+    // A retry the api refuses too: the second 429 throws, and the
+    // callers' discipline holds — a poll read's pass skips, a prepare
+    // read leaves its marker unspent.
+    state.rateLimitReads = 2;
+    await assert.rejects(
+      client.get("conversations.history", { channel: CHANNEL_ID, limit: 20 }),
+      /GET \/conversations\.history → HTTP 429/,
+    );
+  } finally {
+    await slack.close();
+  }
+});
+
+test("a prepare read that never arrives keeps the marker unspent; the message re-reads on the next pass and the body lands", async () => {
+  const state = slackState();
+  state.messages = [{ ts: tsAt(1), text: "the pre-watch history", user: "U1" }];
+  state.users = { U1: "Ada Lovelace" };
+  const slack = await startSlack(state);
+  const forge = await startForgeFake();
+  try {
+    const fixture = fakeContext([{ id: "ses-1", metadata: {} }]);
+    fixture.ctx.options = optionsWith(forge.url, {
+      token: SLACK_TOKEN,
+      url: slack.url,
+    });
+    await withEnv({ WATCHER_POLL_SECONDS: "0.05" }, async () => {
+      const cleanup = await boot(fixture);
+      try {
+        const reply = JSON.parse(
+          (
+            await tool(fixture, "watcher_register").execute(
+              { kind: "slack-channel", repo: "slack", ref: CHANNEL_ID },
+              { sessionID: "ses-1" },
+            )
+          ).content,
+        );
+        assert.equal(reply.ok, true);
+        await waitFor(() => historyCalls(state).length > 0);
+        await settle(40);
+        assert.equal(fixture.mails.length, 0);
+
+        // The message arrives; its pass's poll read lands (the window
+        // is set two reads out) and the prepare read falls into it and
+        // throws. The kernel's per-watch catch keeps the marker
+        // unspent: no mail renders, and the loss line is never said for
+        // a body a retry could still fetch.
+        state.messages.push({
+          ts: tsAt(500),
+          text: "the late body",
+          user: "U1",
+        });
+        state.failReadsAfter = state.calls.length + 2;
+        await waitFor(() =>
+          historyCalls(state).some((call) => call.query.get("limit") === "20"),
+        );
+        await settle(40);
+        assert.equal(
+          fixture.mails.length,
+          0,
+          "no mail renders off a failed read",
+        );
+        assert.equal(
+          slackRow(fixture, "ses-1")!.delivered?.[tsAt(500)],
+          undefined,
+          "the marker stays unspent",
+        );
+
+        // The window closes: the next pass re-reads the message — the
+        // poll's floor never moved — and the body arrives, once, with
+        // no loss line anywhere in the mail.
+        state.failReadsAfter = undefined;
+        await waitFor(() => fixture.mails.length === 1, 2000);
+        const text = envelope(fixture.mails[0].text);
+        assert.ok(text.includes("  the late body"), text);
+        assert.ok(!text.includes("could not be fetched"), text);
+        assert.deepEqual(slackRow(fixture, "ses-1")!.delivered, {
+          [tsAt(1)]: true,
+          [tsAt(500)]: true,
+        });
+        await settle(60);
+        assert.equal(fixture.mails.length, 1);
+      } finally {
+        await cleanup?.();
+      }
+    });
+  } finally {
+    await slack.close();
+    await forge.close();
+  }
+});
+
+test("an empty message renders no body section and no loss line; null stays the unreadable's answer", async () => {
+  const state = slackState();
+  state.messages = [{ ts: tsAt(1), text: "the pre-watch history", user: "U1" }];
+  state.users = { U1: "Ada Lovelace" };
+  const slack = await startSlack(state);
+  const forge = await startForgeFake();
+  try {
+    const fixture = fakeContext([{ id: "ses-1", metadata: {} }]);
+    fixture.ctx.options = optionsWith(forge.url, {
+      token: SLACK_TOKEN,
+      url: slack.url,
+    });
+    await withEnv({ WATCHER_POLL_SECONDS: "0.05" }, async () => {
+      const cleanup = await boot(fixture);
+      try {
+        const reply = JSON.parse(
+          (
+            await tool(fixture, "watcher_register").execute(
+              { kind: "slack-channel", repo: "slack", ref: CHANNEL_ID },
+              { sessionID: "ses-1" },
+            )
+          ).content,
+        );
+        assert.equal(reply.ok, true);
+        await waitFor(() => historyCalls(state).length > 0);
+        await settle(40);
+        assert.equal(fixture.mails.length, 0);
+
+        // A file share without a caption parses with no text field:
+        // Slack served the message fine — the wake renders no body
+        // section and never the loss line, and the marker spends (the
+        // message is not unreadable; it is empty).
+        state.messages.push({ ts: tsAt(500), user: "U1" });
+        await waitFor(() => fixture.mails.length === 1, 2000);
+        const text = envelope(fixture.mails[0].text);
+        assert.ok(
+          text.includes(`message ${tsAt(500)} from Ada Lovelace`),
+          text,
+        );
+        assert.ok(!text.includes("could not be fetched"), text);
+        assert.ok(!text.includes("\n  "), text);
+        assert.deepEqual(slackRow(fixture, "ses-1")!.delivered, {
+          [tsAt(1)]: true,
+          [tsAt(500)]: true,
+        });
+      } finally {
+        await cleanup?.();
+      }
+    });
+  } finally {
+    await slack.close();
+    await forge.close();
+  }
+});
+
 test("the boundary and the cursor math, composed directly: parseHistoryPage, classifyMessages, floorOf, tsValue", () => {
   // tsValue: the numeric side only; junk and zero are not messages.
   assert.equal(tsValue("1411764713.000001"), 1411764713.000001);
@@ -1071,7 +1280,7 @@ test("the boundary and the cursor math, composed directly: parseHistoryPage, cla
   );
 });
 
-test("ready(): the kernel's gate answers honestly when the config would not serve", () => {
+test("ready(): the kernel's gate answers honestly when the config would not serve", async () => {
   const source = new SlackSource({
     reads: {
       historyOf: async () => ({}),
@@ -1085,10 +1294,14 @@ test("ready(): the kernel's gate answers honestly when the config would not serv
     reason:
       "its config block is absent or unusable (its own line above said which)",
   });
-  const on = source.ready({ slack: { token: SLACK_TOKEN } });
-  assert.equal(on.ok, true);
-  assert.deepEqual(on.ok && on.config, {
-    token: SLACK_TOKEN,
-    url: "https://slack.com/api",
+  // Cleared environment: the default-url claim is tested against a host
+  // environment that carries no SLACK_API_URL.
+  await withEnv({ SLACK_API_URL: undefined }, async () => {
+    const on = source.ready({ slack: { token: SLACK_TOKEN } });
+    assert.equal(on.ok, true);
+    assert.deepEqual(on.ok && on.config, {
+      token: SLACK_TOKEN,
+      url: "https://slack.com/api",
+    });
   });
 });

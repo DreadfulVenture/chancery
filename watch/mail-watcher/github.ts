@@ -165,7 +165,12 @@ function githubClient(source: { token: string; url: string }) {
       const error = new Error(`GET ${path} → HTTP ${response.status}`);
       if (response.status === 403 || response.status === 429) {
         const remaining = response.headers.get("x-ratelimit-remaining");
-        const reset = Number(response.headers.get("x-ratelimit-reset"));
+        // An absent header parses as NaN, not 0 — Number(null) is 0 and
+        // 0 is finite, so the flat-minute fallback below would never
+        // fire and a proxy stripping the header while forwarding
+        // remaining: 0 would leave no backoff at all.
+        const resetHeader = response.headers.get("x-ratelimit-reset");
+        const reset = resetHeader === null ? NaN : Number(resetHeader);
         if (remaining === "0" && Number.isFinite(reset)) {
           (error as GitHubError).rateLimitUntil = reset * 1000;
         } else if (remaining === "0") {

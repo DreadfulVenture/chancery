@@ -19,9 +19,9 @@ import {
 import { forgeClient } from "./forge-client.ts";
 import { debugOf, forgejoReady } from "./config.ts";
 import { ForgejoSource } from "./forgejo-source.ts";
-// The Slack source: the watcher's fourth source, and the first to
-// register through the kernel's source contract rather than riding a
-// legacy leg (the forge source's shape): a session subscribes to a
+// The Slack source: the watcher's third source on the kernel's source
+// contract (the forge source first, github second — the forge source's
+// registration shape, not a legacy leg): a session subscribes to a
 // channel by watcher_register (kind "slack-channel"), each watch's
 // delivered markers — keyed by message ts — are its cursor, and every
 // message that arrives on the channel after the watch wakes the

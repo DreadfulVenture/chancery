@@ -22,7 +22,7 @@ const registerSchema = {
         "github-issue",
       ],
       description:
-        "What is watched: run (one Actions run by id), pr (one PR index, followed to its close), branch (one branch name), pr-reviews (one PR's reviews — one wake per review that arrives after the watch, never the backlog, never an unsubmitted draft), slack-channel (one Slack channel's messages — one wake per message that arrives after the watch, content, sender, and timestamp in the wake; bot messages included, the channel's history at register is the spent backlog), github-pr (one GitHub pull request by number — one wake per new review, comment, or state change, ending at the PR's close), or github-issue (one GitHub issue by number — one wake per new comment or state change).",
+        "What is watched: run (one Actions run by id), pr (one PR index, followed to its close), branch (one branch name), pr-reviews (one PR's reviews — one wake per review that arrives after the watch, never the backlog, never an unsubmitted draft), slack-channel (one Slack channel's messages — one wake per message that arrives after the watch, content, sender, and timestamp in the wake; bot messages included, the channel's history at register is the spent backlog), github-pr (one GitHub pull request by number — one wake per new review, comment, or state change, ending at the PR's close), or github-issue (one GitHub issue by number — one wake per new comment or state change). The slack-channel, github-pr, and github-issue kinds are opt-in per watcher — they need their watcher config blocks, and a register of one on a watcher without the block throws.",
     },
     repo: {
       type: "string",

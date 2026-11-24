@@ -1,6 +1,7 @@
-// The Slack source: the watcher's fourth source, and the first to
-// register through the kernel's source contract rather than riding a
-// legacy leg. A session subscribes to a channel by watcher_register
+// The Slack source: the watcher's third source on the kernel's source
+// contract (the forge source first, github second — the forge source's
+// registration shape, not a legacy leg). A session subscribes to a
+// channel by watcher_register
 // (kind "slack-channel", the channel's id as the ref, the forge kinds'
 // registration shape); every message that arrives on the channel after
 // the watch wakes the subscriber once, carrying the message's content,
@@ -87,6 +88,10 @@ import { WatchSource } from "./source.ts";
 const SLACK_KIND = "slack-channel";
 const SLACK_DEFAULT_URL = "https://slack.com/api";
 const SLACK_API_TIMEOUT_MS = 15_000;
+// The flat backoff when a 429 answers with no Retry-After header at
+// all (Slack names the wait; the header's absence is answered with the
+// github source's flat-minute shape).
+const SLACK_RATE_LIMIT_FALLBACK_MS = 60_000;
 // One history read per watch per pass, at Slack's own page maximum.
 const SLACK_HISTORY_LIMIT = 200;
 // The bounded read around a message ts (prepare's body fetch): ±2
@@ -178,6 +183,14 @@ export const readConfig = (watcherOptions: unknown): SlackConfig | null => {
 // machine code (channel_not_found, invalid_auth, rate_limited), this
 // surface's status phrase, and it rides the error so the named line
 // can carry it.
+//
+// The budget answer: a burst's reads outrun Slack's per-minute tier and
+// the api answers 429 with a Retry-After header naming the wait. The
+// client holds the backoff it names (a flat minute when the header is
+// absent — the github source's fallback shape) and retries the read
+// once; the retry is where the body arrives. A second 429 throws, and
+// the callers' discipline holds: a poll read's pass skips, a prepare
+// read leaves its marker unspent, and the next pass re-reads.
 export function slackClient(source: { token: string; url: string }) {
   const request = async (
     method: string,
@@ -195,6 +208,24 @@ export function slackClient(source: { token: string; url: string }) {
       });
     } catch (error) {
       throw new Error(`GET /${method} → ${(error as Error)?.message ?? error}`);
+    }
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const waitMs =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : SLACK_RATE_LIMIT_FALLBACK_MS;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      try {
+        response = await fetch(route, {
+          headers: { Authorization: `Bearer ${source.token}` },
+          signal: AbortSignal.timeout(SLACK_API_TIMEOUT_MS),
+        });
+      } catch (error) {
+        throw new Error(
+          `GET /${method} → ${(error as Error)?.message ?? error}`,
+        );
+      }
     }
     const text = await response.text().catch(() => "");
     if (!response.ok) {
@@ -632,31 +663,39 @@ export class SlackSource extends WatchSource {
   // The message body: one bounded history read around the ts, before the
   // stamp write (today's read-before-mark order — the kernel calls
   // prepare first). The body rides the detail, opaque to the kernel, the
-  // way the failing job's log tail does. A body that will not read
-  // (deleted, drifted, an outage) names its loss in the mail — the wake
-  // still lands, marked once; a retry could not fetch what the channel
+  // way the failing job's log tail does. A message the channel no longer
+  // carries (deleted, drifted) reads as null — the mail names the loss
+  // and the wake marks once: a retry could not fetch what the channel
   // no longer carries, and holding the wake would wedge the watch's tail
-  // behind it.
+  // behind it. An empty message reads as the empty string — no body
+  // section renders, the honest report for a message Slack served fine.
+  // A read that fails (an outage, a 429 the client's retry could not
+  // clear) throws instead of answering: the kernel's per-watch catch
+  // keeps the marker unspent, and the message re-reads on the next pass,
+  // where a healthy api serves the body — rendering the loss line there
+  // would spend a body a retry could still fetch, the one loss this
+  // source never takes.
   async prepare(watch: AdoptedWatch, event: WatchEvent) {
     const at = tsValue(event.id);
     if (at === null) return { text: null };
+    let answer: unknown;
     try {
-      const answer = await this.reads.historyOf(watch.ref, {
+      answer = await this.reads.historyOf(watch.ref, {
         limit: SLACK_TS_WINDOW_LIMIT,
         oldest: String(at - SLACK_TS_WINDOW_S),
         latest: String(at + SLACK_TS_WINDOW_S),
       });
-      const page = parseHistoryPage(answer);
-      const found = page?.rows.find((row) => row.ts === event.id);
-      return { text: found?.text ?? null };
     } catch (error) {
       this.debug("slack.message.unread", {
         id: watch.id,
         message: event.id,
         error: String(error),
       });
-      return { text: null };
+      throw error;
     }
+    const page = parseHistoryPage(answer);
+    const found = page?.rows.find((row) => row.ts === event.id);
+    return { text: found ? (found.text ?? "") : null };
   }
 
   render(watch: AdoptedWatch, event: WatchEvent, detail: unknown): string {
