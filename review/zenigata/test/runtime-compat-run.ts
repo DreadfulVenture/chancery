@@ -248,16 +248,20 @@ try {
   // Readiness is not a bound port: the config plugins finish loading after
   // the listener comes up, so the poll waits until the provider route
   // answers — the moment the model wiring the tests depend on is live.
+  // Each attempt carries its own timeout, so a serve that accepts and
+  // never answers fails the attempt and the wall-clock bound reaches the
+  // named failure instead of hanging past every bound.
   const serveUrl = `http://127.0.0.1:${servePort}`;
   const startedAt = Date.now();
   let ready = false;
-  for (let i = 0; i * 500 < READY_TIMEOUT_MS; i++) {
+  while (Date.now() - startedAt < READY_TIMEOUT_MS) {
     if (serve.exitCode !== null) {
       throw new Error("the serve exited before readiness");
     }
     const auth = Buffer.from(`opencode:${SERVE_PASSWORD}`).toString("base64");
     const ok = await fetch(`${serveUrl}/api/provider/openai`, {
       headers: { Authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(15_000),
     })
       .then((r) => r.ok)
       .catch(() => false);

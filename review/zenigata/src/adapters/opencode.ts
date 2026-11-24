@@ -264,6 +264,14 @@ class OpenCodeSessionDriver implements SessionDriver {
    */
   private jobReadFailure: string | null = null;
 
+  /**
+   * The last non-null turnOpen reason of the current wait, carried to the
+   * budget error so "stuck turn" says why (background work outstanding,
+   * no idle marker, the report wake) instead of nothing. Cleared at the
+   * start of each turn wait.
+   */
+  private lastOpenReason: string | null = null;
+
   constructor(opts: OpencodeDriverOptions) {
     const headers: Record<string, string> = {};
     if (opts.apiKey !== undefined && opts.apiKey !== "") {
@@ -426,6 +434,7 @@ class OpenCodeSessionDriver implements SessionDriver {
     const deadline = this.clock() + this.turnBudgetSeconds * 1000;
     let delayMs = pollMs;
     this.jobReadFailure = null;
+    this.lastOpenReason = null;
     for (;;) {
       opts?.signal?.throwIfAborted();
       let listed: { data: ListedMessage[] } | undefined;
@@ -449,7 +458,12 @@ class OpenCodeSessionDriver implements SessionDriver {
       }
       if (listed !== undefined) {
         const reason = turnOpen(listed.data, [], userCreatedMs);
-        if (reason === null) {
+        if (reason !== null) {
+          // The why the budget error carries if this wait runs out: the
+          // last non-null turnOpen reason across polls, kept the way the
+          // job-read failure label is.
+          this.lastOpenReason = reason;
+        } else {
           // The message page says the turn settled. The job list is read
           // AFTER the page and is the last read of the tick: a turn may
           // settle only on a job list the serve actually answered, and
@@ -467,6 +481,8 @@ class OpenCodeSessionDriver implements SessionDriver {
             // message read.
           } else if (jobs.length === 0) {
             return;
+          } else {
+            this.lastOpenReason = turnOpen([], jobs, userCreatedMs);
           }
         }
       }
@@ -477,7 +493,7 @@ class OpenCodeSessionDriver implements SessionDriver {
           ? `; the background-job read kept failing (${this.jobReadFailure}) — the pairing may be broken`
           : "";
         throw new Error(
-          `turn wait exceeded the ${this.turnBudgetSeconds}s budget for session ${sessionId}; the stuck turn was interrupted${jobTrouble}`,
+          `turn wait exceeded the ${this.turnBudgetSeconds}s budget for session ${sessionId}; the stuck turn was interrupted — last observed: ${this.lastOpenReason ?? "no settle information"}${jobTrouble}`,
         );
       }
       const waited = this.sleep(Math.min(delayMs, remaining));
@@ -522,28 +538,19 @@ class OpenCodeSessionDriver implements SessionDriver {
       if ((error as { name?: unknown }).name === "AbortError") {
         throw error;
       }
-      // Fail-named only for the real pairing break, whose two signatures
-      // were verified against the real v2.3.0 serve: its absent route
-      // answers a bare 404 with an empty body, which the SDK surfaces as
-      // the unsupported-content-type error, and a structured 404 the
-      // client cannot classify arrives as an unexpected status. Both
-      // mean the paired serve lacks or mismatches the job endpoint;
-      // neither may degrade into the early-settle bug the barrier
-      // exists to prevent. A 503 and every other failure retry to the
-      // poll budget, and only a run that exhausts its budget on failing
-      // job reads carries the broken-pairing diagnosis (the budget path
-      // above). A transport failure takes the same transient path.
+      // Fail-named only when the pairing break is pinned to the 404 the
+      // SDK can report: an unexpected 404 status. An undecodable body —
+      // an HTML error page from anything between driver and serve, or
+      // the paired serve's own bare 404 — surfaces through the SDK
+      // without its status (verified: an empty-body 404 and an HTML 502
+      // both arrive as the unsupported-content-type error), so it cannot
+      // prove the 404 the pairing break needs, and it retries to the
+      // poll budget like every transient read, where the budget error
+      // carries the may-be-broken diagnosis.
       const err = error as { name?: unknown; reason?: unknown };
-      if (
-        err.name === "ClientError" &&
-        (err.reason === "UnsupportedContentType" ||
-          (err.reason === "UnexpectedStatus" &&
-            unexpectedStatus(error) === "404"))
-      ) {
+      if (err.name === "ClientError" && unexpectedStatus(error) === "404") {
         throw new Error(
-          err.reason === "UnsupportedContentType"
-            ? "this driver needs a serve with the job endpoint; the serve answered its 404 with an undecodable error body — the pairing is broken"
-            : "this driver needs a serve with the job endpoint; the serve answered 404 — the pairing is broken",
+          "this driver needs a serve with the job endpoint; the serve answered 404 — the pairing is broken",
         );
       }
       if (err.name === "SessionNotFoundError") {

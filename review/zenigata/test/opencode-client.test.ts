@@ -27,8 +27,19 @@ type ListPage = {
 /** One stage per poll: a page, or a status code to fail the read with. */
 type Stage = number | ((userMs: number) => ListPage);
 
-/** One stage per job-list poll: a job list, or a status code to fail with. */
-type JobStage = number | ((userMs: number) => Array<Record<string, unknown>>);
+/** One stage per job-list poll: a job list, or a status code to fail with
+ * (404 answers the real serve's bare absent-route form, an empty body;
+ * any other number answers a JSON error), or an explicit answer with a
+ * body of the harness's choosing. */
+interface JobAnswer {
+  status: number;
+  body?: unknown;
+  contentType?: string;
+}
+type JobStage =
+  | number
+  | JobAnswer
+  | ((userMs: number) => Array<Record<string, unknown>>);
 
 interface FakeOpencode {
   url: string;
@@ -148,6 +159,20 @@ async function fakeOpencode(
             return;
           }
           respondJson(response, { error: "forced" }, stage);
+          return;
+        }
+        if (!("data" in stage) && typeof stage !== "function") {
+          // An explicit JobAnswer: the status and body (content type
+          // included) the test scripts, e.g. an undecodable HTML error
+          // page from a middlebox.
+          const answer = stage as JobAnswer;
+          const contentType = answer.contentType ?? "application/json";
+          response.writeHead(answer.status, { "content-type": contentType });
+          response.end(
+            typeof answer.body === "string"
+              ? answer.body
+              : JSON.stringify(answer.body ?? null),
+          );
           return;
         }
         respondJson(response, { data: stage(userCounter * 10_000 + BASE_MS) });
@@ -420,17 +445,19 @@ describe("opencode session driver over the wire", () => {
     expect(jobCalls).toBe(2);
   });
 
-  it("an absent job endpoint fails the prompt with the named pairing error", async () => {
+  it("an absent job endpoint (the bare 404) retries to the budget with the may-be-broken diagnosis", async () => {
     const fake = await fakeOpencode();
     fakes.push(fake);
-    const { driver } = await harnessDriver(fake);
+    const { driver } = await harnessDriver(fake, { budgetSeconds: 0.05 });
+    // The real serve's absent route answers a bare 404 with an empty
+    // body; the SDK loses the status there, so the driver cannot pin the
+    // pairing break and the absence retries like any undecodable read —
+    // the budget error carries the diagnosis instead.
     fake.setStages("ses-fake-1", [idlePage]);
     fake.setJobs("ses-fake-1", [404]);
     const sessionId = await driver.createSession("/work/tree", "reviewer");
-    // The bare-404 absence surfaces as the undecodable-body pairing
-    // failure, named (the structured-404 signature has its own branch).
     await expect(driver.prompt(sessionId, "review this")).rejects.toThrow(
-      /the serve answered its 404 with an undecodable error body — the pairing is broken/,
+      /background-job read kept failing \(client error \(UnsupportedContentType\)\) — the pairing may be broken/,
     );
   });
 
@@ -445,6 +472,64 @@ describe("opencode session driver over the wire", () => {
       /background-job read kept failing \(HTTP 503\) — the pairing may be broken/,
     );
     expect(fake.interrupted).toBe(1);
+  });
+
+  it("a non-404 job answer (an HTML 502) retries to the budget and never carries the pairing message", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake, { budgetSeconds: 0.05 });
+    // An HTML error page from something between driver and serve.
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [
+      {
+        status: 502,
+        body: "<html><body>502 Bad Gateway</body></html>",
+        contentType: "text/html",
+      },
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    const thrown = await driver.prompt(sessionId, "review this").then(
+      () => "",
+      (error: Error) => String(error.message),
+    );
+    expect(thrown).toMatch(
+      /background-job read kept failing \(HTTP 502\) — the pairing may be broken/,
+    );
+    // The non-404 status never earns the pairing epitaph.
+    expect(thrown).not.toContain("the pairing is broken");
+  });
+
+  it("the budget failure carries the last open reason: a stuck running job says so", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake, { budgetSeconds: 0.05 });
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [jobList("running")]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.prompt(sessionId, "review this")).rejects.toThrow(
+      /last observed: background work outstanding \(subagent:running\)/,
+    );
+  });
+
+  it("a session removed mid-turn fails named through the job route's typed session-gone answer", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [
+      {
+        status: 404,
+        body: {
+          _tag: "SessionNotFoundError",
+          sessionID: "ses-fake-1",
+          message: "Session not found: ses-fake-1",
+        },
+      },
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.prompt(sessionId, "review this")).rejects.toThrow(
+      /session ses-fake-1 disappeared while waiting for the turn/,
+    );
   });
 
   it("dispose removes the session through the delete endpoint", async () => {
