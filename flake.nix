@@ -361,6 +361,73 @@
               esac
             '';
 
+            # The rendered-config gate (PRJ-505): the NixOS module renders a
+            # test deployment carrying the three identity arrays — one or
+            # two entries per list, neutral names — and the runtime's own
+            # bin validates the rendered environment: `zenigata
+            # --check-config` composes the unit environment with the unit's
+            # own environment file exactly the way a deployed boot composes
+            # them (systemd layers the EnvironmentFile over the unit's
+            # plain environment) and runs the composition through
+            # loadConfig, the same schema every boot pays. The lineage
+            # declaration rides along: a rendered memoryUrl without
+            # app=zenigata and initiator=agent — the declaration whose
+            # absence re-derives or refuses every observation write at the
+            # daemon's lineage gate — fails here as it fails the module's
+            # own assertion. The deployed deployment's real values are its
+            # own tree's business.
+            zenigata-rendered-config =
+              let
+                # One source for both sides of the check: the test
+                # deployment's options and the expectation file the bin
+                # compares the rendered lists against.
+                identity = {
+                  humans = [ "example-user" ];
+                  agents = [ "example-bot" ];
+                  access = [
+                    "example-user"
+                    "example-bot"
+                  ];
+                };
+                eval = inputs.nixpkgs.lib.nixosSystem {
+                  inherit (pkgs) system;
+                  modules = [
+                    self.nixosModules.zenigata
+                    {
+                      services.zenigata = {
+                        enable = true;
+                        allowedLogins = [ "example-user" ];
+                        inherit (identity) humans agents access;
+                        adapterUrl = "http://adapter.invalid";
+                        forgeUrl = "https://forge.example.com";
+                        opencodeUrl = "http://opencode.invalid";
+                        memoryUrl = "http://127.0.0.1:28132/mcp?app=zenigata&initiator=agent";
+                        secretsFile = pkgs.writeText "zenigata-rendered-config-secrets" ''
+                          ZENIGATA_EVENT_TOKEN=event-secret
+                          ZENIGATA_ADAPTER_TOKEN=adapter-secret
+                        '';
+                      };
+                    }
+                  ];
+                };
+              in
+              pkgs.runCommand "zenigata-rendered-config-check"
+                {
+                  renderedEnvironment = pkgs.writeText "zenigata-rendered-environment.json" (
+                    builtins.toJSON eval.config.systemd.services.zenigata.environment
+                  );
+                  # The unit's own environment file: the bin composes it
+                  # over the unit environment the way the boot's
+                  # EnvironmentFile does.
+                  environmentFile = eval.config.services.zenigata.secretsFile;
+                  identityWant = pkgs.writeText "zenigata-rendered-config-want.json" (builtins.toJSON identity);
+                }
+                ''
+                  ${config.packages.zenigata}/bin/zenigata --check-config \
+                    "$renderedEnvironment" "$environmentFile" "$identityWant"
+                  touch "$out"
+                '';
+
             # The hub's bundled interpreter must import the bundled
             # memory_store.store — that is the runtime contract the package
             # exists to satisfy (see hub.nix). Checking it keeps a forgotten

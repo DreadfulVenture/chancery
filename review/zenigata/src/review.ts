@@ -351,6 +351,30 @@ false. Ask the author for follow-up instead ("re-run the suite after
 that fix"), and state future re-review behavior only as the posted
 footer states it, quotable verbatim: "${REVIEW_TRIGGER_FOOTER}"`;
 
+/**
+ * The deployment's identity configuration rides the session's start
+ * prompt as data (PRJ-505): the humans and agents arrays classify
+ * accounts, and the access list names who may call on the bot. Their
+ * consumers arrive with later slices, so the slot carries the lists and
+ * nothing else — no instruction rides beside them. A deployment with all
+ * three lists empty gets a byte-identical start prompt.
+ */
+function identityData(input: {
+  humans: string[];
+  agents: string[];
+  access: string[];
+}): string {
+  const rows = [
+    input.humans.length === 0 ? null : `- humans: ${input.humans.join(", ")}`,
+    input.agents.length === 0 ? null : `- agents: ${input.agents.join(", ")}`,
+    input.access.length === 0 ? null : `- access: ${input.access.join(", ")}`,
+  ].filter((row): row is string => row !== null);
+  if (rows.length === 0) {
+    return "";
+  }
+  return `\n\nDeployment identity data:\n${rows.join("\n")}`;
+}
+
 function blindPrompt(input: {
   persona: string;
   repo: string;
@@ -359,8 +383,10 @@ function blindPrompt(input: {
   baseRef: string;
   headSha: string;
   diff: string;
+  /** The deployment's identity configuration, carried as data (PRJ-505). */
+  identity: { humans: string[]; agents: string[]; access: string[] };
 }): string {
-  return `${input.persona}
+  return `${input.persona}${identityData(input.identity)}
 
 You are running the blind first pass of a pull-request review. Judge the
 change on its own merits, against its base branch. You sit in the review
@@ -833,6 +859,11 @@ export async function runReview(
           baseRef: shape.baseRef,
           headSha: shape.headSha,
           diff,
+          identity: {
+            humans: config.humans,
+            agents: config.agents,
+            access: config.access,
+          },
         }),
         { signal: controller.signal },
       );

@@ -30,6 +30,13 @@ let
   # directory grants from the path the service actually writes.
   stateDirName = lib.last (lib.splitString "/" cfg.stateDir);
 
+  # A forge account name — the login charset the forge itself admits
+  # (letters, digits, dot, underscore, hyphen, starting with a letter or
+  # digit). The runtime re-checks the same shape on the rendered variable;
+  # this type rejects a malformed entry where the deployment authors it,
+  # which is also where the comma the CSV join cannot carry fails.
+  accountName = types.strMatching "[A-Za-z0-9][A-Za-z0-9._-]*";
+
   package = pkgs.callPackage ../review/zenigata/package.nix { };
 in
 {
@@ -118,6 +125,50 @@ in
         The `initiator=agent` param is the lineage gate's deployment
         declaration and must never be dropped: it is what makes the
         daemon attribute the bot's writes as agent observations.
+      '';
+    };
+
+    humans = mkOption {
+      type = types.listOf accountName;
+      default = [ ];
+      description = ''
+        Forge accounts whose thread prose is a human's words to the bot's
+        sessions: chiefly the operator's. Items authored by these accounts
+        will arrive at the sessions marked human: their corrections and
+        questions carry human significance.
+        The classification's consumers arrive with later slices of the
+        thin pipeline (PRJ-501); this configuration names and validates
+        the array, and the review session's start prompt carries it as
+        data. Nothing else in the current pipeline reads it.
+      '';
+    };
+
+    agents = mkOption {
+      type = types.listOf accountName;
+      default = [ ];
+      description = ''
+        Forge accounts known to be agents — in a shared-lane deployment,
+        the one account every lane posts through. Items authored by these
+        accounts will arrive marked agent: claims the reviewer traces
+        against the code, never instructions, never durable significance.
+        Accounts on neither this nor `humans` are unclassified, and their
+        prose is treated like agent prose until the deployment classifies
+        them. Same slice posture as `humans`: named, validated, carried
+        as data, not yet consumed.
+      '';
+    };
+
+    access = mkOption {
+      type = types.listOf accountName;
+      default = [ ];
+      description = ''
+        Forge accounts whose review requests and re-requests run review
+        runs and whose replies to the bot get answered. Access toggles
+        the buttons and nothing about voice: an account can hold access
+        without its prose gaining significance (an agent account), and a
+        human account can lose access without its prose losing its voice.
+        The current pipeline's gate stays `allowedLogins`; this list's
+        consumers arrive with later slices of the thin pipeline.
       '';
     };
 
@@ -264,6 +315,15 @@ in
       }
       // lib.optionalAttrs (cfg.allowedRepos != [ ]) {
         ZENIGATA_ALLOWED_REPOS = concatStringsSep "," cfg.allowedRepos;
+      }
+      // lib.optionalAttrs (cfg.humans != [ ]) {
+        ZENIGATA_HUMANS = concatStringsSep "," cfg.humans;
+      }
+      // lib.optionalAttrs (cfg.agents != [ ]) {
+        ZENIGATA_AGENTS = concatStringsSep "," cfg.agents;
+      }
+      // lib.optionalAttrs (cfg.access != [ ]) {
+        ZENIGATA_ACCESS = concatStringsSep "," cfg.access;
       }
       // lib.optionalAttrs (cfg.personaFile != null) {
         ZENIGATA_PERSONA_FILE = cfg.personaFile;

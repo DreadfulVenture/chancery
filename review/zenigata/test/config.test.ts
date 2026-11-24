@@ -125,3 +125,52 @@ describe("loadConfig retention window", () => {
     ).toThrow(/ZENIGATA_RETENTION_WINDOW_SECONDS/);
   });
 });
+
+describe("loadConfig identity arrays", () => {
+  it("defaults all three lists to empty", () => {
+    const config = loadConfig(baseEnv);
+    expect(config.humans).toEqual([]);
+    expect(config.agents).toEqual([]);
+    expect(config.access).toEqual([]);
+  });
+
+  it("parses the three lists from their CSV variables", () => {
+    const config = loadConfig({
+      ...baseEnv,
+      ZENIGATA_HUMANS: "example-user, second-user",
+      ZENIGATA_AGENTS: "example-bot",
+      ZENIGATA_ACCESS: "example-user, example-bot",
+    });
+    expect(config.humans).toEqual(["example-user", "second-user"]);
+    expect(config.agents).toEqual(["example-bot"]);
+    expect(config.access).toEqual(["example-user", "example-bot"]);
+  });
+
+  it("tolerates whitespace and empty segments in the CSV", () => {
+    const config = loadConfig({
+      ...baseEnv,
+      ZENIGATA_HUMANS: " example-user , , second-user,",
+    });
+    expect(config.humans).toEqual(["example-user", "second-user"]);
+  });
+
+  it("rejects an entry with a comma-foreign character, naming the variable", () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, ZENIGATA_HUMANS: " example-user, space name" }),
+    ).toThrow(/ZENIGATA_HUMANS: 'space name'/);
+    expect(() => loadConfig({ ...baseEnv, ZENIGATA_AGENTS: "bot!" })).toThrow(
+      /ZENIGATA_AGENTS: 'bot!'/,
+    );
+    expect(() =>
+      loadConfig({ ...baseEnv, ZENIGATA_ACCESS: "user@example.com" }),
+    ).toThrow(/ZENIGATA_ACCESS: 'user@example\.com'/);
+  });
+
+  it("accepts the charset the forge admits in account names", () => {
+    const config = loadConfig({
+      ...baseEnv,
+      ZENIGATA_HUMANS: "the-operator.2, worker_bot-3",
+    });
+    expect(config.humans).toEqual(["the-operator.2", "worker_bot-3"]);
+  });
+});

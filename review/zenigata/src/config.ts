@@ -11,6 +11,18 @@ export interface Config {
   stateDir: string;
   allowedLogins: string[];
   allowedRepos: string[];
+  /**
+   * The deployment's identity arrays and access list (PRJ-505): humans
+   * classifies accounts whose thread prose is a human's words, agents
+   * names accounts known to be agents, and access names the accounts
+   * whose review requests and replies the thin pipeline will serve.
+   * Named, validated, and carried to the review session's start prompt
+   * as data; their consumers arrive with later slices, and nothing else
+   * in the current pipeline reads them.
+   */
+  humans: string[];
+  agents: string[];
+  access: string[];
   personaFile?: string;
   adapterUrl: string;
   /**
@@ -183,6 +195,40 @@ function splitCsv(value: string): string[] {
     .filter((part) => part !== "");
 }
 
+/**
+ * The account-name shape the deployment's identity variables carry: the
+ * login charset the forge itself admits (letters, digits, dot, underscore,
+ * hyphen, starting with a letter or digit), minus the comma the CSV
+ * rendering cannot carry. The module's option type enforces the same
+ * pattern at eval time; this re-check catches a value set in the
+ * environment by hand, at boot, naming the variable and the offending
+ * entry.
+ */
+const accountNameSchema = z
+  .string()
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "must be an account name (letters, digits, dot, underscore, hyphen, starting with a letter or digit)",
+  );
+
+/**
+ * An identity variable's list: unset or empty yields the empty default,
+ * and every entry must be an account name.
+ */
+function accountNames(
+  env: Record<string, string | undefined>,
+  name: string,
+): string[] {
+  const entries = csvOf(env, name, []);
+  for (const entry of entries) {
+    const result = accountNameSchema.safeParse(entry);
+    if (!result.success) {
+      throw new Error(`${name}: '${entry}' ${result.error.issues[0]?.message}`);
+    }
+  }
+  return entries;
+}
+
 /** Parse configuration from an environment-shaped record. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const stateDir = required(env, "ZENIGATA_STATE_DIR");
@@ -191,6 +237,9 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     stateDir,
     allowedLogins: csv(env, "ZENIGATA_ALLOWED_LOGINS"),
     allowedRepos: csvOf(env, "ZENIGATA_ALLOWED_REPOS", []),
+    humans: accountNames(env, "ZENIGATA_HUMANS"),
+    agents: accountNames(env, "ZENIGATA_AGENTS"),
+    access: accountNames(env, "ZENIGATA_ACCESS"),
     personaFile: optional(env, "ZENIGATA_PERSONA_FILE"),
     adapterUrl: url(env, "ZENIGATA_ADAPTER_URL"),
     forgeUrl: url(env, "ZENIGATA_FORGE_URL"),

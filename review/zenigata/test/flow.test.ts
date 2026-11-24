@@ -590,6 +590,47 @@ describe("review flow", () => {
   });
 });
 
+describe("review flow identity data", () => {
+  it("carries the deployment's identity lists as data in the start prompt", async () => {
+    const h = await harness({
+      script: happyScript(),
+      env: {
+        ZENIGATA_HUMANS: "example-user",
+        ZENIGATA_AGENTS: "example-bot",
+        ZENIGATA_ACCESS: "example-user, example-bot",
+      },
+    });
+    await postReviewEvent(h);
+    expect(h.forge.postedReviews).toHaveLength(1);
+
+    const start = h.sessions.prompts[0]?.text ?? "";
+    // The data slot: the three lists, plainly, and nothing riding beside
+    // them — no instruction, no behavior change.
+    expect(start).toContain("Deployment identity data:");
+    expect(start).toContain("- humans: example-user");
+    expect(start).toContain("- agents: example-bot");
+    expect(start).toContain("- access: example-user, example-bot");
+    // The slot sits between the persona and the pass instructions.
+    const personaEnd = start.indexOf("# The inspector's report");
+    const slotStart = start.indexOf("Deployment identity data:");
+    const passStart = start.indexOf("You are running the blind first pass");
+    expect(personaEnd).toBeGreaterThanOrEqual(0);
+    expect(slotStart).toBeGreaterThan(personaEnd);
+    expect(passStart).toBeGreaterThan(slotStart);
+  });
+
+  it("leaves a default deployment's start prompt free of the data slot", async () => {
+    const h = await harness({ script: happyScript() });
+    await postReviewEvent(h);
+    // Both identity arrays and the access list unset: no slot renders, so
+    // the start prompt keeps its pre-config byte shape.
+    expect(h.sessions.prompts[0]?.text).not.toContain(
+      "Deployment identity data:",
+    );
+    expect(h.forge.postedReviews).toHaveLength(1);
+  });
+});
+
 describe("reply flow", () => {
   it("2. answers a reply in thread and stores the learning observation", async () => {
     const h = await harness({

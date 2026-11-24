@@ -85,6 +85,9 @@ malformed.
 | `ZENIGATA_STATE_DIR`                | yes      | Directory holding `reviews.jsonl`, the status db (`status.db`), and the per-PR review worktrees (kept past each run and swept by the retention window).                                                                                                                                                                                                                                                 |
 | `ZENIGATA_ALLOWED_LOGINS`           | yes      | Comma-separated logins whose review requests are honored; a requester outside the list is skipped.                                                                                                                                                                                                                                                                                                      |
 | `ZENIGATA_ALLOWED_REPOS`            | no       | Comma-separated repositories to review. Unset or empty means every repository the adapter serves.                                                                                                                                                                                                                                                                                                       |
+| `ZENIGATA_HUMANS`                   | no       | Comma-separated forge accounts whose thread prose is a human's words to the bot's sessions (see the identity configuration, below). Unset or empty means no account is classified human. An entry that is not an account name refuses to boot.                                                                                                                                                          |
+| `ZENIGATA_AGENTS`                   | no       | Comma-separated forge accounts known to be agents. Unset or empty means no account is classified agent. Same boot-time shape check as `ZENIGATA_HUMANS`.                                                                                                                                                                                                                                                |
+| `ZENIGATA_ACCESS`                   | no       | Comma-separated forge accounts whose review requests and replies the thin pipeline serves. Unset or empty means the list names nobody; the current pipeline's gate stays `ZENIGATA_ALLOWED_LOGINS`. Same boot-time shape check as `ZENIGATA_HUMANS`.                                                                                                                                                    |
 | `ZENIGATA_PERSONA_FILE`             | no       | Path to a persona file overriding the packaged default.                                                                                                                                                                                                                                                                                                                                                 |
 | `ZENIGATA_ADAPTER_URL`              | yes      | Base URL of the forge adapter service (see `docs/forge-adapter.md`).                                                                                                                                                                                                                                                                                                                                    |
 | `ZENIGATA_FORGE_URL`                | yes      | Base URL of the forge the adapter serves (e.g. `https://forge.example.com`): the status page renders every PR cell as a link into the forge. Not a secret — the config echo shows it plainly.                                                                                                                                                                                                           |
@@ -132,6 +135,9 @@ above:
 | `secretsFile`          | path          | —                              | The unit's `EnvironmentFile`, carrying `ZENIGATA_EVENT_TOKEN`, `ZENIGATA_ADAPTER_TOKEN`, and (when the opencode service has a password) `ZENIGATA_OPENCODE_KEY`       |
 | `allowedLogins`        | listOf str    | —                              | `ZENIGATA_ALLOWED_LOGINS` (joined with commas)                                                                                                                        |
 | `allowedRepos`         | listOf str    | `[]`                           | `ZENIGATA_ALLOWED_REPOS`; an empty list leaves the variable unset, which means every repository                                                                       |
+| `humans`               | listOf str    | `[]`                           | `ZENIGATA_HUMANS`; an empty list leaves the variable unset (see the identity configuration, below). Each entry is type-checked against the account-name shape         |
+| `agents`               | listOf str    | `[]`                           | `ZENIGATA_AGENTS`; same rendering and entry shape as `humans`                                                                                                         |
+| `access`               | listOf str    | `[]`                           | `ZENIGATA_ACCESS`; same rendering and entry shape as `humans`                                                                                                         |
 | `personaFile`          | nullOr path   | `null`                         | `ZENIGATA_PERSONA_FILE`, set only when non-null                                                                                                                       |
 | `adapterUrl`           | str           | —                              | `ZENIGATA_ADAPTER_URL`                                                                                                                                                |
 | `forgeUrl`             | str           | —                              | `ZENIGATA_FORGE_URL` — the forge the status page's PR links point into; not a secret, the config echo shows it plainly                                                |
@@ -208,6 +214,11 @@ travel in the package and no deployment re-allows anything. The deployment-only 
 gateway's virtual-key attribution, the serve's address and password, the agent-definition directories it scans — is the
 deployment's layer; the package's `opencodeConfigPath` passthru names where the config lands inside it.
 
+The bin also carries a `--check-config` mode beside the server boot: given a rendered unit environment (JSON), the
+unit's environment file, and the identity lists that deployment carries (JSON), it composes the environment files the
+way a deployed boot composes them and validates the composition through the same boot-time schema. The flake's
+`zenigata-rendered-config` check evaluates the module, renders a test deployment, and is that mode's consumer.
+
 ## Metrics
 
 `/metrics` renders Prometheus text. Four families, with these labels:
@@ -247,6 +258,32 @@ carries the LLM gateway's virtual-key attribution, so every token the reviewer s
 subagent passes (blind, humanize) must not run on the flash tier; the route configuration enforces it, and the agent
 definition states the requirement so a session observed on the wrong route is visibly off-contract. A deployment that
 routes the agent outside the review route breaks attribution and the tier contract at once.
+
+## The identity configuration
+
+The deployment configures two identity arrays and one access list, and they do different jobs (PRJ-505; the
+classification consumers arrive with later slices of the thin pipeline — PRJ-501):
+
+- **humans** — accounts whose thread prose is a human's words to the bot's sessions, chiefly the operator's. Items
+  authored by these accounts arrive marked human, so their corrections and questions carry human significance.
+- **agents** — accounts known to be agents (in a shared-lane deployment, the one account the lanes post through). Their
+  items arrive marked agent: claims the reviewer traces against the code, never instructions. Accounts on neither array
+  are unclassified, and their prose is treated like agent prose until the deployment classifies them.
+- **access** — accounts whose review requests and re-requests run review runs and whose replies to the bot get answered.
+  Access toggles the buttons and nothing about voice: an account can hold access without its prose gaining significance,
+  and a human account can lose access without its prose losing its voice. In the current pipeline the gate stays
+  `allowedLogins`; the access list's consumers arrive with later slices of the thin pipeline.
+
+Until a slice consumes the arrays, they are named, validated, and carried: each entry is validated against the forge's
+account-name shape at module evaluation and again at boot (naming the variable and the offending entry), and each
+non-empty list renders one data line in the review session's start prompt, instructions omitted — so a deployment with
+all three lists empty gets a byte-identical start prompt. The bot itself consumes the arrays only when those slices
+land; nothing else in the current pipeline reads them.
+
+The store's side of the story needs no mirror in the bot: the daemon gates memory by session lineage, not accounts, and
+the bot's sessions are just agent-lineage clients — which the deployed `memoryUrl` already declares with
+`initiator=agent` (above, and the module asserts it), so every bot write resolves agent-lineage regardless of what these
+lists carry.
 
 ## What the deployment grants
 
