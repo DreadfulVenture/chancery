@@ -30,6 +30,11 @@ test-reminders: ## Run the writs reminder plugin tests
 test-oc-wake: ## Run the oc-wake CLI tests
 	@node --test wake/oc-wake/tests/*.test.ts
 
+.PHONY: test-runtime-compat
+test-runtime-compat: ## Run the zenigata runtime compat check against the packaged serve (builds the runtime package with nix)
+	@out=$$(nix build .#zenigata-runtime --no-link --print-out-paths | tail -1) && \
+	node review/zenigata/test/runtime-compat-run.ts --runtime "$$out"
+
 .PHONY: memory-dev
 memory-dev: ## Boot the local development stack
 	@./memory/store/memory_store/scripts/memory-dev

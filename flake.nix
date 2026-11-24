@@ -12,6 +12,16 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-compat.follows = "";
     };
+    # The zenigata runtime's opencode serve source, tracking nixpkgs-
+    # unstable — where the runtime's opencode line lives. Chancery's own
+    # nixpkgs input tracks a nixos release that does not carry this
+    # opencode line, and the deployment's serve has always come from
+    # unstable. The locked rev lives in flake.lock, so lock maintenance
+    # refreshes it like every other input, and the flake's
+    # zenigata-runtime-compat check gates every refresh: the runtime
+    # tracks the branch's opencode, and a semantic break against the
+    # driver lands red on the lock PR.
+    opencode-nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     # Only the checks build anything from this; the module itself takes
     # home-manager's option set from whoever imports it.
     home-manager = {
@@ -286,6 +296,14 @@
             memory-store-plugin = pkgs.callPackage ./memory/opencode-client/package.nix { };
             memory-store-opencode = pkgs.callPackage ./nix/opencode-assets.nix { };
             zenigata = pkgs.callPackage ./review/zenigata/package.nix { };
+            zenigata-runtime = pkgs.callPackage ./review/zenigata/runtime.nix {
+              # callPackage'd again rather than read from config.packages:
+              # referencing an attribute of the set being defined loops
+              # the evaluation (the same trap the hm-module check's
+              # comment records).
+              zenigata = pkgs.callPackage ./review/zenigata/package.nix { };
+              opencodeServe = inputs.opencode-nixpkgs.legacyPackages.${pkgs.system}.opencode;
+            };
             forgejo-adapter = pkgs.callPackage ./review/forgejo-adapter/package.nix { };
             mail-watcher = pkgs.callPackage ./watch/mail-watcher/package.nix { };
             director = pkgs.callPackage ./coordinate/director/package.nix { };
@@ -295,6 +313,49 @@
           };
 
           checks = {
+            # The compatibility contract (PRJ-479): the driver's integration
+            # tests run against THIS package's serve, and the harness lives
+            # in review/zenigata/test/runtime-compat-run.ts — the same
+            # runner the Makefile's test-runtime-compat target invokes, so
+            # the check runs with or without nix. An upgrade that breaks the
+            # driver lands red naming the break, and one that works lands
+            # green: this is the gate on the runtime's branch-tracking serve
+            # input, so a lock refresh carrying a semantic break fails here.
+            zenigata-runtime-compat =
+              pkgs.runCommand "zenigata-runtime-compat-check"
+                {
+                  nativeBuildInputs = [
+                    pkgs.nodejs_24
+                    pkgs.git
+                  ];
+                  runtimePackage = config.packages.zenigata-runtime;
+                  runner = ./review/zenigata/test/runtime-compat-run.ts;
+                  testDir = ./review/zenigata/test;
+                }
+                ''
+                  node "$runner" --runtime "$runtimePackage" --test-dir "$testDir"
+                  touch "$out"
+                '';
+
+            # The runtime package's serve must report the version its
+            # derivation declares: this runs the packaged binary, so a
+            # serve that lies about its version fails here instead of on a
+            # deployed host. The version itself is the branch-tracking
+            # input's opencode — the compat check above gates its
+            # semantics on every lock refresh.
+            zenigata-runtime-version = pkgs.runCommand "zenigata-runtime-version-check" { } ''
+              # opencode writes its state dirs under HOME; the build sandbox
+              # has none, so the check points it at the build's own temp dir.
+              actual="$(HOME="$TMPDIR" ${config.packages.zenigata-runtime}/bin/opencode --version)"
+              case "$actual" in
+                *"v${config.packages.zenigata-runtime.opencodeServe.version}") touch "$out" ;;
+                *)
+                  echo "the runtime package's serve reports '$actual', not v${config.packages.zenigata-runtime.opencodeServe.version}" >&2
+                  exit 1
+                  ;;
+              esac
+            '';
+
             # The hub's bundled interpreter must import the bundled
             # memory_store.store — that is the runtime contract the package
             # exists to satisfy (see hub.nix). Checking it keeps a forgotten

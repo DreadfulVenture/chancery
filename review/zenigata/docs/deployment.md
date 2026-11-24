@@ -190,6 +190,28 @@ which directories it scans, and the module stays out of that wiring. The deploym
 tools at the opencode runtime's agent grants: the agent definition's "no connection to the forge, the checkout, or the
 network" line is prompt-level instruction, not policy, and the runtime's tool grants are what actually enforce it.
 
+## The runtime package
+
+`packages.zenigata-runtime` (the flake) is the complete review runtime in one package: the pinned opencode serve binary,
+the runtime's neutral serve config at `<package>/share/zenigata/opencode/config.json`, and the bot with its session
+driver. The package's version is the serve version, and the compatibility contract is behavior, not version equality:
+the flake's `zenigata-runtime-compat` check runs the driver's integration tests against the packaged serve, so an
+upgrade that breaks the driver lands red naming the break, and `@opencode/client` upgrades flow freely through Renovate.
+
+The serve tracks nixpkgs-unstable, the branch the deployment's opencode has always come from; the carried version is
+whatever the lock has now, and the packaged binary reports it at any time. The driver is background-aware: it waits out
+2.3.x's always-background subagent tool through the serve's job endpoint, whose absence fails named as the broken
+pairing. The compatibility check is the gate: every lock refresh that moves the branch's opencode runs the
+delegated-pass settle test against the new serve on the build.
+
+The config the package ships is the neutral, product-owned floor: it denies every tool except the subagent delegation
+the passes use (a headless serve has nobody to answer a permission ask, so the floor denies instead), refuses
+integrations, MCP servers, and plugins at the policy level — deliberately not `integration.use`, whose deny also covers
+providers served from local config and would take out the deployment's own model route — and turns sharing and
+self-update off. The deployment-only wiring — the model route with the gateway's virtual-key attribution, the serve's
+address and password, the agent-definition directories it scans — is the deployment's layer; the package's
+`opencodeConfigPath` passthru names where the config lands inside it.
+
 ## Metrics
 
 `/metrics` renders Prometheus text. Four families, with these labels:

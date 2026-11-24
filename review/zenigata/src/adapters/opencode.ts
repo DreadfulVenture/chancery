@@ -2,38 +2,62 @@
  * SessionDriver over the opencode background service, via @opencode/client.
  *
  * Version pin rationale: the opencode API is generated and moves fast; the
- * client is pinned to 2.2.5 to match the deployed opencode service exactly.
- * Every @opencode/client import in the service lives in this file, so an
- * upstream bump costs one file.
+ * client pin in package.json floats freely with Renovate, and the runtime
+ * package's compatibility check — the flake's zenigata-runtime-compat —
+ * runs this driver against the packaged serve, so an upgrade that breaks
+ * the driver lands red naming the break instead of being blocked by a
+ * version string (PRJ-479). This driver targets the 2.3.x serve semantics:
+ * the subagent tool always runs in the background there (PRJ-474), and the
+ * settle barrier below waits it out. Every @opencode/client import in the
+ * service lives in this file, so an upstream bump costs one file.
  *
- * Method names verified against the 2.2.5 typings
- * (node_modules/@opencode/client/dist/promise/):
+ * Method names verified against the 2.3.x typings and the v2.3.0 source:
  *   - client factory: `OpenCode.make({ baseUrl })` (named export `OpenCode`,
  *     a namespace whose `make` builds the network client)
  *   - create: `session.create({ location: { directory }, agent })` -> SessionInfo
  *     (SessionCreateInput carries both a `location.directory` and an `agent`,
- *     so per-session agent selection is available at create time;
- *     `session.switchAgent({ sessionID, agent })` exists for later switches)
+ *     so per-session agent selection is available at create time)
  *   - one-turn prompt: `session.prompt({ sessionID, text })` -> SessionInboxUser
- *     (the queued user item; the turn itself is awaited by the polling loop)
+ *     (the queued user item, whose `time.created` keys the turn; the turn
+ *     itself is awaited by the polling loop. The prompt's delivery defaults
+ *     to `steer` server-side: when the session is already executing, the
+ *     item joins the running turn at a step boundary instead of waiting
+ *     behind it — the pipeline prompts only settled sessions, so this
+ *     matters only for an operator prompt racing a background wake)
  *   - turn state read: `message.list({ sessionID, order: "desc", limit })`
  *     -> SessionMessagesResponse; the listed messages carry the turn's
- *     terminal state (see turnSettled below)
- *   - stuck-turn stop: `session.interrupt({ sessionID })` -> 204
+ *     terminal state and the delivered subagent reports (see turnOpen below)
+ *   - background-work read: `experimental.job.list({ sessionID, descendants: true })`
+ *     -> JobInfo[]; the serve lists active and unconsumed background jobs —
+ *     a completed-but-unconsumed subagent job is still listed, so the
+ *     report-delivery race cannot settle the turn early
+ *   - stuck-turn stop: `session.interrupt({ sessionID })` -> 204 (the serve
+ *     cancels the session's background jobs with it)
  *   - last assistant message text: the message content parts
  *   - dispose: `session.remove({ sessionID })` (a delete endpoint exists)
  *
- * Turn barrier: prompt() holds no long request. It fires the prompt (the
- * endpoint resolves with the queued user item) and then awaits the turn
- * through a polling loop of short message.list reads: the turn is settled
- * when an `idle` record lands after our user item, or when the newest
- * assistant message completed with a non-tool-call finish (the idle record
- * is the honest terminal marker; the completed-assistant rule covers a
- * runtime that never writes one). Each poll holds one short HTTP call;
- * a failed poll retries on the next tick. A turn still busy past the
- * poll budget is a stuck turn: the driver interrupts it (stopping the
- * spend) and fails the prompt, which ends the run through its existing
- * cleanup path (dispose, worktree removal, journal, failure comment).
+ * Turn barrier (2.3.x): prompt() holds no long request. It fires the prompt
+ * (the endpoint resolves with the queued user item) and then awaits the turn
+ * through a polling loop of short reads. The settle rule has three parts,
+ * all of which must hold:
+ *   1. an `idle` record landed after our user item (a terminal-error
+ *      assistant with no idle is the stand-in for a runtime that failed the
+ *      turn without writing one);
+ *   2. no `synthetic` record is newer than the newest `idle` — a synthetic
+ *      record is a delivered subagent report, and the wake execution it
+ *      starts is still running until its own idle lands;
+ *   3. the serve's job list for the session and its descendants is empty —
+ *      a listed job is active or unconsumed work, so a child that finished
+ *      but whose report is still mid-delivery keeps the turn open.
+ * The job endpoint is the pairing contract, not a graceful degradation: a
+ * serve without it raises the named pairing error — silently treating the
+ * absence as "no outstanding work" would reintroduce the early-settle bug
+ * the barrier exists to prevent. Each poll holds short HTTP calls; a failed
+ * transport read retries on the next tick. A turn still busy past the poll
+ * budget is a stuck turn: the driver interrupts it (stopping the spend and
+ * cancelling the serve-side jobs) and fails the prompt, which ends the run
+ * through its existing cleanup path (dispose, worktree removal, journal,
+ * failure comment).
  *
  * Turn correlation: the loop keys on the queued user item's creation time
  * (returned by the prompt endpoint) and reads only records created at or
@@ -43,12 +67,15 @@
  * fresh assistant message and the pipeline's validation owns the outcome.
  *
  * readOutput tracks the id of the last assistant message it returned, per
- * session. When the newest assistant message is still the one it already
- * returned — a turn that produced no assistant message, or a repeated read
- * — it returns "" instead of the stale text, so the pipeline's
- * corrective-retry path sees a fresh (empty) output rather than silently
- * re-validating the previous turn. prompt() records nothing; only
- * readOutput decides what has been read.
+ * session. On a session that ran background work it reads the newest
+ * assistant message created after the newest delivered report — the
+ * summary the parent produced after the reports land, never the launch
+ * text the first turn writes while children are still out. When no such
+ * message exists (or the newest assistant is still the one it already
+ * returned) it returns "", so the pipeline's corrective-retry path sees a
+ * fresh (empty) output rather than silently re-validating the previous
+ * turn. prompt() records nothing; only readOutput decides what has been
+ * read.
  */
 
 import { OpenCode } from "@opencode/client";
@@ -91,10 +118,14 @@ const MESSAGES_WINDOW = 25;
 /** Messages per transcript read: the newest-first window the page's view scans. */
 const TRANSCRIPT_MESSAGES_WINDOW = 50;
 
+/** Messages per output read: the newest-first window readOutput scans. */
+const OUTPUT_MESSAGES_WINDOW = 25;
+
 /**
- * Structural subset of the 2.2.5 message shapes the loop reads.
+ * Structural subset of the 2.3.x message shapes the loop reads.
  * SessionMessageAssistant carries the completion markers; the user, idle,
- * and bookkeeping records share the {type, time.created} core.
+ * synthetic (delivered subagent report), and bookkeeping records share the
+ * {type, time.created} core.
  */
 interface AssistantMessage {
   time: { created: number; streamed?: number; completed?: number };
@@ -108,44 +139,66 @@ type ListedMessage = {
   time: { created: number };
 };
 
+/** Structural subset of the 2.3.x Job.Info the loop reads. */
+export interface JobRecord {
+  kind: string;
+  status: string;
+}
+
 /**
- * Whether the turn queued at `userCreatedMs` has settled, judged only
- * from a newest-first page of listed messages. An `idle` record after
- * the user item is the runtime's own turn-outcome marker. A completed
- * assistant message with a finish (not "tool-calls", which hands off to
- * the next step, and not carrying a scheduled retry) is the fallback for
- * a runtime that completed the turn without writing the idle record.
+ * Whether the turn queued at `userCreatedMs` is still open, judged from a
+ * newest-first page of listed messages plus the serve's job list for the
+ * session and its descendants. Returns null when the turn settled, else a
+ * short reason naming what keeps it open — the settle rule's three parts
+ * (an idle marker, no report newer than the newest idle, zero outstanding
+ * background jobs) must all hold; see the module header for the shape of
+ * each. A terminal-error assistant stands in for the idle marker when the
+ * runtime failed the turn without writing one.
  */
-export function turnSettled(
+export function turnOpen(
   listed: ListedMessage[],
+  jobs: readonly JobRecord[],
   userCreatedMs: number,
-): boolean {
+): string | null {
+  if (jobs.length > 0) {
+    const parts = jobs
+      .slice(0, 4)
+      .map((job) => `${job.kind}:${job.status}`)
+      .join(", ");
+    return `background work outstanding (${parts}${jobs.length > 4 ? ", …" : ""})`;
+  }
+  let newestIdle: number | undefined;
+  let newestSynthetic: number | undefined;
+  let terminalError = false;
   for (const item of listed) {
     if (item.time.created < userCreatedMs) {
-      return false;
+      break;
     }
     if (item.type === "idle") {
-      return true;
-    }
-    if (item.type === "assistant") {
+      newestIdle ??= item.time.created;
+    } else if (item.type === "synthetic") {
+      newestSynthetic ??= item.time.created;
+    } else if (item.type === "assistant") {
       const assistant = item as AssistantMessage;
       if (assistant.retry !== undefined) {
         // The runtime scheduled another attempt: still in progress.
         continue;
       }
       if (assistant.error !== undefined) {
-        return true;
-      }
-      if (
-        assistant.time.completed !== undefined &&
-        assistant.finish !== undefined &&
-        assistant.finish !== "tool-calls"
-      ) {
-        return true;
+        terminalError = true;
       }
     }
   }
-  return false;
+  if (
+    newestSynthetic !== undefined &&
+    (newestIdle ?? -Infinity) < newestSynthetic
+  ) {
+    return "a subagent report arrived after the newest idle marker; its wake execution is still running";
+  }
+  if (newestIdle === undefined && !terminalError) {
+    return "no idle marker since the prompt";
+  }
+  return null;
 }
 
 /**
@@ -169,6 +222,29 @@ function isSessionNotFound(error: unknown): boolean {
   );
 }
 
+/**
+ * The HTTP status the generated client reports for a non-2xx whose status
+ * is not one of the route's declared ones — the shape a serve's 503 job
+ * read arrives in.
+ */
+function jobFailureLabel(error: unknown): string {
+  const err = error as { name?: unknown; reason?: unknown };
+  if (err.name !== "ClientError") return "a transport error";
+  const status = unexpectedStatus(error);
+  return status !== undefined
+    ? `HTTP ${status}`
+    : `client error (${String(err.reason)})`;
+}
+function unexpectedStatus(error: unknown): string | undefined {
+  const err = error as { name?: unknown; reason?: unknown };
+  if (err.name !== "ClientError" || err.reason !== "UnexpectedStatus") {
+    return undefined;
+  }
+  const text = error instanceof Error ? error.message : String(error);
+  const match = /\b(\d{3})\b/.exec(text);
+  return match?.[1];
+}
+
 class OpenCodeSessionDriver implements SessionDriver {
   private readonly client: ReturnType<typeof OpenCode.make>;
 
@@ -179,6 +255,14 @@ class OpenCodeSessionDriver implements SessionDriver {
   private readonly turnBudgetSeconds: number;
   private readonly clock: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+
+  /**
+   * The last background-job read failure of the current wait, carried to
+   * the budget error so a run that exhausts its budget on failing job
+   * reads names the broken pairing instead of a bare stuck turn. Cleared
+   * by every successful read and at the start of each turn wait.
+   */
+  private jobReadFailure: string | null = null;
 
   constructor(opts: OpencodeDriverOptions) {
     const headers: Record<string, string> = {};
@@ -237,17 +321,36 @@ class OpenCodeSessionDriver implements SessionDriver {
     sessionId: string,
     opts?: { signal?: AbortSignal },
   ): Promise<string> {
+    // One bounded newest-first window rather than a single assistant read:
+    // the output of a turn that ran background work is the assistant
+    // message created after the newest delivered report (the parent's
+    // post-report summary), and the launch text the first turn wrote sits
+    // before it. A session with no delivered reports reads the newest
+    // assistant message, exactly as before.
     const listed = await this.client.message.list(
       {
         sessionID: sessionId,
         order: "desc",
-        limit: 1,
-        type: "assistant",
+        limit: OUTPUT_MESSAGES_WINDOW,
       },
       { signal: opts?.signal },
     );
-    const last = listed.data[0];
-    if (!last || last.type !== "assistant") {
+    let newestReport: number | undefined;
+    for (const item of listed.data) {
+      if (item.type === "synthetic") {
+        newestReport = item.time.created;
+        break;
+      }
+    }
+    const eligible = listed.data.filter(
+      (
+        item,
+      ): item is Extract<(typeof listed.data)[number], { type: "assistant" }> =>
+        item.type === "assistant" &&
+        (newestReport === undefined || item.time.created > newestReport),
+    );
+    const last = eligible[0];
+    if (!last) {
       return "";
     }
     // A turn that produced no assistant message leaves the newest one
@@ -322,6 +425,7 @@ class OpenCodeSessionDriver implements SessionDriver {
     const backoffCapMs = pollMs * 5;
     const deadline = this.clock() + this.turnBudgetSeconds * 1000;
     let delayMs = pollMs;
+    this.jobReadFailure = null;
     for (;;) {
       opts?.signal?.throwIfAborted();
       let listed: { data: ListedMessage[] } | undefined;
@@ -343,14 +447,37 @@ class OpenCodeSessionDriver implements SessionDriver {
         // runtime that never answers again.
         listed = undefined;
       }
-      if (listed !== undefined && turnSettled(listed.data, userCreatedMs)) {
-        return;
+      if (listed !== undefined) {
+        const reason = turnOpen(listed.data, [], userCreatedMs);
+        if (reason === null) {
+          // The message page says the turn settled. The job list is read
+          // AFTER the page and is the last read of the tick: a turn may
+          // settle only on a job list the serve actually answered, and
+          // only when it is empty after the page. Work that appeared
+          // between the two reads shows up in the job list — a report
+          // delivered after the page read is a completed-but-unconsumed
+          // job row, and a nested subagent spawned after it is a running
+          // row — so the read order leaves nothing to the gap between
+          // the reads; the page only ever rules out work that predates
+          // it, and the job list rules in anything newer.
+          const jobs = await this.listJobs(sessionId, opts);
+          if (jobs === null) {
+            // A failed read never settles (it would read as empty): the
+            // tick repeats with a fresh job read, exactly like a failed
+            // message read.
+          } else if (jobs.length === 0) {
+            return;
+          }
+        }
       }
       const remaining = deadline - this.clock();
       if (remaining <= 0) {
         await this.stopTurn(sessionId);
+        const jobTrouble = this.jobReadFailure
+          ? `; the background-job read kept failing (${this.jobReadFailure}) — the pairing may be broken`
+          : "";
         throw new Error(
-          `turn wait exceeded the ${this.turnBudgetSeconds}s budget for session ${sessionId}; the stuck turn was interrupted`,
+          `turn wait exceeded the ${this.turnBudgetSeconds}s budget for session ${sessionId}; the stuck turn was interrupted${jobTrouble}`,
         );
       }
       const waited = this.sleep(Math.min(delayMs, remaining));
@@ -365,6 +492,72 @@ class OpenCodeSessionDriver implements SessionDriver {
       // last, capped at five times the base interval.
       delayMs = Math.min(delayMs * 2, backoffCapMs);
     }
+  }
+
+  /**
+   * The serve's job list for the session and its descendants, with the
+   * shape the route answers verified against the v2.3.0 source
+   * (packages/protocol/src/groups/job.ts: `GET /api/experimental/job`
+   * returns `{ data: Array<Job.Info> }` with no cursor, and the client SDK
+   * unwraps `.data`). The job list is the settle rule's third guard and
+   * the pairing contract; it is the last read of each settle-candidate
+   * tick, so the turn settles only on a list the serve actually answered
+   * (returns null on a failed read — silence is never "empty"). The
+   * package makes the serve/driver pairing true by construction, so an
+   * absent endpoint is a broken pairing and fails named: treating the
+   * absence as "no outstanding work" would reintroduce the early-settle
+   * bug the barrier exists to prevent.
+   */
+  private async listJobs(
+    sessionId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<JobRecord[] | null> {
+    let jobs;
+    try {
+      jobs = await this.client.experimental.job.list(
+        { sessionID: sessionId, descendants: true },
+        { signal: opts?.signal },
+      );
+    } catch (error) {
+      if ((error as { name?: unknown }).name === "AbortError") {
+        throw error;
+      }
+      // Fail-named only for the real pairing break, whose two signatures
+      // were verified against the real v2.3.0 serve: its absent route
+      // answers a bare 404 with an empty body, which the SDK surfaces as
+      // the unsupported-content-type error, and a structured 404 the
+      // client cannot classify arrives as an unexpected status. Both
+      // mean the paired serve lacks or mismatches the job endpoint;
+      // neither may degrade into the early-settle bug the barrier
+      // exists to prevent. A 503 and every other failure retry to the
+      // poll budget, and only a run that exhausts its budget on failing
+      // job reads carries the broken-pairing diagnosis (the budget path
+      // above). A transport failure takes the same transient path.
+      const err = error as { name?: unknown; reason?: unknown };
+      if (
+        err.name === "ClientError" &&
+        (err.reason === "UnsupportedContentType" ||
+          (err.reason === "UnexpectedStatus" &&
+            unexpectedStatus(error) === "404"))
+      ) {
+        throw new Error(
+          err.reason === "UnsupportedContentType"
+            ? "this driver needs a serve with the job endpoint; the serve answered its 404 with an undecodable error body — the pairing is broken"
+            : "this driver needs a serve with the job endpoint; the serve answered 404 — the pairing is broken",
+        );
+      }
+      if (err.name === "SessionNotFoundError") {
+        // The route's own typed session-gone answer: the route exists
+        // and says the session is gone, like the message read would.
+        throw new Error(
+          `session ${sessionId} disappeared while waiting for the turn`,
+        );
+      }
+      this.jobReadFailure = jobFailureLabel(error);
+      return null;
+    }
+    this.jobReadFailure = null;
+    return jobs.map((job) => ({ kind: job.kind, status: job.status }));
   }
 
   /** Best-effort stop of a running turn; every failure is swallowed. */

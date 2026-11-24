@@ -1,10 +1,10 @@
 /**
- * The opencode session driver against a loopback fake of the 2.2.5 HTTP
+ * The opencode session driver against a loopback fake of the 2.3.x HTTP
  * surface (127.0.0.1 only). The fake serves the routes the driver calls —
- * create, prompt, message list, interrupt, remove — and records every hit,
- * so the turn-barrier behavior is judged from real requests: prompt fires
- * the prompt endpoint and settles through short state reads, never the
- * experimental wait.
+ * create, prompt, message list, the experimental job list, interrupt,
+ * remove — and records every hit, so the turn-barrier behavior is judged
+ * from real requests: prompt fires the prompt endpoint and settles through
+ * short state reads, never the experimental wait.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -14,10 +14,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import {
-  opencodeSessionDriver,
-  turnSettled,
-} from "../src/adapters/opencode.js";
+import { opencodeSessionDriver, turnOpen } from "../src/adapters/opencode.js";
 import type { SessionDriver } from "../src/contracts/session.js";
 
 type ListPage = {
@@ -30,6 +27,9 @@ type ListPage = {
 /** One stage per poll: a page, or a status code to fail the read with. */
 type Stage = number | ((userMs: number) => ListPage);
 
+/** One stage per job-list poll: a job list, or a status code to fail with. */
+type JobStage = number | ((userMs: number) => Array<Record<string, unknown>>);
+
 interface FakeOpencode {
   url: string;
   hits: Array<{ method: string; path: string }>;
@@ -37,6 +37,7 @@ interface FakeOpencode {
   /** The user item time of the latest prompt, per session. */
   userMs(): number;
   setStages(sessionKey: string, stages: Stage[]): void;
+  setJobs(sessionKey: string, stages: JobStage[]): void;
   close(): Promise<void>;
 }
 
@@ -47,6 +48,8 @@ async function fakeOpencode(
 ): Promise<FakeOpencode> {
   const hits: Array<{ method: string; path: string }> = [];
   const stages = new Map<string, Stage[]>();
+  const jobStages = new Map<string, JobStage[]>();
+  const jobCursors = new Map<string, number>();
   const cursors = new Map<string, number>();
   let userCounter = 0;
   let interrupted = 0;
@@ -111,6 +114,45 @@ async function fakeOpencode(
         respondJson(response, stage(userCounter * 10_000 + BASE_MS));
         return;
       }
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/experimental/job"
+      ) {
+        // The body shape is the v2.3.0 route's own envelope:
+        // `GET /api/experimental/job` answers `{ data: Array<Job.Info> }`
+        // with no cursor (packages/protocol/src/groups/job.ts), and the
+        // client SDK unwraps `.data` — so the wire tests exercise the
+        // endpoint's real shape, and a wrong-shaped fake turns red under
+        // the failed-read rule.
+        const sessionKey = url.searchParams.get("sessionID") ?? "ses-fake-1";
+        const list = jobStages.get(sessionKey);
+        if (list === undefined) {
+          // No scripted job stages: the serve answers the healthy empty
+          // list the 2.3.x endpoint returns between background work.
+          respondJson(response, { data: [] });
+          return;
+        }
+        const cursor = jobCursors.get(sessionKey) ?? 0;
+        jobCursors.set(sessionKey, Math.min(cursor + 1, list.length));
+        const stage = list[Math.min(cursor, list.length - 1)];
+        if (stage === undefined) {
+          respondJson(response, { data: [] });
+          return;
+        }
+        if (typeof stage === "number") {
+          if (stage === 404) {
+            // The real absent-route answer, verified against the packaged
+            // v2.3.0 serve: a bare 404 with an empty body.
+            response.writeHead(404);
+            response.end();
+            return;
+          }
+          respondJson(response, { error: "forced" }, stage);
+          return;
+        }
+        respondJson(response, { data: stage(userCounter * 10_000 + BASE_MS) });
+        return;
+      }
       if (request.method === "POST" && interruptMatch) {
         interrupted += 1;
         respondJson(response, null, 204);
@@ -149,6 +191,10 @@ async function fakeOpencode(
     },
     userMs: () => BASE_MS + userCounter * 10_000,
     setStages: (sessionKey, list) => stages.set(sessionKey, list),
+    setJobs: (sessionKey, list) => {
+      jobCursors.delete(sessionKey);
+      jobStages.set(sessionKey, list);
+    },
     close: () =>
       new Promise((resolve) => {
         server.close(() => resolve());
@@ -183,6 +229,24 @@ const idlePage = (userMs: number): ListPage => ({
     { type: "user", time: { created: userMs } },
   ],
 });
+
+/** One 2.3.x-shaped subagent job, as GET /api/experimental/job returns it
+ * (inside the route's `data` envelope). */
+const jobList = (status: string) => (): Array<Record<string, unknown>> => [
+  {
+    kind: "subagent",
+    id: "job-1",
+    sessionID: "ses-fake-1",
+    status,
+    time: {
+      started: BASE_MS + 5,
+      completed: status === "running" ? undefined : BASE_MS + 9,
+    },
+    childSessionID: "ses-child-1",
+    agent: "reviewer-child",
+    description: "the blind pass",
+  },
+];
 
 /** A driver on virtual time: each poll tick advances the clock deterministically. */
 async function harnessDriver(
@@ -312,6 +376,77 @@ describe("opencode session driver over the wire", () => {
     expect(listCalls).toBe(4);
   });
 
+  it("a failed job read never settles; the tick retries until the list answers", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [500, 500, () => []]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(
+      driver.prompt(sessionId, "review this"),
+    ).resolves.toBeUndefined();
+    // The turn settled only on the third job read, after two failures:
+    // silence from a failed read is never "empty".
+    const jobCalls = fake.hits.filter(
+      (h) => h.path === "/api/experimental/job",
+    ).length;
+    expect(jobCalls).toBe(3);
+    const listCalls = fake.hits.filter(
+      (h) => h.path === "/api/session/ses-fake-1/message",
+    ).length;
+    expect(listCalls).toBe(3);
+  });
+
+  it("settles only on a job list the serve answered empty after the settled page", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    // The first job read answers a completed-but-unconsumed job (the
+    // report-delivery race), the second answers empty: only that read
+    // settles the turn, and it is the tick's last read.
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [jobList("completed"), () => []]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(
+      driver.prompt(sessionId, "review this"),
+    ).resolves.toBeUndefined();
+    const tail = fake.hits.slice(-2).map((h) => h.path);
+    expect(tail[0]).toMatch(/\/session\/ses-fake-1\/message$/);
+    expect(tail[1]).toBe("/api/experimental/job");
+    const jobCalls = fake.hits.filter(
+      (h) => h.path === "/api/experimental/job",
+    ).length;
+    expect(jobCalls).toBe(2);
+  });
+
+  it("an absent job endpoint fails the prompt with the named pairing error", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [404]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    // The bare-404 absence surfaces as the undecodable-body pairing
+    // failure, named (the structured-404 signature has its own branch).
+    await expect(driver.prompt(sessionId, "review this")).rejects.toThrow(
+      /the serve answered its 404 with an undecodable error body — the pairing is broken/,
+    );
+  });
+
+  it("a 5xx job endpoint retries to the budget, whose failure carries the diagnosis", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake, { budgetSeconds: 0.05 });
+    fake.setStages("ses-fake-1", [idlePage]);
+    fake.setJobs("ses-fake-1", [503]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.prompt(sessionId, "review this")).rejects.toThrow(
+      /background-job read kept failing \(HTTP 503\) — the pairing may be broken/,
+    );
+    expect(fake.interrupted).toBe(1);
+  });
+
   it("dispose removes the session through the delete endpoint", async () => {
     const fake = await fakeOpencode();
     fakes.push(fake);
@@ -346,24 +481,40 @@ describe("opencode session driver over the wire", () => {
   });
 });
 
-describe("turnSettled", () => {
+describe("turnOpen", () => {
   const userMs = 1000;
 
-  it("settles on the idle marker after the user item", () => {
+  /** A 2.3.x-shaped subagent job, as the schema's Job.Subagent carries it. */
+  const subagentJob = (status: string, childMs: number) => ({
+    kind: "subagent",
+    id: `job-${childMs}`,
+    sessionID: "ses-fake-1",
+    status,
+    time: {
+      started: childMs,
+      completed: status === "running" ? undefined : childMs + 100,
+    },
+    childSessionID: "ses-child-1",
+    agent: "reviewer-child",
+    description: "the blind pass",
+  });
+
+  it("settles on the idle marker after the user item with no outstanding work", () => {
     expect(
-      turnSettled(
+      turnOpen(
         [
           { type: "idle", time: { created: userMs + 9000 } },
           { type: "user", time: { created: userMs } },
         ],
+        [],
         userMs,
       ),
-    ).toBe(true);
+    ).toBeNull();
   });
 
-  it("stays busy while the assistant streams and on a tool-call handoff", () => {
+  it("stays open while the turn runs and on a scheduled retry", () => {
     expect(
-      turnSettled(
+      turnOpen(
         [
           {
             type: "assistant",
@@ -371,35 +522,12 @@ describe("turnSettled", () => {
             finish: "tool-calls",
           },
         ],
+        [],
         userMs,
       ),
-    ).toBe(false);
+    ).not.toBeNull();
     expect(
-      turnSettled(
-        [{ type: "assistant", time: { created: userMs + 5000 } }],
-        userMs,
-      ),
-    ).toBe(false);
-  });
-
-  it("settles on the completed non-tool-call assistant fallback", () => {
-    expect(
-      turnSettled(
-        [
-          {
-            type: "assistant",
-            time: { created: userMs + 5000, completed: 200 },
-            finish: "stop",
-          },
-        ],
-        userMs,
-      ),
-    ).toBe(true);
-  });
-
-  it("stays busy on a scheduled retry and settles on a failed step", () => {
-    expect(
-      turnSettled(
+      turnOpen(
         [
           {
             type: "assistant",
@@ -408,11 +536,15 @@ describe("turnSettled", () => {
             retry: { attempt: 2 },
           },
         ],
+        [],
         userMs,
       ),
-    ).toBe(false);
+    ).not.toBeNull();
+  });
+
+  it("a terminal-error assistant stands in for the idle marker", () => {
     expect(
-      turnSettled(
+      turnOpen(
         [
           {
             type: "assistant",
@@ -420,15 +552,84 @@ describe("turnSettled", () => {
             error: { message: "boom" },
           },
         ],
+        [],
         userMs,
       ),
-    ).toBe(true);
+    ).toBeNull();
+  });
+
+  it("a listed job keeps the turn open even with an idle marker present", () => {
+    // The launch turn idled while the child is still out — the 2.3.x
+    // early-settle shape.
+    expect(
+      turnOpen(
+        [
+          { type: "idle", time: { created: userMs + 9000 } },
+          { type: "user", time: { created: userMs } },
+        ],
+        [subagentJob("running", userMs + 8000)],
+        userMs,
+      ),
+    ).toMatch(/background work outstanding/);
+  });
+
+  it("a completed-but-unconsumed job keeps the turn open through the report race", () => {
+    expect(
+      turnOpen(
+        [
+          { type: "idle", time: { created: userMs + 9000 } },
+          { type: "user", time: { created: userMs } },
+        ],
+        [subagentJob("completed", userMs + 8000)],
+        userMs,
+      ),
+    ).toMatch(/background work outstanding/);
+    expect(
+      turnOpen(
+        [
+          { type: "idle", time: { created: userMs + 9000 } },
+          { type: "user", time: { created: userMs } },
+        ],
+        [subagentJob("error", userMs + 8000)],
+        userMs,
+      ),
+    ).toMatch(/background work outstanding/);
+  });
+
+  it("a delivered report newer than the newest idle keeps the turn open", () => {
+    // The wake execution the report starts is still running.
+    expect(
+      turnOpen(
+        [
+          { type: "synthetic", time: { created: userMs + 9500 } },
+          { type: "idle", time: { created: userMs + 9000 } },
+          { type: "user", time: { created: userMs } },
+        ],
+        [],
+        userMs,
+      ),
+    ).toMatch(/wake execution/);
+  });
+
+  it("settles once the wake's idle lands after the delivered report", () => {
+    expect(
+      turnOpen(
+        [
+          { type: "idle", time: { created: userMs + 12000 } },
+          { type: "synthetic", time: { created: userMs + 9500 } },
+          { type: "idle", time: { created: userMs + 9000 } },
+          { type: "user", time: { created: userMs } },
+        ],
+        [],
+        userMs,
+      ),
+    ).toBeNull();
   });
 
   it("ignores markers from before the queued user item", () => {
     expect(
-      turnSettled([{ type: "idle", time: { created: userMs - 10 } }], userMs),
-    ).toBe(false);
+      turnOpen([{ type: "idle", time: { created: userMs - 10 } }], [], userMs),
+    ).toMatch(/no idle marker/);
   });
 });
 
