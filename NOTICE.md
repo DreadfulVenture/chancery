@@ -1,8 +1,8 @@
 # Provenance
 
 This file maps what chancery's director module (coordinate/director/director.ts) derives from @sysread/thatch, so
-attribution sits next to the code it describes. The mail-watcher (watch/mail-watcher/index.ts) imports the director
-package's mail envelope and reuses its stamp pattern directly — no forked copy; its package carries
+attribution sits next to the code it describes. The mail-watcher (watch/mail-watcher/forgejo-source.ts) imports the
+director package's mail envelope and reuses its stamp pattern directly — no forked copy; its package carries
 coordinate/director/director.ts verbatim at coordinate/director/director.ts, beside the entry's lib/mail-watcher/,
 rebuilt from it on every build (a deployment names lib/mail-watcher, not lib) — and its own derived sites are the last
 rows of this table. The license text lives in LICENSE — this file is the map, not a second legal notice. The source is
