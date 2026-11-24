@@ -731,11 +731,14 @@ describe("status surface", () => {
     for (let n = 1; n < positions.length; n++) {
       expect(positions[n]).toBeGreaterThan(positions[n - 1] ?? 0);
     }
-    // One embedded CSS block; no scripts, no external references, no
-    // fetched assets. The page depends on nothing outside this document.
+    // The page depends on nothing outside this document: every link the
+    // head carries is the favicon's data URI, riding the document itself.
     expect(body.match(/<style>/g)).toHaveLength(1);
     expect(body).not.toMatch(/<script/i);
-    expect(body).not.toMatch(/<link\b/i);
+    for (const link of body.matchAll(/<link\b[^>]*>/gi)) {
+      expect(link[0]).toMatch('rel="icon"');
+      expect(link[0]).toMatch(/href="data:image\/svg\+xml,/);
+    }
     expect(body).not.toContain("src=");
   });
 });

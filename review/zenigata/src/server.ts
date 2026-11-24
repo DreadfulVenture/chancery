@@ -4,21 +4,7 @@
  * POST /v1/events intake (202 + background processing), the /metrics and
  * /healthz probes, and the read-only status surface — /status as JSON
  * (the pinned machine contract), / as the human page, both rendered from
- * src/status.ts's one projection. The human page adds seven inputs the
- * JSON does not carry: (1) each view probes the adapter (a plain,
- * tokenless fetch, bounded short) and renders the answer; (2) the live
- * sessions' rows read with each run's started stamp (viewsWithStartedAt),
- * the ledger data the running duration renders from; (3) the runs table
- * reads its wall time from the settled rows' stamps in the projection,
- * and (4) the failed runs' failed drafts ride that same projection read;
- * (5) the PR cells render as links into the forge with the config's
- * forge base URL; (6) the narration ring's tail (PRJ-461) — the bot's
- * own lines, captured at emission through the logger's one write path,
- * held in memory — renders as the page's log tail; (7) a failed run's
- * reviewer session transcript (PRJ-461's transcript scope) reads live
- * through the session driver for each failed run whose retained session
- * still stands, degrading once the session is gone. All seven are page
- * rendering only, /status gains nothing.
+ * src/status.ts's one projection.
  *
  * The completion-signal hook: startServer stores one promise per accepted
  * event and exposes awaitSettled(eventId). A processed event resolves
@@ -59,6 +45,7 @@ import {
 import { LogRing } from "./log-ring.js";
 import { Metrics } from "./metrics.js";
 import { loadPersona } from "./persona.js";
+import { loadFaviconHref } from "./favicon.js";
 import { redactSecrets } from "./redact.js";
 import { runReply, skipReply } from "./replies.js";
 import { runReview, skipReview } from "./review.js";
@@ -464,6 +451,7 @@ export async function startServer(
   // index and the status surface's dropped-start view.
   const bootLines = await walkJournal(journalPath(config.stateDir), logger);
   const index = indexFromJournal(bootLines, logger);
+  const faviconHref = await loadFaviconHref(logger);
 
   // The status projection opens before the server can accept an event, so
   // every write-through site finds it ready. An empty projection (a
@@ -956,6 +944,7 @@ export async function startServer(
               // The page's log tail: the narration ring's lines since
               // boot, held in memory. /status never serializes them.
               logRing.tail(),
+              faviconHref,
             ),
             "text/html; charset=utf-8",
           );

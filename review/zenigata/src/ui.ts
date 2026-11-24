@@ -2,28 +2,9 @@
  * The status page renderer. /status serves the JSON machine contract;
  * this renders the human page at / from the same snapshot — one static
  * HTML page: no scripts, no stylesheets, no assets the page would have
- * to fetch. The markup and the one CSS block ship in this module.
- *
- * Seven inputs arrive beside the JSON payload, in the order they read:
- * (1) the route's adapter-reachability probe result; (2) the live
- * sessions' started moments — the ledger's first stage-entry stamps (the
- * SessionStartView extension), the raw data the running duration renders
- * from; (3) the runs table's wall time — derived at the projection read
- * from the settled rows' own stamps (the RunWallView extension); (4) a
- * failed run's failed drafts — the
- * journaled attempts the projection stored on the run's row (the
- * RunDraftsView extension), rendered in the failure cell; (5) the
- * forge's base URL, the config's ZENIGATA_FORGE_URL, which the PR cells
- * render their links with; (6) the narration ring's tail (PRJ-461) —
- * the bot's own lines since boot, captured at emission through the
- * logger's one write path and held in memory — rendered as the
- * log-tail panel, whose note says the store empties on restart and is
- * written nowhere; (7) a failed run's transcript view (PRJ-461's
- * transcript scope) — the retained reviewer session's turns read live
- * through the driver, rendered in the failure cell and degrading once
- * the session is gone. The machine contract's shape is pinned, so all
- * of these render at / and nowhere else (the reason is named in the
- * deployment doc and in the PR body).
+ * to fetch. The markup and the one CSS block ship in this module. The
+ * route passes the page-only render inputs beside the snapshot, and
+ * /status's pinned shape carries none of them.
  *
  * Escaping discipline: table and list cells compose small amounts of
  * markup (chips, muted spans), so every raw field is routed through esc()
@@ -521,19 +502,8 @@ const configList = (config: StatusConfig, forgeUrl: string): string => {
 };
 
 /**
- * The page renderer's inputs: the JSON snapshot, the route's
- * adapter-reachability probe answer, the page's session rows — the live
- * ledger's reads extended with each row's started stamp, arriving here
- * as server-internal render data (see SessionStartView) and never
- * serialized into /status — the page's run rows — the projection read
- * extended with each settled run's wall time (see RunWallView) and,
- * for the failed runs, with the failed drafts the projection stored
- * (see RunDraftsView) — plus the forge's base URL, which the PR cells
- * link with. The last input rides beside them: the narration tail — the
- * ring's lines since boot, the log the page renders and the JSON never
- * serializes (optional, defaulting empty, so tests of other panels can
- * omit it). All of these are page-only inputs: /status's pinned shape
- * gains nothing.
+ * Renders the human status page at / from the snapshot and the page's
+ * rendering-only inputs; /status serializes the snapshot alone.
  */
 export function renderStatusPage(
   status: StatusData,
@@ -542,6 +512,7 @@ export function renderStatusPage(
   runs: RunDraftsView[],
   forgeUrl: string,
   logLines: string[] = [],
+  faviconHref: string | undefined = undefined,
 ): string {
   const now = Date.now();
   const renderedAt = new Date(now).toISOString();
@@ -612,11 +583,18 @@ export function renderStatusPage(
     { label: "accepted", cell: (start) => stamped(start.acceptedAt, now) },
   ];
 
+  // The data URI keeps the page asset-free: the head needs no request for the icon.
+  // The href rides esc() like every other raw value the page renders.
+  const faviconLink =
+    faviconHref === undefined
+      ? ""
+      : `\n<link rel="icon" type="image/svg+xml" href="${esc(faviconHref)}">`;
+
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">${faviconLink}
 <title>zenigata status</title>
 <style>
   :root { color-scheme: dark; }

@@ -414,3 +414,39 @@ describe("the failed report", () => {
     expect(failedNoDrafts).toContain("context draft failed validation twice");
   });
 });
+
+describe("the page's favicon link", () => {
+  it("renders one icon link in the head when the href rides in", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [],
+      FORGE_URL,
+      [],
+      "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E",
+    );
+    expect(page.split('<link rel="icon" type="image/svg+xml"').length).toBe(2);
+    // The link sits inside the head, before the page's title closes it.
+    expect(page.indexOf('rel="icon"')).toBeLessThan(page.indexOf("</title>"));
+  });
+
+  it("renders no icon link when the href is absent", () => {
+    const page = renderStatusPage(status(), true, [], [], FORGE_URL);
+    expect(page).not.toContain('rel="icon"');
+  });
+
+  it("escapes the href like every other raw value the page renders", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [],
+      [],
+      FORGE_URL,
+      [],
+      'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg">',
+    );
+    expect(page).toContain('href="data:image/svg+xml,&lt;svg xmlns=&quot;');
+    expect(page).not.toContain('href="data:image/svg+xml,<svg');
+  });
+});

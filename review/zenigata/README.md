@@ -21,15 +21,16 @@ the payloads, and everything the bot does lands in an append-only journal and a 
 
 ## Layout
 
-| What                       | Where                                                     |
-| -------------------------- | --------------------------------------------------------- |
-| Bot core and pipeline      | `src/`                                                    |
-| Contracts                  | `src/contracts/`                                          |
-| Adapters and test doubles  | `src/adapters/`                                           |
-| Review agent definition    | `agent/reviewer.md`                                       |
-| Persona (packaged default) | `persona.md`                                              |
-| Nix package and module     | `package.nix` (this dir), `../../nix/zenigata-module.nix` |
-| Docs                       | `docs/`                                                   |
+| What                        | Where                                                     |
+| --------------------------- | --------------------------------------------------------- |
+| Bot core and pipeline       | `src/`                                                    |
+| Contracts                   | `src/contracts/`                                          |
+| Adapters and test doubles   | `src/adapters/`                                           |
+| Review agent definition     | `agent/reviewer.md`                                       |
+| Persona (packaged default)  | `persona.md`                                              |
+| Status page icon (packaged) | `assets/favicon.svg`                                      |
+| Nix package and module      | `package.nix` (this dir), `../../nix/zenigata-module.nix` |
+| Docs                        | `docs/`                                                   |
 
 ## Local development
 
