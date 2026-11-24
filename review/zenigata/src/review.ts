@@ -160,13 +160,14 @@ function parseCloneUrl(cloneUrl: string): URL {
 /**
  * The re-review trigger contract, carried by every posted review body.
  * The contract is structure, not model output: the drafting model can
- * promise follow-up it will never deliver ("the next push gets the same
- * treatment"), while the pipeline's post site appends this line without
- * asking the model. The footer is the mechanism; the prompt rule below
+ * promise follow-up it will never deliver, while the pipeline's post
+ * site appends this line without asking the model. The forge review
+ * re-request is the whole trigger surface — zenigata reviews when a
+ * human asks — and the footer is the mechanism; the prompt rule below
  * is only guidance, and a wrong model mood cannot change what posts.
  */
 export const REVIEW_TRIGGER_FOOTER =
-  "A fresh `@zenigata @review` comment re-runs the review, and a review re-request does too. A bare mention, a mention in a reply, or a bare push triggers nothing.";
+  "Reviews fire on a forge review re-request. PR comments trigger nothing.";
 
 /**
  * The posted body's note about the comments that never reached the
@@ -284,13 +285,15 @@ export function humanizeShrinkDrops(
  * carry one already — a redelivery, or a draft quoting or rewording the
  * register rule the prompt names — so every footer-bearing line strips
  * before the append. Recognition is by stem: a line keeping the opening
- * words with a reworded tail is a footer statement too. The second stem
- * still sees use because earlier-generation footers sit on past posted
- * reviews and a draft can reproduce that sentence from repo history.
+ * words with a reworded tail is a footer statement too. The first stem
+ * matches the summon-command footer past posted reviews carry (the
+ * command is gone); the second matches the one previous-generation
+ * footer; the third matches the shipped footer.
  */
 const TRIGGER_FOOTER_STEMS = [
   "A fresh `@zenigata @review` comment",
   "Re-reviews fire",
+  "Reviews fire on a forge",
 ] as const;
 
 /**
@@ -578,6 +581,8 @@ interface RunState {
   keptComments?: InlineComment[];
 }
 
+// The pipeline's trigger lives on the contract: runReview takes a forge
+// review re-request, the whole trigger surface.
 export async function runReview(
   ctx: Ctx,
   event: ReviewRequestedEvent,

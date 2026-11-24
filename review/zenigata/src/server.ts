@@ -581,8 +581,8 @@ export async function startServer(
    * redelivered failure cannot silently re-fire a paid review run.
    * `once` allows one automatic re-run, and only of a failed event. The
    * gate keys on the event's identity (the journal's forge delivery id),
-   * so a re-request or a fresh @review comment — each a fresh delivery —
-   * always runs, and only a replay of a spent delivery is gated.
+   * so a re-request — a fresh delivery — always runs, and only a replay
+   * of a spent delivery is gated.
    */
   const retryRefused = (
     event: Extract<ForgeEvent, { kind: "review_requested" }>,

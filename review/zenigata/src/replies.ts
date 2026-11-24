@@ -2,7 +2,8 @@
  * The reply flow: answer a question on the bot's own review or inline
  * comment, optionally store one durable observation through the memory
  * gateway. The verdict and every Conventional Comments label never move
- * under questioning; only a fresh @review changes a verdict.
+ * under questioning; a fresh review run — which a forge review
+ * re-request starts — changes a verdict.
  */
 
 import type { Ctx } from "./ctx.js";
@@ -61,14 +62,13 @@ const replyOutputSchema = z.object({
 /**
  * Posted in the thread when the reply points at a comment the bot has no
  * record of. The trigger sentence names the shipped re-fire set exactly:
- * a fresh `@zenigata @review` comment re-runs the review, and so does
- * re-requesting the review from the forge — each forge delivery runs at
+ * a forge review re-request runs the review — each forge delivery runs at
  * most once under the current retry policy.
  */
 const NO_RECORD_REPLY = [
   "I have no record of the comment this reply points at; it may predate my records.",
   "",
-  "A fresh `@zenigata @review` comment re-runs the review, and re-requesting my review from the forge runs it too; each forge delivery runs at most once.",
+  "Reviews fire on a forge review re-request. PR comments trigger nothing. Each forge delivery runs at most once.",
 ].join("\n");
 
 /** Posted in the thread when the answer run itself fails. */
@@ -110,9 +110,9 @@ ${input.authorReply}
 Write a threaded answer addressed to them. Two things do not move under
 questioning: the verdict and every Conventional Comments label. You may
 clarify, correct mechanics, concede a factual point, or stand your
-ground, but a verdict changes only when a fresh @review runs against a
-new head. Keep the answer under 8000 characters; longer ones are cut
-with a "[answer truncated]" marker.
+ground, but a verdict changes only when a fresh review run works — and a
+forge review re-request starts one. Keep the answer under 8000
+characters; longer ones are cut with a "[answer truncated]" marker.
 
 Reply with ONLY a JSON object:
 

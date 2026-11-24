@@ -58,8 +58,8 @@ Post the review. The request body is JSON:
 | `comments`        | array  | Inline comments: `{path, line, body}` each. `path` is a file in the diff, `line` is a new-side line, `body` is the full comment text. |
 
 The bot appends the same fixed footer to every review body it posts —
-``A fresh `@zenigata @review` comment re-runs the review, and a review re-request does too. A bare mention, a mention in a reply, or a bare push triggers nothing.``
-— at the post site rather than in model prose, so the posted review states the re-review trigger contract as structure.
+`Reviews fire on a forge review re-request. PR comments trigger nothing.` — at the post site rather than in model prose,
+so the posted review states the re-review trigger contract as structure.
 
 The response is JSON with the posted ids:
 

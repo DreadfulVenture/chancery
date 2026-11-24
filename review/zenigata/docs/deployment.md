@@ -96,7 +96,7 @@ malformed.
 | `ZENIGATA_REVIEW_TIMEOUT_SECONDS`   | no       | Whole-run deadline; default `1800`. A run that exceeds it reaches no verdict and posts nothing: the journal record is the failure surface, and only a completed review reaches the PR. A review the forge created from an abandoned in-flight post can still land afterwards; the run accepts that, and the adapter SHOULD dedupe posts on `(repo, pr, expectedHeadSha)` (see `docs/forge-adapter.md`). |
 | `ZENIGATA_TURN_POLL_SECONDS`        | no       | Seconds between the session driver's turn-state polls; default `3`. Each poll is one short request; a long turn backs off mildly.                                                                                                                                                                                                                                                                       |
 | `ZENIGATA_TURN_BUDGET_SECONDS`      | no       | Seconds one prompt's turn may run before the driver calls it stuck: it interrupts the turn and the prompt fails; default `900`. The whole-run deadline backstops it.                                                                                                                                                                                                                                    |
-| `ZENIGATA_RETRY_POLICY`             | no       | The review-event retry posture; default `never`. `never` refuses to re-process an event the journal already ran, so an automatic re-fire path exists nowhere in the default configuration. `once` allows one automatic re-run of a failed event on redelivery; only a failure triggers it. An unlisted value refuses to boot.                                                                           |
+| `ZENIGATA_RETRY_POLICY`             | no       | The review-event retry posture; default `never`. `never` refuses to re-process an event the journal already ran, so a replayed (redelivered) event costs nothing — reviews come only from fresh forge deliveries (a re-request), never from a replay. `once` allows one automatic re-run of a failed event on redelivery; only a failure triggers it. An unlisted value refuses to boot.                |
 | `ZENIGATA_AGENT`                    | no       | Agent name the session driver selects; default `zenigata-reviewer`.                                                                                                                                                                                                                                                                                                                                     |
 | `ZENIGATA_WORKTREES_DIR`            | no       | Where the bot clones and reviews; default `<state dir>/worktrees`.                                                                                                                                                                                                                                                                                                                                      |
 | `ZENIGATA_RETENTION_WINDOW_SECONDS` | no       | Seconds a finished run's work — its opencode session and the per-PR review worktree — stays on disk before the retention sweep disposes and removes it; default `86400` (24h). The settled run's journal record names the retained work and stamps the settle moment, so the hourly sweep covers pre-restart runs too. `0` disables retention: the run tears its work down the moment it settles.       |
@@ -255,13 +255,23 @@ routes the agent outside the review route breaks attribution and the tier contra
   to replies: a reply on a repository outside the list skips with a `skipped` journal record and no session or post.
 - **Forks.** The bot skips a pull request whose head lives in a fork. The adapter reports that in `isFork`; the
   deployment does not need to do anything.
-- **Requesters.** Only logins in `allowedLogins` may trigger a review.
+- **Requesters.** Only logins in `allowedLogins` may trigger a review, and the forge-native review re-request is the
+  whole trigger surface: the summon command is gone, so zenigata reviews when a human asks.
 
 The reply grant is deliberately asymmetric. A threaded answer goes to any commenter the adapter relays — the bot answers
 the question in its own thread regardless of who asked, bounded by the reply queue's waiter cap and its dedupe on
 replayed events — but a memory-learning write gates on `allowedLogins`: only an allowed login teaches the bot. The fixed
 no-record reply (an `inReplyTo` the index has no record of) posts into the thread the event names, so an unknown
 commenter still gets an answer; it just stores nothing.
+
+## The summon's silence (deliberate)
+
+The removed `@zenigata @review` comment command leaves a surface behind that says nothing back: a human who posts the
+old summon now gets the adapter's `202 ignored` — the webhook arrived, the comment became no event, and nothing is
+delivered to the bot's intake. That silence is accepted deliberately (PRJ-493 review decision 17954); there is no
+dead-command reply surface, and the bot posts no instruction teaching the old command's fate. The contract the footer on
+every posted review states — reviews fire on a forge review re-request — is the answer humans eventually read, and it
+travels with every review the bot posts.
 
 ## The adapter's expected-head duty
 

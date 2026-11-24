@@ -48,28 +48,6 @@ function deliveryEventId(
 }
 
 /**
- * A top-level comment is a review request when it addresses the bot and
- * carries the command: at least one @-mention token that is not the command
- * itself, plus the `@review` token. Matching is whitespace-tokenized and
- * case-insensitive, so "@zenigata @review", "@ZENIGATA\n@review", and
- * "@review @zenigata" all trigger, while ordinary PR chatter without the
- * command stays ignored. The adapter has no config naming the bot's login,
- * so the mention is what "addresses the bot" can honestly mean here — the
- * intake still gates runs on its own requester allowlist.
- */
-function isReviewCommandComment(text: string): boolean {
-  let addressed = false;
-  let command = false;
-  for (const token of text.split(/\s+/)) {
-    if (!token.startsWith("@")) continue;
-    const name = token.slice(1).toLowerCase();
-    if (name === "review") command = true;
-    else if (name !== "") addressed = true;
-  }
-  return addressed && command;
-}
-
-/**
  * Translate a Forgejo webhook into a contract-shaped event, or null when the
  * webhook does not map to a supported contract event. Unsupported events are
  * intentionally ignored (no third event kind is invented).
@@ -171,26 +149,11 @@ export function translateForgejoWebhook(opts: {
       };
       return ForgeEventSchema.parse(translated);
     }
-    // Top-level comment: the only thing it can mean is the review-mention
-    // command. The forge delivery id is the event identity, so a fresh
-    // @review comment (a fresh delivery) is a fresh event and the same
-    // delivery replayed stays one identity; the comment's own id rides as
-    // metadata, which keeps per-comment history meaningful.
-    if (!isReviewCommandComment(body)) return null;
-    const eventId = deliveryEventId(
-      deliveryId,
-      `pr-${repo}-${prNumber}-review_requested-${commentId}`,
-    );
-    const translated: ForgeEvent = {
-      kind: "review_requested",
-      eventId,
-      repo,
-      pr: prNumber,
-      requesterLogin: authorLogin,
-      commentId,
-      text: body,
-    };
-    return ForgeEventSchema.parse(translated);
+    // A top-level comment is ordinary chatter now: the comment-review
+    // summon command was removed, so no comment text names a trigger.
+    // Mentions map to nothing, and the forge review re-request is the
+    // trigger surface — zenigata reviews when a human asks.
+    return null;
   }
 
   return null;

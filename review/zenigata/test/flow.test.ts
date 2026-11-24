@@ -685,13 +685,13 @@ describe("reply flow", () => {
     expect(h.forge.postedReplies).toHaveLength(1);
     expect(h.forge.postedReplies[0]?.body).toContain("no record");
     // The trigger sentence names the shipped re-fire set, not a single
-    // stale promise: both a fresh @review comment and a forge re-request
-    // run, and each forge delivery is spend-gated.
+    // stale promise: a forge re-request runs, and each forge delivery
+    // is spend-gated.
     expect(h.forge.postedReplies[0]?.body).toContain(
-      "A fresh `@zenigata @review` comment re-runs the review",
+      "Reviews fire on a forge review re-request. PR comments trigger nothing.",
     );
     expect(h.forge.postedReplies[0]?.body).toContain(
-      "re-requesting my review from the forge runs it too; each forge delivery runs at most once",
+      "Each forge delivery runs at most once",
     );
     expect(h.sessions.createdSessions).toHaveLength(0);
     const records = await runRecords(h);

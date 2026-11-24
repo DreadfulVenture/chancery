@@ -173,14 +173,12 @@ describe("webhook verification and translation", () => {
     });
   });
 
-  it("maps a top-level @review mention comment to a review_requested event anchored on the comment id", async () => {
-    const received: any[] = [];
-    const intake = await serve(async (req, res) => {
-      const chunks: Buffer[] = [];
-      for await (const c of req) chunks.push(c as Buffer);
-      received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+  it("ignores a top-level @review mention comment: the summon command is gone", async () => {
+    let called = 0;
+    const intake = await serve((_req, res) => {
+      called += 1;
       res.writeHead(202);
-      res.end("accepted");
+      res.end();
     });
     intakeClose = intake.close;
 
@@ -190,6 +188,9 @@ describe("webhook verification and translation", () => {
     );
     close = handle.close;
 
+    // A top-level comment that names the old summon command is ordinary
+    // chatter now: delivered to the webhook route (202) but translated to
+    // nothing and delivered to no intake.
     const payload = {
       action: "created",
       issue: { number: 47, pull_request: { url: "x" } },
@@ -215,67 +216,7 @@ describe("webhook verification and translation", () => {
       },
     );
     expect(res.status).toBe(202);
-    expect(received[0]).toMatchObject({
-      kind: "review_requested",
-      eventId: "deliv-review-1",
-      repo: "org/repo",
-      pr: 47,
-      requesterLogin: "example-user",
-      commentId: "1754",
-      text: "@zenigata @review",
-    });
-  });
-
-  it("maps the @review command case-insensitively and across whitespace", async () => {
-    const received: any[] = [];
-    const intake = await serve(async (req, res) => {
-      const chunks: Buffer[] = [];
-      for await (const c of req) chunks.push(c as Buffer);
-      received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      res.writeHead(202);
-      res.end("accepted");
-    });
-    intakeClose = intake.close;
-
-    const handle = await startServer(
-      { ...baseConfig, intakeUrl: intake.baseUrl } as any,
-      { forgejo: makeFakeForgejo() },
-    );
-    close = handle.close;
-
-    const payload = {
-      action: "created",
-      issue: { number: 47, pull_request: { url: "x" } },
-      comment: {
-        id: 1755,
-        body: "please\n\t@ZENIGATA   @ReVieW",
-        user: { login: "example-user" },
-      },
-      repository: { full_name: "org/repo" },
-    };
-    const body = JSON.stringify(payload);
-    const res = await fetch(
-      `http://127.0.0.1:${handle.port}/webhooks/forgejo`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Gitea-Event": "issue_comment",
-          "X-Gitea-Delivery": "deliv-review-2",
-          "X-Gitea-Signature": sign(baseConfig.webhookSecret, body),
-        },
-        body,
-      },
-    );
-    expect(res.status).toBe(202);
-    expect(received[0]).toMatchObject({
-      kind: "review_requested",
-      eventId: "deliv-review-2",
-      repo: "org/repo",
-      pr: 47,
-      requesterLogin: "example-user",
-      commentId: "1755",
-    });
+    expect(called).toBe(0);
   });
 
   it("ignores unsupported/unmappable events without inventing kinds", async () => {

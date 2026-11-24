@@ -31,18 +31,13 @@ Other: `GET /healthz`.
   forge delivery id, so each re-request of the same PR is its own event (the intake's retry policy gates replays of a
   delivery, not re-requests); `commentId` metadata is the requested reviewer's forge id. When the delivery header is
   absent the event id falls back to a deterministic key, so the translation never fabricates a per-run identity.
-- **`review_requested` (comment trigger)**: Forgejo `issue_comment` or `pull_request_comment` webhook,
-  `action: "created"`, **top level** (no reply target) when the body addresses the bot with an @-mention and carries the
-  `@review` command token (whitespace-tokenized, case-insensitive, e.g. `@zenigata @review`). Translated to
-  `{kind, eventId, repo, pr, requesterLogin, commentId, text}`, with `requesterLogin` set to the comment's author,
-  `commentId` set to the comment's own id, and `eventId` set to the forge delivery id: a fresh `@review` comment is a
-  fresh delivery and a fresh event, so a new comment re-runs the bot on the PR, while a replayed delivery is the same
-  event identity and stays subject to the intake's retry policy.
 - **`reply`**: Forgejo `issue_comment` or `pull_request_comment` webhook, `action: "created"`, on a pull request, **only
   when the payload provides an explicit reply target** (`comment.in_reply_to_id` / `comment.in_reply_to` /
   `comment.reply_to`). Translated to `{kind, eventId, repo, pr, authorLogin, inReplyTo, commentId, text}` with opaque
-  ids. Without a reply target the comment is never a reply (`inReplyTo` cannot be fabricated), so it maps to the comment
-  trigger above or is acknowledged and ignored.
+  ids. Without a reply target the comment is never a reply (`inReplyTo` cannot be fabricated); it is acknowledged and
+  ignored.
+- Comments trigger nothing: a top-level PR comment (no reply target) is ordinary chatter, whatever it mentions. Reviews
+  fire on a forge review re-request. PR comments trigger nothing.
 
 Unsupported/unmappable events are acknowledged (`202 ignored`) without inventing a third event kind. If real Forgejo
 payloads cannot satisfy the contract without guessing or extending it, that is a `BLOCKED` discrepancy per the contract
