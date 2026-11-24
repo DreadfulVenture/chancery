@@ -98,9 +98,21 @@ import { z } from "zod";
 
 // The watcher kernel: the poll pass, the registry and its adoption walk,
 // the stamp machinery (the sole writer of the rows it adopts), the
-// delivery discipline, and the per-source isolation. This module
-// implements the source contract against it.
-import { isRecord, type WatchEvent, type WatchSource } from "./kernel.ts";
+// delivery discipline, and the per-source isolation. The source-contract
+// base class (source.ts) owns what the adapters shared; this module is
+// the Forgejo specifics.
+import {
+  isRecord,
+  type AdoptedWatch,
+  type Debug,
+  type DeliverCheckpoint,
+  type PassContext,
+  type RegisterRequest,
+  type WatchCursor,
+  type WatchEvent,
+  type WatchRowSeed,
+} from "./kernel.ts";
+import { WatchSource } from "./source.ts";
 import { forgejoReady } from "./config.ts";
 
 const WATCH_KINDS = new Set(["run", "pr", "branch", "pr-reviews"]);
@@ -411,314 +423,6 @@ const runViewOf = (event) => {
     index_in_repo: index !== undefined ? Number(index) : undefined,
   };
 };
-
-// The register request's validation: the source's own argument errors,
-// thrown for the tool to surface. The messages are today's, word for
-// word.
-const normalizeRegister = (input) => {
-  const kind = String(input.kind || "").trim();
-  if (!WATCH_KINDS.has(kind)) {
-    throw new Error(
-      `watcher_register: kind must be one of run, pr, branch, pr-reviews (got ${JSON.stringify(input.kind)})`,
-    );
-  }
-  const repo = String(input.repo || "").trim();
-  if (!/^[^/]+\/[^/]+$/.test(repo)) {
-    throw new Error(
-      `watcher_register: repo must be owner/name (got ${JSON.stringify(input.repo)})`,
-    );
-  }
-  const ref = String(input.ref || "").trim();
-  if (kind === "branch") {
-    if (!ref || ref.length > 200) {
-      throw new Error("watcher_register: ref must be a branch name");
-    }
-  } else if (!/^\d+$/.test(ref)) {
-    throw new Error(
-      `watcher_register: ref must be a numeric ${kind} ${kind === "run" ? "id" : "index"} (got ${JSON.stringify(input.ref)})`,
-    );
-  }
-  const note = String(input.note ?? "").trim();
-  if (note.length > 200) {
-    throw new Error("watcher_register: note must be 200 characters or less");
-  }
-  return { kind, repo, ref, note: note || null };
-};
-// The Forgejo source: the source contract's implementation against the
-// forge REST reads built beside it (the poll's own route wrappers). A pr
-// or branch watch shares one claim group — a second register on the same
-// repo+ref returns the claimed watch instead of a second owner.
-const makeForgejoSource = (reads, debug): WatchSource => ({
-  id: "forgejo",
-
-  ready: (watcherOptions) => forgejoReady(watcherOptions),
-
-  kinds: () => ["run", "pr", "branch", "pr-reviews"],
-
-  claimGroupOf: (kind) => (kind === "pr" || kind === "branch" ? "pull" : null),
-
-  normalize: normalizeRegister,
-
-  // The pr-reviews baseline (review 213's note on the backlog): the
-  // reviews the pull request already carries are the backlog, spent at
-  // creation — the watch wakes on reviews that arrive after it, never on
-  // the page it registered against. The baseline read is one read,
-  // through the same client a pass reads with; when the forge cannot
-  // answer it (an outage, an answer that does not parse), the kernel
-  // stamps the watch baseline-pending, and the first poll pass spends
-  // its page instead — the backlog never wakes, whatever the timing.
-  baseline: async (seed) => {
-    if (seed.kind !== "pr-reviews") return {};
-    try {
-      const [owner, repo] = seed.repo.split("/");
-      const data = await reads.reviewsOf(
-        owner,
-        repo,
-        Number(seed.ref),
-        REVIEWS_PER_READ,
-      );
-      const reviews = parseReviews(data);
-      if (!reviews) return null;
-      return Object.fromEntries(reviews.map((review) => [review.id, true]));
-    } catch (error) {
-      debug("register.baseline.unread", { error: String(error) });
-      return null;
-    }
-  },
-
-  // The poll reads, per kind — a pure read answering normalized events.
-  // Null answers "the read gave nothing usable" (the pass skips; a
-  // baseline-pending row keeps its flag); an array answers a successful
-  // read (a baseline-pending row spends it, empty or not). The cursor is
-  // the watch's stamp-carried progress; the memo shares this pass's
-  // reads with the projection.
-  poll: async (watch, cursor, pass) => {
-    const [owner, repo] = watch.repo.split("/");
-    if (watch.kind === "pr-reviews") {
-      // The poll budget: one reviews read per registered watch per pass.
-      // The read takes the tool's largest page; whatever it brings that
-      // the stamp has not spent wakes once, whoever wrote it. The read is
-      // shared with the projection's sync through the per-pass memo — a
-      // pass that already read this PR's reviews for the projection (or
-      // for another wake) reads them no second time, and a read that
-      // already failed this pass fails the wake without a retry.
-      const memoKey = `reviews ${watch.repo} ${Number(watch.ref)}`;
-      let data = pass.memo.get(memoKey);
-      if (data === undefined) {
-        try {
-          data = await reads.reviewsOf(
-            owner,
-            repo,
-            Number(watch.ref),
-            REVIEWS_PER_READ,
-          );
-          pass.memo.set(memoKey, data);
-        } catch (error) {
-          pass.memo.set(memoKey, null);
-          throw error;
-        }
-      }
-      if (data === null) return null;
-      const reviews = parseReviews(data);
-      if (!reviews) {
-        debug("reviews.list.unparsed", { id: watch.id, pr: watch.ref });
-        return null;
-      }
-      // A register whose own baseline read could not run (the forge was
-      // down, the entry unusable) left the baseline to this pass: the
-      // page as it stands is the backlog, spent whole, waking nobody.
-      if (cursor.baselinePending) {
-        return reviews.map((review) => ({
-          ...reviewEventOf(review),
-          baseline: true,
-        }));
-      }
-      return reviews
-        .filter((review) => !cursor.delivered[review.id])
-        .map((review) => reviewEventOf(review));
-    }
-    if (watch.kind === "run") {
-      const run = runRowOf(
-        await reads.runRecord(owner, repo, Number(watch.ref)),
-      );
-      if (!run) {
-        debug("run.record.unparsed", { id: watch.id, run: watch.ref });
-        return null;
-      }
-      if (!runIsTerminal(run, debug) || cursor.delivered[run.id]) return [];
-      return [runEventOf(run)];
-    }
-    let sha;
-    if (watch.kind === "pr") {
-      // The pull-request read decides two things every pass: the watch's
-      // lifecycle — a closed pull request ends it, before any run is
-      // read — and, on an open one, the head the run reads follow.
-      const pull = parsePullRecord(
-        await reads.prRecord(owner, repo, Number(watch.ref)),
-      );
-      if (pull === null) {
-        debug("pr.record.unparsed", { id: watch.id, pr: watch.ref });
-        return null;
-      }
-      const life = prLifecycle(pull, debug);
-      if (life) return [lifecycleEventOf(life)];
-      sha = pull?.head?.sha;
-      if (typeof sha !== "string" || !sha) {
-        debug("watch.head.unresolved", { id: watch.id, kind: watch.kind });
-        return null;
-      }
-    } else {
-      sha = await branchSha(watch, debug, reads.branchesOf);
-    }
-    if (!sha) return null;
-    const listed = parseRunRows(
-      await reads.runsOfHead(owner, repo, sha, RUNS_PER_HEAD),
-    );
-    if (!listed) {
-      debug("runs.list.unparsed", { id: watch.id });
-      return null;
-    }
-    const events: WatchEvent[] = [];
-    for (const entry of listed) {
-      if (!runIsTerminal(entry, debug) || cursor.delivered[entry.id]) continue;
-      // The verdict is built from the run's full record, and falls back
-      // to the listing entry when that read cannot keep up — the
-      // listing held a fine record too.
-      let run = entry;
-      try {
-        const record = runRowOf(await reads.runRecord(owner, repo, entry.id));
-        if (record) run = record;
-        else debug("run.record.unparsed", { id: watch.id, run: entry.id });
-      } catch (error) {
-        debug("run.record.unread", {
-          id: watch.id,
-          run: entry.id,
-          error: String(error),
-        });
-      }
-      events.push(runEventOf(run));
-    }
-    return events;
-  },
-
-  // The verdict's detail reads — the job states and the failing job's
-  // log tail — taken BEFORE the stamp write so that nothing but the mail
-  // follows it. The forge answers the run's full job list in one read;
-  // the verdict caps how much of it it takes and says so past the cap.
-  // The answer is opaque to the kernel; render lays it into the mail.
-  prepare: async (watch, event) => {
-    if (event.type !== "run") return undefined;
-    const runId = Number(event.id);
-    const [owner, name] = watch.repo.split("/");
-    let jobs = null;
-    try {
-      const rows = jobsOf(await reads.runJobs(owner, name, runId));
-      if (rows === null) {
-        debug("jobs.unparsed", { id: watch.id, run: runId });
-      } else if (rows.length > JOBS_READ_CAP) {
-        jobs = rows.slice(0, JOBS_READ_CAP);
-        console.error(
-          `[forgejo-watcher] run ${runId} of ${watch.repo} lists ${rows.length} jobs; its verdict reads the first ${JOBS_READ_CAP}`,
-        );
-      } else {
-        jobs = rows;
-      }
-    } catch (error) {
-      debug("jobs.unread", { id: watch.id, run: runId, error: String(error) });
-    }
-    const jobsText = jobsLine(jobs);
-    const failing = Array.isArray(jobs)
-      ? jobs.filter(
-          (job) => String(job?.status ?? "").toLowerCase() === "failure",
-        )
-      : [];
-    let tail = null;
-    if (failing.length) {
-      try {
-        // Omitting offset is the forge's tail read; the client tails the
-        // lines locally besides, so a route that answers the whole log
-        // still costs the mail only its tail.
-        const text = await reads.jobLog(
-          owner,
-          name,
-          runId,
-          Number(failing[0].id),
-        );
-        if (typeof text !== "string" || text === "") {
-          debug("log.unread", {
-            id: watch.id,
-            job: failing[0]?.id,
-            error: "the job-log answer carries no content",
-          });
-        } else {
-          tail = {
-            job: String(failing[0].name ?? failing[0].id),
-            lines: unwrapLog(text),
-          };
-        }
-      } catch (error) {
-        debug("log.unread", {
-          id: watch.id,
-          job: failing[0]?.id,
-          error: String(error),
-        });
-      }
-    }
-    return { jobsText, tail };
-  },
-
-  // The verdicts, byte for byte today's mails: the event's fields laid
-  // back out under the mail builders' own names, the detail (the job
-  // states and the log tail) exactly as prepare read it.
-  render: (watch, event, detail) => {
-    if (event.type === "run") {
-      const jobs = (detail ?? null) as {
-        jobsText?: string | null;
-        tail?: { job: string; lines: string[] } | null;
-      } | null;
-      return verdictMail(
-        watch,
-        runViewOf(event),
-        jobs?.jobsText ?? null,
-        jobs?.tail ?? null,
-      );
-    }
-    if (event.type === "review") {
-      return reviewMail(watch, {
-        id: event.id,
-        reviewer: eventValue(event, "reviewer"),
-        state: eventValue(event, "review-state"),
-        url: eventValue(event, "review-url"),
-      });
-    }
-    return lifecycleMail(
-      watch,
-      eventValue(event, "how"),
-      eventValue(event, "closed-at"),
-    );
-  },
-
-  // The delivery discipline's debug ops, named as today's: verdict.* for
-  // a run's CI verdict, review.* for a review wake, lifecycle.* for a
-  // pr watch's close.
-  debugOp: (checkpoint, watch, event) => {
-    if (event.terminal) {
-      if (checkpoint === "unstamped") {
-        return { op: "lifecycle.unstamped", attrs: { id: watch.id } };
-      }
-      return {
-        op: `lifecycle.${checkpoint}`,
-        attrs: { id: watch.id, how: eventValue(event, "how") },
-      };
-    }
-    const stem = event.type === "run" ? "verdict" : "review";
-    const attrs =
-      event.type === "run"
-        ? { id: watch.id, run: event.id }
-        : { id: watch.id, review: event.id };
-    return { op: `${stem}.${checkpoint}`, attrs };
-  },
-});
 // The events the source's poll answers: the poll's reads, laid onto the
 // kernel's privacy contract — id, ref, url, status, measure, and no
 // free-text field. The event id is the delivered marker's key, exactly
@@ -807,4 +511,371 @@ const branchSha = async (watch, debug, branchesOf) => {
   return null;
 };
 
-export { makeForgejoSource, parsePullRecord, prLifecycle, REVIEWS_PER_READ };
+export { parsePullRecord, prLifecycle, REVIEWS_PER_READ };
+
+// The REST reads the source polls with, over the forge client (the
+// composer builds them; the tests dial loopback fakes).
+type ForgejoReads = {
+  prRecord: (owner: string, name: string, index: number) => Promise<unknown>;
+  reviewsOf: (
+    owner: string,
+    name: string,
+    index: number,
+    limit: number,
+  ) => Promise<unknown>;
+  runsOfHead: (
+    owner: string,
+    name: string,
+    headSha: string,
+    limit: number,
+  ) => Promise<unknown>;
+  runRecord: (owner: string, name: string, runId: number) => Promise<unknown>;
+  runJobs: (owner: string, name: string, runId: number) => Promise<unknown>;
+  jobLog: (
+    owner: string,
+    name: string,
+    runId: number,
+    jobId: number,
+  ) => Promise<unknown>;
+  branchesOf: (
+    owner: string,
+    name: string,
+    page: number,
+    limit: number,
+  ) => Promise<unknown>;
+};
+
+// The Forgejo source: the contract's class shape over the module's pure
+// boundary (the run and review parsers, the pull-record lifecycle, the
+// log-tail read) and the REST reads built beside it. A pr or branch
+// watch shares one claim group — a second register on the same repo+ref
+// returns the claimed watch instead of a second owner.
+export class ForgejoSource extends WatchSource {
+  readonly id = "forgejo";
+
+  private readonly reads: ForgejoReads;
+
+  constructor(reads: ForgejoReads, debug: Debug) {
+    super(debug);
+    this.reads = reads;
+  }
+
+  protected readConfig(config: unknown): unknown {
+    const verdict = forgejoReady(config);
+    if (!verdict.ok) throw new Error(verdict.reason);
+    return verdict.config;
+  }
+
+  kinds(): readonly string[] {
+    return [...WATCH_KINDS];
+  }
+
+  claimGroupOf(kind: string): string | null {
+    return kind === "pr" || kind === "branch" ? "pull" : null;
+  }
+
+  // The register request's validation: the source's own argument errors,
+  // thrown for the tool to surface. The messages are today's, word for
+  // word; the kind check and the note limit are the base's.
+  normalize(req: RegisterRequest): WatchRowSeed {
+    const kind = this.checkKind(req);
+    const repo = String(req.repo || "").trim();
+    if (!/^[^/]+\/[^/]+$/.test(repo)) {
+      throw new Error(
+        `watcher_register: repo must be owner/name (got ${JSON.stringify(req.repo)})`,
+      );
+    }
+    const ref = String(req.ref || "").trim();
+    if (kind === "branch") {
+      if (!ref || ref.length > 200) {
+        throw new Error("watcher_register: ref must be a branch name");
+      }
+    } else if (!/^\d+$/.test(ref)) {
+      throw new Error(
+        `watcher_register: ref must be a numeric ${kind} ${kind === "run" ? "id" : "index"} (got ${JSON.stringify(req.ref)})`,
+      );
+    }
+    const note = this.normalizeNote(req);
+    return { kind, repo, ref, note };
+  }
+
+  // The pr-reviews baseline (review 213's note on the backlog): the
+  // reviews the pull request already carries are the backlog, spent at
+  // creation — the watch wakes on reviews that arrive after it, never
+  // on the page it registered against. The baseline read is one read,
+  // through the same client a pass reads with; when the forge cannot
+  // answer it (an outage, an answer that does not parse), the kernel
+  // stamps the watch baseline-pending, and the first poll pass spends
+  // its page instead — the backlog never wakes, whatever the timing.
+  // (The kind guard and the unread-to-pending mapping are the base's
+  // baseline template.)
+  protected baselineKinds(): readonly string[] {
+    return ["pr-reviews"];
+  }
+
+  protected async readBaseline(
+    seed: WatchRowSeed,
+  ): Promise<Record<string, boolean> | null> {
+    const [owner, repo] = seed.repo.split("/");
+    const data = await this.reads.reviewsOf(
+      owner,
+      repo,
+      Number(seed.ref),
+      REVIEWS_PER_READ,
+    );
+    const reviews = parseReviews(data);
+    if (!reviews) return null;
+    return Object.fromEntries(reviews.map((review) => [review.id, true]));
+  }
+
+  // The poll read, per kind — a pure read answering normalized events.
+  // Null answers "the read gave nothing usable" (the pass skips; a
+  // baseline-pending row keeps its flag); an array answers a successful
+  // read (a baseline-pending row spends it, empty or not). The cursor is
+  // the watch's stamp-carried progress; the memo shares this pass's
+  // reads with the projection.
+  async poll(
+    watch: AdoptedWatch,
+    cursor: WatchCursor,
+    pass: PassContext,
+  ): Promise<WatchEvent[] | null> {
+    const [owner, repo] = watch.repo.split("/");
+    if (watch.kind === "pr-reviews") {
+      // The poll budget: one reviews read per registered watch per pass.
+      // The read takes the tool's largest page; whatever it brings that
+      // the stamp has not spent wakes once, whoever wrote it. The read is
+      // shared with the projection's sync through the per-pass memo — a
+      // pass that already read this PR's reviews for the projection (or
+      // for another wake) reads them no second time, and a read that
+      // already failed this pass fails the wake without a retry.
+      const memoKey = `reviews ${watch.repo} ${Number(watch.ref)}`;
+      let data = pass.memo.get(memoKey);
+      if (data === undefined) {
+        try {
+          data = await this.reads.reviewsOf(
+            owner,
+            repo,
+            Number(watch.ref),
+            REVIEWS_PER_READ,
+          );
+          pass.memo.set(memoKey, data);
+        } catch (error) {
+          pass.memo.set(memoKey, null);
+          throw error;
+        }
+      }
+      if (data === null) return null;
+      const reviews = parseReviews(data);
+      if (!reviews) {
+        this.debug("reviews.list.unparsed", { id: watch.id, pr: watch.ref });
+        return null;
+      }
+      // A register whose own baseline read could not run (the forge was
+      // down, the entry unusable) left the baseline to this pass: the
+      // page as it stands is the backlog, spent whole, waking nobody.
+      if (cursor.baselinePending) {
+        return reviews.map((review) => ({
+          ...reviewEventOf(review),
+          baseline: true,
+        }));
+      }
+      return reviews
+        .filter((review) => !this.isSpent(cursor, review.id))
+        .map((review) => reviewEventOf(review));
+    }
+    if (watch.kind === "run") {
+      const run = runRowOf(
+        await this.reads.runRecord(owner, repo, Number(watch.ref)),
+      );
+      if (!run) {
+        this.debug("run.record.unparsed", { id: watch.id, run: watch.ref });
+        return null;
+      }
+      if (!runIsTerminal(run, this.debug) || this.isSpent(cursor, run.id)) {
+        return [];
+      }
+      return [runEventOf(run)];
+    }
+    let sha;
+    if (watch.kind === "pr") {
+      // The pull-request read decides two things every pass: the watch's
+      // lifecycle — a closed pull request ends it, before any run is
+      // read — and, on an open one, the head the run reads follow.
+      const pull = parsePullRecord(
+        await this.reads.prRecord(owner, repo, Number(watch.ref)),
+      );
+      if (pull === null) {
+        this.debug("pr.record.unparsed", { id: watch.id, pr: watch.ref });
+        return null;
+      }
+      const life = prLifecycle(pull, this.debug);
+      if (life) return [lifecycleEventOf(life)];
+      sha = pull?.head?.sha;
+      if (typeof sha !== "string" || !sha) {
+        this.debug("watch.head.unresolved", { id: watch.id, kind: watch.kind });
+        return null;
+      }
+    } else {
+      sha = await branchSha(watch, this.debug, this.reads.branchesOf);
+    }
+    if (!sha) return null;
+    const listed = parseRunRows(
+      await this.reads.runsOfHead(owner, repo, sha, RUNS_PER_HEAD),
+    );
+    if (!listed) {
+      this.debug("runs.list.unparsed", { id: watch.id });
+      return null;
+    }
+    const events: WatchEvent[] = [];
+    for (const entry of listed) {
+      if (!runIsTerminal(entry, this.debug) || this.isSpent(cursor, entry.id)) {
+        continue;
+      }
+      // The verdict is built from the run's full record, and falls back
+      // to the listing entry when that read cannot keep up — the
+      // listing held a fine record too.
+      let run = entry;
+      try {
+        const record = runRowOf(
+          await this.reads.runRecord(owner, repo, entry.id),
+        );
+        if (record) run = record;
+        else this.debug("run.record.unparsed", { id: watch.id, run: entry.id });
+      } catch (error) {
+        this.debug("run.record.unread", {
+          id: watch.id,
+          run: entry.id,
+          error: String(error),
+        });
+      }
+      events.push(runEventOf(run));
+    }
+    return events;
+  }
+
+  // The verdict's detail reads — the job states and the failing job's
+  // log tail — taken BEFORE the stamp write so that nothing but the mail
+  // follows it. The forge answers the run's full job list in one read;
+  // the verdict caps how much of it it takes and says so past the cap.
+  // The answer is opaque to the kernel; render lays it into the mail.
+  async prepare(watch: AdoptedWatch, event: WatchEvent) {
+    if (event.type !== "run") return undefined;
+    const runId = Number(event.id);
+    const [owner, name] = watch.repo.split("/");
+    let jobs = null;
+    try {
+      const rows = jobsOf(await this.reads.runJobs(owner, name, runId));
+      if (rows === null) {
+        this.debug("jobs.unparsed", { id: watch.id, run: runId });
+      } else if (rows.length > JOBS_READ_CAP) {
+        jobs = rows.slice(0, JOBS_READ_CAP);
+        console.error(
+          `[forgejo-watcher] run ${runId} of ${watch.repo} lists ${rows.length} jobs; its verdict reads the first ${JOBS_READ_CAP}`,
+        );
+      } else {
+        jobs = rows;
+      }
+    } catch (error) {
+      this.debug("jobs.unread", {
+        id: watch.id,
+        run: runId,
+        error: String(error),
+      });
+    }
+    const jobsText = jobsLine(jobs);
+    const failing = Array.isArray(jobs)
+      ? jobs.filter(
+          (job) => String(job?.status ?? "").toLowerCase() === "failure",
+        )
+      : [];
+    let tail = null;
+    if (failing.length) {
+      try {
+        // Omitting offset is the forge's tail read; the client tails the
+        // lines locally besides, so a route that answers the whole log
+        // still costs the mail only its tail.
+        const text = await this.reads.jobLog(
+          owner,
+          name,
+          runId,
+          Number(failing[0].id),
+        );
+        if (typeof text !== "string" || text === "") {
+          this.debug("log.unread", {
+            id: watch.id,
+            job: failing[0]?.id,
+            error: "the job-log answer carries no content",
+          });
+        } else {
+          tail = {
+            job: String(failing[0].name ?? failing[0].id),
+            lines: unwrapLog(text),
+          };
+        }
+      } catch (error) {
+        this.debug("log.unread", {
+          id: watch.id,
+          job: failing[0]?.id,
+          error: String(error),
+        });
+      }
+    }
+    return { jobsText, tail };
+  }
+
+  // The verdicts, byte for byte today's mails: the event's fields laid
+  // back out under the mail builders' own names, the detail (the job
+  // states and the log tail) exactly as prepare read it.
+  render(watch: AdoptedWatch, event: WatchEvent, detail: unknown): string {
+    if (event.type === "run") {
+      const jobs = (detail ?? null) as {
+        jobsText?: string | null;
+        tail?: { job: string; lines: string[] } | null;
+      } | null;
+      return verdictMail(
+        watch,
+        runViewOf(event),
+        jobs?.jobsText ?? null,
+        jobs?.tail ?? null,
+      );
+    }
+    if (event.type === "review") {
+      return reviewMail(watch, {
+        id: event.id,
+        reviewer: eventValue(event, "reviewer"),
+        state: eventValue(event, "review-state"),
+        url: eventValue(event, "review-url"),
+      });
+    }
+    return lifecycleMail(
+      watch,
+      eventValue(event, "how"),
+      eventValue(event, "closed-at"),
+    );
+  }
+
+  // The delivery discipline's debug ops, named as today's: verdict.* for
+  // a run's CI verdict, review.* for a review wake, lifecycle.* for a
+  // pr watch's close.
+  debugOp(
+    checkpoint: DeliverCheckpoint,
+    watch: AdoptedWatch,
+    event: WatchEvent,
+  ) {
+    if (event.terminal) {
+      if (checkpoint === "unstamped") {
+        return { op: "lifecycle.unstamped", attrs: { id: watch.id } };
+      }
+      return {
+        op: `lifecycle.${checkpoint}`,
+        attrs: { id: watch.id, how: eventValue(event, "how") },
+      };
+    }
+    const stem = event.type === "run" ? "verdict" : "review";
+    const attrs =
+      event.type === "run"
+        ? { id: watch.id, run: event.id }
+        : { id: watch.id, review: event.id };
+    return { op: `${stem}.${checkpoint}`, attrs };
+  }
+}

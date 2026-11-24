@@ -18,7 +18,24 @@ import {
 } from "./kernel.ts";
 import { forgeClient } from "./forge-client.ts";
 import { debugOf, forgejoReady } from "./config.ts";
-import { makeForgejoSource } from "./forgejo-source.ts";
+import { ForgejoSource } from "./forgejo-source.ts";
+// The Slack source: the watcher's fourth source, and the first to
+// register through the kernel's source contract rather than riding a
+// legacy leg (the forge source's shape): a session subscribes to a
+// channel by watcher_register (kind "slack-channel"), each watch's
+// delivered markers — keyed by message ts — are its cursor, and every
+// message that arrives on the channel after the watch wakes the
+// subscriber once, content, sender, and timestamp in the wake.
+import {
+  readConfig as readSlackConfig,
+  slackReads,
+  SlackSource,
+} from "./slack.ts";
+// The GitHub source: the watcher's second source on the kernel contract
+// (github.ts) — tool-registered kinds (github-pr, github-issue) whose
+// watches ride the registering session's stamp, the forge source's
+// registration shape.
+import { GitHubSource } from "./github.ts";
 import { createProjectionSync } from "./projection-sync.ts";
 import { createTools } from "./tools.ts";
 import { PagerDutySource } from "./pagerduty.ts";
@@ -98,7 +115,7 @@ export const compose = async (ctx) => {
     );
 
   // The source, over those reads.
-  const source = makeForgejoSource(
+  const source = new ForgejoSource(
     {
       prRecord,
       reviewsOf,
@@ -110,6 +127,28 @@ export const compose = async (ctx) => {
     },
     debug,
   );
+
+  // The Slack source: built beside the forge source when the config's
+  // slack block is present — the linear leg's opt-in pattern (an absent
+  // block is silent; a block that cannot be served has said why on its
+  // named line, and the other sources carry on alone). It registers
+  // through the kernel's source contract, so its watches ride the same
+  // registry and tool surface as the forge's.
+  const slackConfig = readSlackConfig(watcherOptions);
+  const slackSource = slackConfig
+    ? new SlackSource({ reads: slackReads(slackConfig), debug })
+    : null;
+
+  // The GitHub source: built beside the forge source when the operator
+  // configured its block (options.watcher.github — the source is opt-in;
+  // the absence is silent, linear's rule). A block the config read
+  // cannot serve — no token, an unusable url — is said once by the
+  // kernel's ready gate on the source's named line and the other sources
+  // carry on alone; a watcher without the block never sees the source at
+  // all.
+  const githubSource = isRecord(watcherOptions.github)
+    ? new GitHubSource({ debug })
+    : null;
 
   // The projection sync: its own module holds the db holder, the
   // open-PR walk, and the per-repo sync; its afterPass stage rides the
@@ -131,7 +170,11 @@ export const compose = async (ctx) => {
     debug,
     pollMs: config.pollMs,
     config: watcherOptions,
-    sources: [source],
+    sources: [
+      source,
+      ...(slackSource ? [slackSource] : []),
+      ...(githubSource ? [githubSource] : []),
+    ],
     legs: [
       {
         id: "pagerduty",

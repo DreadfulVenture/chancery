@@ -3,9 +3,15 @@
 // This file is the plugin entry only — the
 // seams it used to hold are their own modules beside it:
 //
-// - forgejo-source.ts — the source logic: the poll reads per watch
-//   kind, the zod boundaries, the verdict renders, the event views,
-//   and the register validation (WATCH_KINDS among them);
+// - source.ts — the source-contract base class: the machinery the
+//   adapters share (the ready gate, the register plumbing's common
+//   half, the baseline template, the delivered-map read) — the kernel
+//   keeps the pass machinery, and its WatchSource interface stays the
+//   contract's typing;
+// - forgejo-source.ts — the Forgejo source, and slack.ts and github.ts
+//   the Slack and GitHub sources: each a WatchSource subclass carrying
+//   its own poll reads per watch kind, the zod boundaries, the verdict
+//   renders, the event views, and the register validation;
 // - forge-client.ts — the forge REST client, one GET per read against
 //   the forge's /api/v1;
 // - config.ts — the config surface (the watcher options block plus the

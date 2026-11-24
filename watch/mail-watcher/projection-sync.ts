@@ -278,14 +278,17 @@ export const createProjectionSync = ({
   };
 
   // The projection, after the wakes: every watched repo's board,
-  // synced through the same memo. One repo's unexpected failure says
-  // and moves on: the rest of the boards still sync this pass (the
-  // watch loop's shape).
+  // synced through the same memo. The projection is the forge source's
+  // mirror — only forge watches' repos ride it, never a github watch's
+  // (a GitHub repo read against the forge api would answer the sweep
+  // wrong) and never a slack watch's (whose repo is not a repository at
+  // all). One repo's unexpected failure says and moves on: the rest of
+  // the boards still sync this pass (the watch loop's shape).
   const afterPass = async (memo) => {
     const repos = new Set(
       getKernel()
         .watches()
-        .map((watch) => watch.repo)
+        .map((watch) => (watch.source === "forgejo" ? watch.repo : null))
         .filter((repo) => typeof repo === "string" && repo.includes("/")),
     );
     for (const repo of [...repos].sort()) {

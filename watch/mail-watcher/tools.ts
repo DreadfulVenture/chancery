@@ -12,18 +12,27 @@ const registerSchema = {
   properties: {
     kind: {
       type: "string",
-      enum: ["run", "pr", "branch", "pr-reviews"],
+      enum: [
+        "run",
+        "pr",
+        "branch",
+        "pr-reviews",
+        "slack-channel",
+        "github-pr",
+        "github-issue",
+      ],
       description:
-        "What is watched: run (one Actions run by id), pr (one PR index, followed to its close), branch (one branch name), or pr-reviews (one PR's reviews — one wake per review that arrives after the watch, never the backlog, never an unsubmitted draft).",
+        "What is watched: run (one Actions run by id), pr (one PR index, followed to its close), branch (one branch name), pr-reviews (one PR's reviews — one wake per review that arrives after the watch, never the backlog, never an unsubmitted draft), slack-channel (one Slack channel's messages — one wake per message that arrives after the watch, content, sender, and timestamp in the wake; bot messages included, the channel's history at register is the spent backlog), github-pr (one GitHub pull request by number — one wake per new review, comment, or state change, ending at the PR's close), or github-issue (one GitHub issue by number — one wake per new comment or state change).",
     },
     repo: {
       type: "string",
-      description: "The repository as owner/name, e.g. acme/widgets.",
+      description:
+        'The repository as owner/name, e.g. acme/widgets. For kind slack-channel: the literal "slack".',
     },
     ref: {
       type: "string",
       description:
-        "For kind run: the Actions run id. For kind pr or pr-reviews: the PR index. For kind branch: the branch name.",
+        "For kind run: the Actions run id. For kind pr or pr-reviews: the PR index. For kind branch: the branch name. For kind slack-channel: the channel's id, e.g. C0123456789. For kind github-pr or github-issue: the pull request or issue number.",
     },
     note: {
       type: "string",
@@ -63,7 +72,7 @@ const stateSchema = {
 export const createTools = ({ ctx, kernel, debug, projectionDb }) => {
   const registerTool = {
     name: "watcher_register",
-    description: `Watch a Forgejo run, PR, branch, or a PR's reviews and report into this session as chat mail. Watches ride this session's metadata, survive plugin reloads and host restarts, and live until watcher_forget — no expiry. A pr watch ends itself at the pull request's close: one terminal mail (merged, or closed unmerged) and the watch dissolves, no forget needed. A pr-reviews watch delivers one wake per new review on the pull request — every reviewer's, this session's own included; the reviews the PR already carries at register are the spent backlog, and an unsubmitted draft never wakes. Re-registering the same pr or branch returns the existing claimed watch instead of a second owner.`,
+    description: `Watch a Forgejo run, PR, branch, or a PR's reviews and report into this session as chat mail. Watches ride this session's metadata, survive plugin reloads and host restarts, and live until watcher_forget — no expiry. A pr watch ends itself at the pull request's close: one terminal mail (merged, or closed unmerged) and the watch dissolves, no forget needed. A pr-reviews watch delivers one wake per new review on the pull request — every reviewer's, this session's own included; the reviews the PR already carries at register are the spent backlog, and an unsubmitted draft never wakes. A slack-channel watch delivers one wake per new message on the Slack channel — the message's content, sender, and timestamp in the wake; bot messages included, the subscriber filters, and the channel's history at register is the spent backlog. A github-pr or github-issue watch follows one GitHub pull request or issue: one wake per new review, comment, or state change — the reviews and comments it already carries at register are the spent backlog — and a github-pr watch ends itself at the PR's close with one terminal mail (merged, or closed unmerged). Re-registering the same pr or branch returns the existing claimed watch instead of a second owner; a github-pr watch claims the same way, a github-issue watch does not.`,
     input: registerSchema,
     execute: async (raw, context) => {
       const input = raw || {};
