@@ -1,6 +1,6 @@
 // The Forgejo watcher (PRJ-244): the family's first source adapter on
 // the watcher kernel (kernel.ts, docs/adr/20261119-watcher-family.md).
-// This file is the plugin entry and the composition glue only — the
+// This file is the plugin entry only — the
 // seams it used to hold are their own modules beside it:
 //
 // - forgejo-source.ts — the source logic: the poll reads per watch

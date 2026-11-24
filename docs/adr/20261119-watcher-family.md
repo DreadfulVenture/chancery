@@ -111,9 +111,9 @@ walk already give re-arm and death-as-inert.
 
 ## Consequences
 
-- Both existing watchers become adapters: `index.ts` keeps the Forgejo source, its config, and the family's tool wiring;
-  `pagerduty.ts` keeps its client and its mail builder. The kernel and the projection are the shared code, and the stamp
-  machinery has exactly one writer.
+- Both existing watchers become adapters: `forgejo-source.ts` keeps the Forgejo source, `config.ts` its config, and
+  `tools.ts` the family's tool wiring; `pagerduty.ts` keeps its client and its mail builder. The kernel and the
+  projection are the shared code, and the stamp machinery has exactly one writer.
 - Adding a source stops being a design exercise: implement the contract and pass the shared contract tests, which cover
   at-most-once delivery, baseline on register, self-disable, TTL, isolation, and privacy for every source.
 - The delivery cutover changes what every watcher user sees: wakes become fixed notices, verdicts arrive through

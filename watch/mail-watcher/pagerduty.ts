@@ -34,7 +34,7 @@
 // theirs: the credential and config handling (the static readConfig,
 // which answers null — the source off — on any config it cannot serve),
 // the REST client and its page walk, the zod boundary, and the
-// incident-to-wake mapping. The composer (index.ts) reads the config,
+// incident-to-wake mapping. The composer (composer.ts) reads the config,
 // builds the instance beside the forge client, and calls poll() from
 // the poll pass; the stamp machinery (patchStamps, readStamps,
 // failedWrites, the stopped flag) is passed in, never forked.
@@ -185,7 +185,7 @@ type PagerDutySourceDeps = {
   failedWrites: Set<string>;
   /**
    * The leg's pass budget in milliseconds, for tests; the deployment
-   * rides the module constant (index.ts passes nothing here).
+   * rides the module constant (composer.ts passes nothing here).
    */
   legBudgetMs?: number;
 };
