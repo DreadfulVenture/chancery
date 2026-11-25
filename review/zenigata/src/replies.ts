@@ -26,6 +26,7 @@ import {
   parseRefusalMessage,
 } from "./review/validate.js";
 import { withTimeout } from "./with-timeout.js";
+import { operatorSpeech } from "./operator-speech.js";
 
 /** Bounds so the deadline races and cleanup never await unbounded work. */
 const MEMORY_WRITE_TIMEOUT_MS = 30_000;
@@ -94,10 +95,14 @@ function replyPrompt(input: {
   repo: string;
   originalBody: string;
   authorReply: string;
+  /** The forge login of the account whose reply this answers (PRJ-514). */
+  author: string;
+  /** The deployment's humans list, for the operator-speech rule. */
+  humans: string[];
 }): string {
-  return `${input.persona}
+  return `${input.persona}${operatorSpeech(input.humans)}
 
-Someone replied to your review comment. Answer in thread.
+${input.author} replied to your review comment. Answer in thread.
 
 Your original comment:
 
@@ -265,6 +270,8 @@ export async function runReply(
           ? `${posted.body}\n(file: ${posted.path}, line: ${posted.line})`
           : posted.body,
       authorReply: capReplyText(event.text),
+      author: event.authorLogin,
+      humans: config.humans,
     });
     // PRJ-381's remediation order, shared with the review pipeline's
     // JSON stages: parse in hand, the local transposition repair inside

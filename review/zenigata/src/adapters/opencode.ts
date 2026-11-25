@@ -14,9 +14,10 @@
  * Method names verified against the 2.3.x typings and the v2.3.0 source:
  *   - client factory: `OpenCode.make({ baseUrl })` (named export `OpenCode`,
  *     a namespace whose `make` builds the network client)
- *   - create: `session.create({ location: { directory }, agent })` -> SessionInfo
- *     (SessionCreateInput carries both a `location.directory` and an `agent`,
- *     so per-session agent selection is available at create time)
+ *   - create: `session.create({ location: { directory }, agent, metadata })`
+ *     -> SessionInfo (SessionCreateInput carries a `location.directory`, an
+ *     `agent`, and the free-form `metadata` bag, so per-session agent
+ *     selection and the origin declaration both land at create time)
  *   - one-turn prompt: `session.prompt({ sessionID, text })` -> SessionInboxUser
  *     (the queued user item, whose `time.created` keys the turn; the turn
  *     itself is awaited by the polling loop. The prompt's delivery defaults
@@ -80,7 +81,12 @@
 
 import { OpenCode } from "@opencode/client";
 import { whenAborted } from "../with-timeout.js";
+import { originRecord } from "../origin.js";
 import type { SessionDriver, SessionTurn } from "../contracts/session.js";
+
+// The composition carries the contract: exported so the memory client's
+// origin contract test reads the exact record createSession declares.
+export { originRecord };
 
 export interface OpencodeDriverOptions {
   baseUrl: string;
@@ -290,13 +296,29 @@ class OpenCodeSessionDriver implements SessionDriver {
       opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   }
 
+  /**
+   * Every create the runtime makes declares its origin (ADR: "Session
+   * origin as a create-time metadata signal"): the runtime process is not
+   * a session, so the record's parent is null — the parentless-program
+   * declaration, which the memory client parses explicitly and registers
+   * as an agent root with no parent conversation; the store's lineage
+   * walk resolves such a row unanchored, so the bot's writes are
+   * observation-only (the depth table's grant). The review pass and the
+   * answer session both create through this call, and the record's shape
+   * is imported from src/origin.ts — the composition the origin contract
+   * test ties to the consumer across the package boundary.
+   */
   async createSession(
     directory: string,
     agent: string,
     opts?: { signal?: AbortSignal },
   ): Promise<string> {
     const created = await this.client.session.create(
-      { location: { directory }, agent },
+      {
+        location: { directory },
+        agent,
+        metadata: { chancery_origin: originRecord(null) },
+      },
       { signal: opts?.signal },
     );
     return created.id;

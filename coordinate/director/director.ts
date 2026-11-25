@@ -336,6 +336,19 @@ const DIRECTOR_STAMP = "coordinatedBy";
 // different consumers.
 const ORIGIN_STAMP = "chancery_origin";
 
+// The origin record the dispatch declares (ADR
+// 20261124-session-origin-signal): a programmatic spawn's create-time
+// metadata under `chancery_origin`, initiator "program", parent naming
+// the creating session. The memory client parses this shape at its one
+// mapping point; the origin contract test ties the producers to the
+// consumer across the package boundary.
+export function originRecord(parent: string | null): {
+  initiator: "program";
+  parent: string | null;
+} {
+  return { initiator: "program", parent };
+}
+
 // PRJ-343: the unattended-worker contract. The host's rule evaluation takes
 // the LAST matching rule, and a session's own rules merge after its agent's,
 // so this stamp converts every ask — the shape that parks unattended turns —
@@ -1617,7 +1630,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
               dispatchedAt: new Date().toISOString(),
               ...(modelPin ? { model: modelPin.text } : {}),
             },
-            [ORIGIN_STAMP]: { initiator: "program", parent: director },
+            [ORIGIN_STAMP]: originRecord(director),
           },
           location: { directory },
         });

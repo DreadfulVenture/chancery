@@ -4,7 +4,9 @@
 - **Provenance**:
   - Authored: agent (design decided with the operator across the 2026-11-24 review-bot re-think)
   - Edited: the operator (supplied the `chancery_origin` key name and §4's downgrade-bias rationale, 2026-11-24), and
-    zenigata review 580's count 18520, directed into the gaps section by the operator (2026-11-24)
+    zenigata review 580's count 18520, directed into the gaps section by the operator (2026-11-24); ruled the runner
+    lens out of the review-bot instance (2026-11-24), and zenigata review 589 on the same pull directed the
+    reconciliation of the parentless-program case (2026-11-24)
   - Approved: none
 
 ## Problem
@@ -31,9 +33,11 @@ One origin signal, on the opencode-native surface, per the operator's ruling of 
 
 1. **Every programmatic spawn in the operator's tooling declares its origin at create time.** A session created by the
    director's dispatch, the zenigata runtime, or any wrapper carries metadata under the key `chancery_origin`:
-   `{ initiator: "human" | "program", parent: <creating session id> }`. The value vocabulary deliberately avoids the
-   word "agent": opencode's `agent` field and surrounding vocabulary mean the persona role (build/plan/explore), and
-   reusing the word corrupted the design discussion once already. The store's rows keep their own vocabulary; the client
+   `{ initiator: "human" | "program", parent: <creating session id> }`. A programmatic spawn whose creating side is not
+   itself a session declares `parent: null`, and the consumer registers the row as an agent root — unanchored, the depth
+   table's observation-only line, the webhook bot's designed posture. The value vocabulary deliberately avoids the word
+   "agent": opencode's `agent` field and surrounding vocabulary mean the persona role (build/plan/explore), and reusing
+   the word corrupted the design discussion once already. The store's rows keep their own vocabulary; the client
    translates at its one mapping point.
 2. **Absence of the record reads as human** — the operator at the TUI. This is explicitly a loose assumption,
    correctable in place (the client API's `PATCH /api/session/{id}` admits metadata, so plugins may stamp human sessions
@@ -64,7 +68,8 @@ One origin signal, on the opencode-native surface, per the operator's ruling of 
    deployment hands the review session an account list _inside its instructions_: accounts on the list are operator
    speech for veracity and corrections; every other account's items are claims to trace against the code. The reviewer
    resolves that list against the author names the forge already carries per thread item; the list itself is a config
-   value flowing into the start prompt, not a code surface.
+   value flowing into the start prompt, not a code surface. The instruction carries the rule with the list; no
+   additional skill file ships.
 
 ## Alternatives considered
 

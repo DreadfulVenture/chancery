@@ -590,12 +590,12 @@ describe("review flow", () => {
   });
 });
 
-describe("review flow identity data", () => {
-  it("carries the deployment's identity lists as data in the start prompt", async () => {
+describe("review flow operator speech", () => {
+  it("renders the operator-speech sentence from the configured humans list", async () => {
     const h = await harness({
       script: happyScript(),
       env: {
-        ZENIGATA_HUMANS: "example-user",
+        ZENIGATA_HUMANS: "example-user, example-two",
         ZENIGATA_AGENTS: "example-bot",
         ZENIGATA_ACCESS: "example-user, example-bot",
       },
@@ -604,30 +604,132 @@ describe("review flow identity data", () => {
     expect(h.forge.postedReviews).toHaveLength(1);
 
     const start = h.sessions.prompts[0]?.text ?? "";
-    // The data slot: the three lists, plainly, and nothing riding beside
-    // them — no instruction, no behavior change.
-    expect(start).toContain("Deployment identity data:");
-    expect(start).toContain("- humans: example-user");
-    expect(start).toContain("- agents: example-bot");
-    expect(start).toContain("- access: example-user, example-bot");
-    // The slot sits between the persona and the pass instructions.
+    // The one instruction sentence, rendered only from the humans list.
+    expect(start).toContain(
+      "Operator speech: the forge names an author on every comment; " +
+        "prose authored by example-user and example-two is the operator's own words",
+    );
+    expect(start).toContain(
+      "weight it as ground truth for veracity and corrections",
+    );
+    // The sentence sits between the persona and the pass instructions.
     const personaEnd = start.indexOf("# The inspector's report");
-    const slotStart = start.indexOf("Deployment identity data:");
+    const sentenceStart = start.indexOf("Operator speech:");
     const passStart = start.indexOf("You are running the blind first pass");
     expect(personaEnd).toBeGreaterThanOrEqual(0);
-    expect(slotStart).toBeGreaterThan(personaEnd);
-    expect(passStart).toBeGreaterThan(slotStart);
+    expect(sentenceStart).toBeGreaterThan(personaEnd);
+    expect(passStart).toBeGreaterThan(sentenceStart);
+    // The agents and access lists stay unconsumed: nothing renders for
+    // them (no data slot and no machinery).
+    expect(start).not.toContain("Deployment identity data:");
+    expect(start).not.toContain("- agents:");
+    expect(start).not.toContain("- access:");
   });
 
-  it("leaves a default deployment's start prompt free of the data slot", async () => {
+  it("renders nothing when the humans list is empty, whatever the other lists carry", async () => {
+    const h = await harness({
+      script: happyScript(),
+      env: {
+        ZENIGATA_AGENTS: "example-bot",
+        ZENIGATA_ACCESS: "example-user",
+      },
+    });
+    await postReviewEvent(h);
+    // Only the humans list drives the render: agents/access ride no
+    // instruction, so the prompt keeps its pre-config shape.
+    expect(h.sessions.prompts[0]?.text).not.toContain("Operator speech:");
+    expect(h.forge.postedReviews).toHaveLength(1);
+  });
+
+  it("leaves a default deployment's start prompt free of the sentence", async () => {
     const h = await harness({ script: happyScript() });
     await postReviewEvent(h);
-    // Both identity arrays and the access list unset: no slot renders, so
-    // the start prompt keeps its pre-config byte shape.
-    expect(h.sessions.prompts[0]?.text).not.toContain(
-      "Deployment identity data:",
-    );
+    expect(h.sessions.prompts[0]?.text).not.toContain("Operator speech:");
     expect(h.forge.postedReviews).toHaveLength(1);
+  });
+});
+
+describe("reply flow operator speech", () => {
+  it("renders the operator-speech sentence and names the reply's author", async () => {
+    const h = await harness({
+      script: (sessionId, index) => {
+        // First session: the review. Second session: the answer.
+        if (sessionId.endsWith("-1")) {
+          return happyScript()[index] ?? "";
+        }
+        return JSON.stringify({
+          answer: "Fair point; the verdict stands.",
+        });
+      },
+      env: {
+        ZENIGATA_HUMANS: "example-user, example-two",
+      },
+    });
+    await postReviewEvent(h);
+    const replyEvent = makeReply({
+      repo: REPO,
+      pr: PR,
+      inReplyTo: "r1",
+      authorLogin: "example-user",
+      text: "why is this blocking? it is just a name",
+    });
+    const response = await h.source.postToIntake(
+      intakeUrl(h),
+      EVENT_TOKEN,
+      replyEvent,
+    );
+    expect(response.status).toBe(202);
+    await h.handle.awaitSettled(replyEvent.eventId);
+    expect(h.forge.postedReplies).toHaveLength(1);
+
+    // The answer prompt carries the same sentence the blind pass renders,
+    // built by the same builder, and names the reply's author where the
+    // reply is introduced (review 589, count 18599).
+    const prompt = h.sessions.prompts.find((p) => p.sessionId.endsWith("-2"));
+    expect(prompt?.text).toContain(
+      "Operator speech: the forge names an author on every comment; " +
+        "prose authored by example-user and example-two is the operator's own words",
+    );
+    expect(prompt?.text).toContain(
+      "example-user replied to your review comment",
+    );
+  });
+
+  it("names the author and renders no sentence without a humans list", async () => {
+    const h = await harness({
+      script: (sessionId, index) => {
+        if (sessionId.endsWith("-1")) {
+          return happyScript()[index] ?? "";
+        }
+        return JSON.stringify({
+          answer: "Standing by the label.",
+        });
+      },
+    });
+    await postReviewEvent(h);
+    const replyEvent = makeReply({
+      repo: REPO,
+      pr: PR,
+      inReplyTo: "r1",
+      authorLogin: "example-bot",
+      text: "why is this blocking?",
+    });
+    const response = await h.source.postToIntake(
+      intakeUrl(h),
+      EVENT_TOKEN,
+      replyEvent,
+    );
+    expect(response.status).toBe(202);
+    await h.handle.awaitSettled(replyEvent.eventId);
+    expect(h.forge.postedReplies).toHaveLength(1);
+
+    const prompt = h.sessions.prompts.find((p) => p.sessionId.endsWith("-2"));
+    // The author's name rides the answer prompt as context whatever the
+    // lists carry; the rule renders only from the humans list.
+    expect(prompt?.text).toContain(
+      "example-bot replied to your review comment",
+    );
+    expect(prompt?.text).not.toContain("Operator speech:");
   });
 });
 

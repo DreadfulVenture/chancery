@@ -511,3 +511,67 @@ test("origin lineage: the record's parent trims like the driven pointer, and a b
     },
   );
 });
+
+test("origin lineage: an explicit null parent is the parentless-program declaration", async () => {
+  await withDaemon(
+    () => SILENT,
+    async ({ fire, sessionHooks, sessions }) => {
+      // The runtime's case (PRJ-514, review 589 count 18596): a bot
+      // session's creating side is not itself a session, so the record
+      // declares parent null. The row registers with no parent field and
+      // agent initiator — the store's payload read resolves an absent
+      // field to no parent (sync.py), and the walk seats the conversation
+      // as an agent root: unanchored, observation-only writes.
+      sessions.set("s-unparented", {
+        metadata: { chancery_origin: { initiator: "program", parent: null } },
+      });
+      await fire(sessionHooks, "prompt", {
+        sessionID: "s-unparented",
+        prompt: { text: "the bot session's first turn" },
+      });
+      const row = queued().find(
+        (line) =>
+          line.kind === "session" && line.conversation_id === "s-unparented",
+      );
+      assert.ok(row, "the parentless declaration registered its lineage");
+      assert.equal(row.initiator, "agent");
+      assert.equal(
+        row.parent_conversation_id,
+        undefined,
+        "the parentless declaration carries no parent field",
+      );
+      const capture = queued().find(
+        (line) =>
+          line.role === "user" && line.conversation_id === "s-unparented",
+      );
+      assert.ok(capture, "capture proceeds");
+      assert.equal(capture.initiator, "agent");
+
+      // A record naming only the initiator is half-written: the parent
+      // key is missing, so nothing registers and the capture keeps the
+      // human default.
+      sessions.set("s-missing-parent", {
+        metadata: { chancery_origin: { initiator: "program" } },
+      });
+      await fire(sessionHooks, "prompt", {
+        sessionID: "s-missing-parent",
+        prompt: { text: "a turn whose record never names a parent" },
+      });
+      assert.equal(
+        queued().find(
+          (line) =>
+            line.kind === "session" &&
+            line.conversation_id === "s-missing-parent",
+        ),
+        undefined,
+        "a missing parent key cannot invent a parent link",
+      );
+      const missingCapture = queued().find(
+        (line) =>
+          line.role === "user" && line.conversation_id === "s-missing-parent",
+      );
+      assert.ok(missingCapture, "capture proceeds as before");
+      assert.equal(missingCapture.initiator, "human");
+    },
+  );
+});

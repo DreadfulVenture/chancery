@@ -12,13 +12,13 @@ export interface Config {
   allowedLogins: string[];
   allowedRepos: string[];
   /**
-   * The deployment's identity arrays and access list (PRJ-505): humans
-   * classifies accounts whose thread prose is a human's words, agents
-   * names accounts known to be agents, and access names the accounts
-   * whose review requests and replies the thin pipeline will serve.
-   * Named, validated, and carried to the review session's start prompt
-   * as data; their consumers arrive with later slices, and nothing else
-   * in the current pipeline reads them.
+   * The deployment's account lists (the config layer landed as the
+   * rendered-config slice). The humans list renders one operator-speech
+   * sentence into the review session's start prompt: accounts on it speak
+   * for the operator — veracity and corrections — and every other
+   * account's prose is a claim to trace. The agents and access lists stay
+   * validated and unconsumed by bot code; their retirement is recorded on
+   * PRJ-514 and lands in a later slice.
    */
   humans: string[];
   agents: string[];

@@ -413,16 +413,25 @@ const createCore = ({
   const ORIGIN_STAMP = "chancery_origin";
   // The origin record parsed, or null — undeclared. A value that does
   // not parse exactly (an initiator outside the vocabulary, or a parent
-  // that is missing, or blank after trimming) reads as undeclared,
-  // never as programmatic: absence is the human default, so a half-
-  // written record or an unrelated stamp under a different key cannot
-  // invent a parent link. The parent trims before it is trusted, the
-  // way the driven path trims its external pointer: only a usable,
-  // trimmed id registers or declares a parent.
-  type OriginRecord = { initiator: "human" | "program"; parent: string };
+  // that is missing, non-string, or blank after trimming) reads as
+  // undeclared, never as programmatic: absence is the human default, so
+  // a half-written record or an unrelated stamp under a different key
+  // cannot invent a parent link. The one exception the vocabulary grants
+  // is the parentless-program declaration (review 589's reconciliation,
+  // PRJ-514): a programmatic spawn whose creating side is not itself a
+  // session declares parent null explicitly, and the row registers as an
+  // agent root. The parent trims before it is trusted, the way the
+  // driven path trims its external pointer: only a usable, trimmed id
+  // registers or declares a parent.
+  type OriginRecord =
+    | { initiator: "human" | "program"; parent: string }
+    | { initiator: "program"; parent: null };
   const originRecordOf = (raw: unknown): OriginRecord | null => {
     if (typeof raw !== "object" || raw === null) return null;
     const value = raw as { initiator?: unknown; parent?: unknown };
+    if (value.initiator === "program" && value.parent === null) {
+      return { initiator: "program", parent: null };
+    }
     if (
       (value.initiator === "human" || value.initiator === "program") &&
       typeof value.parent === "string" &&
@@ -493,13 +502,18 @@ const createCore = ({
   };
   // One-time registration of the link the origin declaration carries,
   // mirroring the driven adoption. A record declaring initiator
-  // "program" with a parent other than this session enqueues the
-  // registration row; no record, a record that parses as undeclared, or
-  // a parent equal to this session's own id registers nothing and stays
-  // silent — the human default. A failed read enqueues nothing and marks
-  // nothing — the next prompt retries. Returns false when the read
-  // failed, so the caller knows the session's lineage state is still
-  // unresolved.
+  // "program" with a parent other than this session registers the row:
+  // a usable parent id chains the conversation under it, and a null
+  // parent — the parentless-program declaration — registers with no
+  // parent field at all, which the store's payload read resolves to no
+  // parent (memory/store memory_store/sync.py: `parent =
+  // payload.get("parent_conversation_id") or None`) and its walk seats
+  // as an agent root: unanchored, the observation-only grant. No
+  // record, a record that parses as undeclared, or a parent equal to
+  // this session's own id registers nothing and stays silent — the
+  // human default. A failed read enqueues nothing and marks nothing —
+  // the next prompt retries. Returns false when the read failed, so the
+  // caller knows the session's lineage state is still unresolved.
   const adoptDispatchParent = async (sessionID: string): Promise<boolean> => {
     const stamps = await stampsOf(sessionID);
     if (stamps === undefined) return false;
@@ -511,10 +525,9 @@ const createCore = ({
       !dispatchLinked.has(sessionID)
     ) {
       dispatchLinked.add(sessionID);
-      enqueue(queueDir, {
+      const row: CaptureRecord = {
         kind: "session",
         conversation_id: sessionID,
-        parent_conversation_id: origin.parent,
         cwd: root,
         app: "opencode",
         // A declared-programmatic session is started by its creating
@@ -523,7 +536,11 @@ const createCore = ({
         // registration).
         initiator: "agent",
         ts: Date.now() / 1000,
-      });
+      };
+      if (origin.parent !== null) {
+        row.parent_conversation_id = origin.parent;
+      }
+      enqueue(queueDir, row);
     }
     return true;
   };

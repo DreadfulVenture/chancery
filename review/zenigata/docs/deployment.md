@@ -261,24 +261,25 @@ routes the agent outside the review route breaks attribution and the tier contra
 
 ## The identity configuration
 
-The deployment configures two identity arrays and one access list, and they do different jobs (PRJ-505; the
-classification consumers arrive with later slices of the thin pipeline — PRJ-501):
+The deployment configures the deployment's account lists (the config layer, #166), and the bot consumes the humans list
+as instruction (PRJ-514, the session-origin ADR's review-bot instance):
 
-- **humans** — accounts whose thread prose is a human's words to the bot's sessions, chiefly the operator's. Items
-  authored by these accounts arrive marked human, so their corrections and questions carry human significance.
-- **agents** — accounts known to be agents (in a shared-lane deployment, the one account the lanes post through). Their
-  items arrive marked agent: claims the reviewer traces against the code, never instructions. Accounts on neither array
-  are unclassified, and their prose is treated like agent prose until the deployment classifies them.
-- **access** — accounts whose review requests and re-requests run review runs and whose replies to the bot get answered.
-  Access toggles the buttons and nothing about voice: an account can hold access without its prose gaining significance,
-  and a human account can lose access without its prose losing its voice. In the current pipeline the gate stays
-  `allowedLogins`; the access list's consumers arrive with later slices of the thin pipeline.
+- **humans** — accounts on the list are operator speech: their prose is the operator's own words, weighted as ground
+  truth for veracity and corrections. The list renders one operator-speech sentence into the review session's start
+  prompt and the answer session's prompt; prose from any other account is a claim to trace against the code. An empty
+  list renders nothing, and the reviewer treats all thread content as claims — the honest default.
+- **agents** — named and validated, but unconsumed by bot code this slice; their retirement is recorded on PRJ-514 and
+  lands in a later slice.
+- **access** — retired-but-present: the origin-signal re-think dropped the access list outright, so the option stays in
+  the module until the retirement slice lands; the gate stays `allowedLogins`.
 
-Until a slice consumes the arrays, they are named, validated, and carried: each entry is validated against the forge's
-account-name shape at module evaluation and again at boot (naming the variable and the offending entry), and each
-non-empty list renders one data line in the review session's start prompt, instructions omitted — so a deployment with
-all three lists empty gets a byte-identical start prompt. The bot itself consumes the arrays only when those slices
-land; nothing else in the current pipeline reads them.
+Every entry is validated against the forge's account-name shape at module evaluation and again at boot (naming the
+variable and the offending entry). The bot declares its own origin to the store: every session the runtime creates
+carries `chancery_origin: { initiator: "program", parent: null }` — the runtime process is not a session, so the record
+is the parentless-program declaration — and the memory client registers the conversation as an agent root with no parent
+link, which the store's lineage walk resolves unanchored: observation-only writes. The deployed `memoryUrl` still
+carries `initiator=agent` (above, and the module asserts it); the create-time declaration now carries the posture with
+it.
 
 The store's side of the story needs no mirror in the bot: the daemon gates memory by session lineage, not accounts, and
 the bot's sessions are just agent-lineage clients — which the deployed `memoryUrl` already declares with

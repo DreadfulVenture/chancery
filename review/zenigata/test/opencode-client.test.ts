@@ -11,6 +11,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   createServer,
   type AddressInfo,
+  type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
@@ -44,6 +45,8 @@ type JobStage =
 interface FakeOpencode {
   url: string;
   hits: Array<{ method: string; path: string }>;
+  /** The parsed request body of every create call, in request order. */
+  createBodies: Array<Record<string, unknown>>;
   interrupted: number;
   /** The user item time of the latest prompt, per session. */
   userMs(): number;
@@ -54,10 +57,28 @@ interface FakeOpencode {
 
 const BASE_MS = 1_000_000;
 
+/** The request body of one JSON POST, parsed for assertions. */
+const readJsonBody = (
+  request: IncomingMessage,
+): Promise<Record<string, unknown>> =>
+  new Promise((resolveBody) => {
+    let raw = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => (raw += chunk));
+    request.on("end", () => {
+      try {
+        resolveBody(JSON.parse(raw) as Record<string, unknown>);
+      } catch {
+        resolveBody({});
+      }
+    });
+  });
+
 async function fakeOpencode(
   options: { promptStatus?: number } = {},
 ): Promise<FakeOpencode> {
   const hits: Array<{ method: string; path: string }> = [];
+  const createBodies: Array<Record<string, unknown>> = [];
   const stages = new Map<string, Stage[]>();
   const jobStages = new Map<string, JobStage[]>();
   const jobCursors = new Map<string, number>();
@@ -77,6 +98,7 @@ async function fakeOpencode(
         url.pathname,
       );
       if (request.method === "POST" && url.pathname === "/api/session") {
+        createBodies.push(await readJsonBody(request));
         respondJson(response, { data: { id: "ses-fake-1" } });
         return;
       }
@@ -211,6 +233,7 @@ async function fakeOpencode(
   return {
     url: `http://127.0.0.1:${port}`,
     hits,
+    createBodies,
     get interrupted() {
       return interrupted;
     },
@@ -301,6 +324,30 @@ afterAll(async () => {
 });
 
 describe("opencode session driver over the wire", () => {
+  it("declares the runtime's origin in the create call's metadata", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [idlePage]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    expect(sessionId).toBe("ses-fake-1");
+
+    expect(fake.createBodies).toHaveLength(1);
+    const body = fake.createBodies[0];
+    // The accepted contract (review 589, count 18597): the create always
+    // carries the record — initiator "program", parent null, the
+    // parentless-program declaration. The consumer's originRecordOf now
+    // parses the explicit null (the rejection side — a missing parent
+    // key, a blank parent, a foreign initiator word — stays on the human
+    // default, pinned in the memory client's suites, which the origin
+    // contract test ties to this shape mechanically).
+    expect(body?.metadata).toEqual({
+      chancery_origin: { initiator: "program", parent: null },
+    });
+    expect(body?.agent).toBe("reviewer");
+    expect(body?.location).toEqual({ directory: "/work/tree" });
+  });
+
   it("prompt fires the prompt endpoint and settles through state reads, with no wait call", async () => {
     const fake = await fakeOpencode();
     fakes.push(fake);
