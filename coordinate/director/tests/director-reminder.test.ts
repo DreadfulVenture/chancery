@@ -10,8 +10,8 @@ import plugin from "../director.ts";
 // with per-name collection and a fire helper, the session get that throws
 // on an unknown row (the host's NotFoundError), and the synthetic sink. The
 // tool domain is the one the entry's setup touches unguarded and the event
-// stream stays empty, so the pump idles quietly. All four assertions run
-// through the entry's setup, so an unwired registration fails the suite
+// stream stays empty, so the pump idles quietly. Every assertion in this
+// file runs through the entry's setup, so an unwired registration fails the suite
 // instead of silently going live-dead.
 
 type SessionRow = { id: string; agent?: string };

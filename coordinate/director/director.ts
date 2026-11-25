@@ -1188,6 +1188,23 @@ const readSchema = {
 // note beside the report budget), so a long arc stacks one copy per turn
 // and nothing prunes — the wake notices' accepted cost family, at per-turn
 // frequency.
+//
+// The boundary is the prompt turn: report wakes admit the inbox item and
+// wake the session without running the prompt path's hook trigger, so the
+// loop's autonomous legs (wake, pull, report) carry no fresh reminder —
+// the reminder exists only on prompt turns. The hook trigger has one call
+// site in the host core, inside the prompt request itself
+// (packages/core/src/session/prompt.ts:42 at the installed v2.2.5; the
+// synthetic wake path is SessionInbox.admit, which never reaches it).
+//
+// Delivery rests on a position distinction the seam's own history records
+// (the header's UP-direction note; ADR 20261116-director-seam-directions):
+// REMINDER is a user message made only of a <system-reminder> block, the
+// shape the deployed provider swallows to "." when it is the turn's only
+// user content — and it never is one here, because it persists at
+// admission beside the prompt's live text. That beside-live-text delivery
+// is expected, not proven: it stays unverified live until the operator's
+// post-deploy glance confirms a director session actually receives it.
 const REMINDER = `<system-reminder>
 Director session: the lane is coordination. Slice the objective and hand each slice to a worker — dispatch (director_dispatch), steer (director_steer), verify the worker's claims yourself from the worktree and command output, ship under the standing grant, report. Edits in this session are for coordination bookkeeping only (manifests, worker-report reading, PR text); verification reads and gate runs are yours, implementation edits are not — put the work in a worker's hands.
 </system-reminder>`;
