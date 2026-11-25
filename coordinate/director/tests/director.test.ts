@@ -3801,44 +3801,55 @@ test("worktree_remove walks past the old 10-page cap: a live session parked late
         base: "main",
       });
       // Twelve pages: filler sessions on every page the old 10-page walk
-      // could reach, and the live session parked on page 10. The walk must
-      // exhaust the list and refuse naming that session — the old code
-      // stopped with a cursor pending and refused on the truncation
-      // instead, having seen neither the session nor the cursor (PRJ-472's
-      // live occurrence).
+      // could reach, and ses-late-worker sighted three times — an
+      // already-ended copy on page 2, live copies on pages 10 and 11. The
+      // walk must exhaust the list, filter each page as it arrives, and
+      // refuse naming that session once. Dedupe rides what the walk
+      // found, never the sightings: the ended copy masks nothing, and a
+      // live session the host listed twice renders one refusal entry —
+      // the old 10-page walk stopped with a cursor pending before any of
+      // these pages (PRJ-472's live occurrence; zenigata review 579).
       let calls = 0;
+      const filler = (page: number) => ({
+        id: `ses-filler-${page}`,
+        agent: "build",
+        location: { directory: `/tmp/worktree-filler-${page}` },
+        time: { created: 1, updated: 1, idle: 2 },
+      });
       fixture.ctx.session.list = async (input?: { cursor?: string }) => {
         const page = input?.cursor === undefined ? 0 : Number(input.cursor);
         calls += 1;
+        const data: unknown[] = [filler(page)];
+        if (page === 2)
+          data.push({
+            id: "ses-late-worker",
+            agent: "build",
+            location: { directory: path },
+            time: { created: 1, updated: 3, idle: 4 },
+          });
+        if (page === 10 || page === 11)
+          data.push({
+            id: "ses-late-worker",
+            agent: "build",
+            location: { directory: path },
+            time: { created: 1, updated: 9, busy: 20, idle: 10 },
+          });
         return {
-          data:
-            page === 10
-              ? [
-                  {
-                    id: "ses-late-worker",
-                    agent: "build",
-                    location: { directory: path },
-                    time: { created: 1, updated: 2 },
-                  },
-                ]
-              : [
-                  {
-                    id: `ses-filler-${page}`,
-                    agent: "build",
-                    location: { directory: `/tmp/worktree-filler-${page}` },
-                    time: { created: 1, updated: 1, idle: 2 },
-                  },
-                ],
+          data,
           cursor: page < 11 ? { next: String(page + 1) } : {},
         };
       };
       await assert.rejects(
         runTool(fixture, "worktree_remove", { path }),
         (error: Error) => {
+          // Deduped-found rendering: one live session, named once — not
+          // the doubled count an un-deduped walk renders, not the bound
+          // refusal, and never a proceed.
           assert.match(error.message, /1 live session/);
-          assert.match(error.message, /ses-late-worker/);
-          // The refusal names the session the walk saw, not the bound:
-          // the whole list was read.
+          assert.ok(!error.message.includes("2 live session"));
+          assert.equal(error.message.split("ses-late-worker").length - 1, 1);
+          // The refusal names what the walk found, not the bound: the
+          // whole list was read, each page filtered as it arrived.
           assert.ok(!error.message.includes("partial session list"));
           return true;
         },

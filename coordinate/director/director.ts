@@ -2541,35 +2541,44 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       // Walk to exhaustion (PRJ-472): the cap bounds the loop, it never
       // stops it — a live session in an unseen page is the exact danger
       // the check exists for. A host that keeps serving cursors past the
-      // bound fails the call named, like scanEveryRow.
+      // bound fails the call named, like scanEveryRow. Each page is
+      // filtered as it arrives (zenigata review 579): the walk's
+      // footprint stays at the sessions actually in this tree instead of
+      // scaling with the host's whole list.
       let cursor: string | undefined;
-      const rows: any[] = [];
+      const found: Array<{
+        sessionID: string;
+        state: string;
+        lastTurnEnd: number | null;
+      }> = [];
+      // What the walk found, deduped by session id — after the blocking
+      // test, never the sightings (zenigata review 579): an
+      // already-ended sighting marks nothing seen on the check's behalf,
+      // so a live sighting later is still refused, and a live session
+      // the host listed twice renders once in the refusal.
+      const foundIDs = new Set<string>();
       for (let page = 0; page < LIVE_SESSION_PAGE_CAP; page += 1) {
         const listed = await ctx.session.list(cursor ? { cursor } : undefined);
         const pageRows = Array.isArray(listed) ? listed : (listed?.data ?? []);
-        rows.push(...pageRows);
         cursor = Array.isArray(listed) ? undefined : listed?.cursor?.next;
+        for (const candidate of pageRows) {
+          if (candidate?.location?.directory !== directory) continue;
+          if (typeof candidate?.id !== "string" || !candidate.id) continue;
+          if (!blocking(candidate)) continue;
+          if (foundIDs.has(candidate.id)) continue;
+          foundIDs.add(candidate.id);
+          found.push({
+            sessionID: candidate.id,
+            state: stateOf(candidate),
+            lastTurnEnd: epoch(candidate?.time?.idle) ?? null,
+          });
+        }
         if (!cursor) break;
       }
       if (cursor)
         throw new Error(
           `the live-session walk did not exhaust within the ${LIVE_SESSION_PAGE_CAP}-page cap; refusing to act on a partial session list`,
         );
-      const found: Array<{
-        sessionID: string;
-        state: string;
-        lastTurnEnd: number | null;
-      }> = [];
-      for (const candidate of rows) {
-        if (candidate?.location?.directory !== directory) continue;
-        if (typeof candidate?.id !== "string" || !candidate.id) continue;
-        if (blocking(candidate))
-          found.push({
-            sessionID: candidate.id,
-            state: stateOf(candidate),
-            lastTurnEnd: epoch(candidate?.time?.idle) ?? null,
-          });
-      }
       return { sessions: found, mode: "list" };
     }
     const found: Array<{
