@@ -1124,8 +1124,9 @@ type ContextUsage = {
   share: number;
 };
 
-// The operator's number (PRJ-522): a worker past this share of its
-// model's window shows in the wake notice. A constant, not a config
+// The operator's number (PRJ-522): a worker at or past this share of
+// its model's window shows in the wake notice (the gate is
+// `share >= CONTEXT_WARN_SHARE`, inclusive). A constant, not a config
 // option, until a second number is wanted.
 const CONTEXT_WARN_SHARE = 0.5;
 
@@ -1148,11 +1149,18 @@ async function contextUsage(
     return undefined;
   }
   if (!Array.isArray(messages)) return undefined;
+  // The anchor guard mirrors compaction's hasMeasuredPrompt plus the
+  // deployed schema's encoding (TokenUsage.Info): tokens ride as an
+  // object with a numeric input or not at all. A `tokens: null` row is
+  // an unmeasured message, not a zero-token one — skipped here rather
+  // than fed to a read of its fields.
   const anchor = messages.findLast(
     (message) =>
       message?.type === "assistant" &&
       !message.error &&
-      message.tokens !== undefined &&
+      message.tokens !== null &&
+      typeof message.tokens === "object" &&
+      typeof message.tokens.input === "number" &&
       promptTokensOf(message.tokens) > 0,
   );
   if (!anchor) return undefined;
@@ -1729,11 +1737,13 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       );
     }
     // PRJ-522: the worker's context share rides the notice while it is
-    // past half the window — a state made visible on every wake while it
-    // holds, so growth past the threshold stays seen until the director
-    // starts the worker's next slice fresh. A failed read stays quiet:
-    // the report is stored either way, and the wake's job is the
-    // report's.
+    // at or past half the window (the gate is
+    // `share >= CONTEXT_WARN_SHARE` — the report_read description's
+    // "at or past half" wording states this gate's inclusive shape) — a
+    // state made visible on every wake while it holds, so growth past
+    // the threshold stays seen until the director starts the worker's
+    // next slice fresh. A failed read stays quiet: the report is
+    // stored either way, and the wake's job is the report's.
     let warnShare: number | undefined;
     try {
       const usage = await contextUsage(ctx, sessionID);
@@ -1999,7 +2009,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const statusTool: ToolDefinition = {
     name: "director_worker_status",
-    description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, how many of its reports are unread for you, and its context usage when it is readable (contextTokens measured against contextWindow, with contextShare; measured the way compaction measures it, omitted when the session carries no usable tokens or its model has no known window). Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
+    description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, how many of its reports are unread for you, and its context usage when it is readable (contextTokens measured against contextWindow, with contextShare; measured the way compaction measures it, omitted when the session carries no usable tokens or its model has no known window). contextWindow belongs to the model the measurement was taken under — the anchor message's model ref, not the session's live model field, so a session that switched models mid-flight reports the window the tokens were measured under. Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
     input: statusSchema,
     output: REPLY_OUTPUT,
     execute: async (raw, context) => {
@@ -2047,7 +2057,10 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       }
       // PRJ-522: the worker's context usage rides the status whenever it
       // is readable — the threshold gates only the notice clause, never
-      // the number. An absent or failed read omits the fields.
+      // the number. An absent or failed read omits the fields. The
+      // window is the anchor's model's window: the measurement was
+      // taken under that ref, so a session whose row switched models
+      // still reports the window its tokens were measured against.
       const usage = await contextUsage(ctx, sessionID);
       // The pin reads as "providerID/modelID" for the caller. The host's
       // live model record wins; the pin the dispatch stamp carries is the
@@ -2084,7 +2097,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const readTool: ToolDefinition = {
     name: "report_read",
-    description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head, with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures and interrupts file as their own kinds. A fixed wake notice names the worker session and the unread count, and adds the worker's context share when it is past half its model's window; this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
+    description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head, with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures and interrupts file as their own kinds. A fixed wake notice names the worker session and the unread count, and adds the worker's context share when it is at or past half its model's window (the gate is the inclusive \`share >= 0.5\`); this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
     input: readSchema,
     output: REPLY_OUTPUT,
     execute: async (raw, context) => {

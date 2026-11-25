@@ -4712,6 +4712,29 @@ test("worker_status renders usage under the threshold too, and omits it when the
     fixture.models.length = 0;
     row = await statusOf();
     assert.equal(row.contextTokens, undefined);
+
+    // A `tokens: null` row rides the deployed schema's unmeasured
+    // encoding, not a zero-token turn: skipped as the anchor without a
+    // throw, and the older tokened turn beneath it still anchors the
+    // read.
+    fixture.models.push(usageModel);
+    fixture.messages.set(dispatched.sessionID, [
+      ...usageTranscript({
+        input: 25_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 2_000, write: 500 },
+      }),
+      {
+        type: "assistant",
+        error: null,
+        model: { providerID: "example-proxy", id: "example-model" },
+        tokens: null,
+      },
+    ]);
+    row = await statusOf();
+    assert.equal(row.contextTokens, 30_000);
+    assert.equal(row.contextWindow, 180_000);
   } finally {
     await cleanup?.();
   }
@@ -4778,6 +4801,105 @@ test("worker_status degrades quiet when the usage reads fail", async () => {
     assert.equal(row.contextTokens, undefined);
     assert.ok(logs.some((line) => line.includes("catalog unavailable")));
     fixture.ctx.model.list = listHeld;
+  } finally {
+    await cleanup?.();
+  }
+});
+
+// The window's branches: an input-only limit falls back to the input
+// (compaction's inputWindow sizes against the smaller of input and
+// context when both are set, else whichever exists), and the catalog
+// row matches the anchor's ref by id or by modelID.
+test("worker_status resolves the window on the input-only limit and the catalog's modelID fallback", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    const status = fixture.tools.get("director_worker_status")!;
+    const statusOf = async () =>
+      JSON.parse(
+        (
+          await status.execute(
+            { sessionID: dispatched.sessionID },
+            { sessionID: "ses-director" },
+          )
+        ).content,
+      );
+
+    // An input-only limit: the window is the input, the only bound the
+    // catalog reports.
+    fixture.messages.set(
+      dispatched.sessionID,
+      usageTranscript({
+        input: 90_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 20_000, write: 5_000 },
+      }),
+    );
+    fixture.models.push({
+      ...usageModel,
+      limit: { input: 180_000, output: 32_000 },
+    });
+    let row = await statusOf();
+    assert.equal(row.contextTokens, 117_500);
+    assert.equal(row.contextWindow, 180_000);
+
+    // The catalog row's id differs but its modelID names the anchor's
+    // ref: the fallback match resolves the window.
+    fixture.models.length = 0;
+    fixture.models.push({
+      ...usageModel,
+      id: "catalog-alias-id",
+      modelID: "example-model",
+      limit: usageModel.limit,
+    });
+    row = await statusOf();
+    assert.equal(row.contextWindow, 180_000);
+    assert.equal(row.contextTokens, 117_500);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+// The gate is inclusive: a share of exactly 0.5 is at the threshold and
+// fires the clause.
+test("the wake notice clause fires at exactly the threshold", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    const worker = dispatched.sessionID;
+    // 100_000 of 200_000: exactly half.
+    fixture.messages.set(
+      worker,
+      usageTranscript({
+        input: 80_000,
+        output: 15_000,
+        reasoning: 3_000,
+        cache: { read: 1_500, write: 500 },
+      }),
+    );
+    fixture.models.push({
+      ...usageModel,
+      limit: { context: 200_000, output: 32_000 },
+    });
+
+    await fixture.emit("session.text.ended", {
+      sessionID: worker,
+      text: "The slice landed.\n\nSTATUS: done",
+    });
+    await fixture.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => fixture.mails.length === 1);
+    const notice = fixture.mails[0];
+    assert.ok(notice.text.includes("50% of its model's window"));
+    assert.ok(notice.text.includes("start its next slice in a fresh session"));
   } finally {
     await cleanup?.();
   }
