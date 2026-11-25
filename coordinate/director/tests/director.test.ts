@@ -38,7 +38,11 @@ type ToolDef = {
   name: string;
   description: string;
   input: unknown;
-  execute: (input: unknown, context: unknown) => Promise<{ content: string }>;
+  output?: unknown;
+  execute: (
+    input: unknown,
+    context: unknown,
+  ) => Promise<{ content: string; output?: unknown }>;
 };
 
 type SessionRow = {
@@ -2952,6 +2956,70 @@ test("a dispatch failure names the steps it completed and any session it created
         assert.match(
           error.message,
           /The session ses-known exists and is watched/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await cleanup?.();
+  }
+});
+
+// PRJ-523 regression. The incident's swallowed path was a script (CodeMode)
+// caller reading `.sessionID` off the tool's content text: the host's
+// CodeMode bridge (packages/core/src/codemode/tool.ts, resultValue) hands a
+// script caller a tool's structured output only when the tool declares an
+// output schema, and the raw content text otherwise — text that reads as
+// object-less and made three coordinators see an "empty" dispatch. The
+// reply contract this test pins: the session id arrives as a value in the
+// structured half, the two halves are the same reply, every tool in the
+// family makes the declaration, and a post-create failure is a named error
+// carrying the stranded session id — never a silent empty.
+test("the dispatch reply carries the session id as structured output, and a post-create failure is named", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatch = fixture.tools.get("director_dispatch")!;
+    const result = await dispatch.execute(
+      { directory: "/tmp/worktree-a", brief: "do the slice work" },
+      { sessionID: "ses-director" },
+    );
+    const structured = result.output as Record<string, unknown>;
+    assert.equal(typeof structured, "object");
+    assert.equal(structured.ok, true);
+    assert.equal(structured.sessionID, "ses-worker-1");
+    // The content text and the structured half are one reply, so a native
+    // tool-call caller and a script caller read the same outcome.
+    assert.deepEqual(JSON.parse(result.content), structured);
+    // The declaration is what makes the structured half reach a script
+    // caller; every tool in the family carries it.
+    for (const tool of fixture.tools.values()) {
+      assert.deepEqual(tool.output, {
+        type: "object",
+        additionalProperties: true,
+      });
+    }
+
+    // The failing stage's leg: after the create side effect, a failure is
+    // the named error with the stranded session id in it, not a resolved
+    // empty.
+    fixture.ctx.session.prompt = async () => {
+      throw new Error("prompt refused");
+    };
+    await assert.rejects(
+      dispatch.execute(
+        { directory: "/tmp/worktree-a", brief: "do the slice work" },
+        { sessionID: "ses-director" },
+      ),
+      (error: Error) => {
+        assert.match(error.message, /director_dispatch failed: prompt refused/);
+        assert.match(
+          error.message,
+          /created session ses-worker-2 in \/tmp\/worktree-a/,
+        );
+        assert.match(
+          error.message,
+          /The session ses-worker-2 exists and is watched/,
         );
         return true;
       },

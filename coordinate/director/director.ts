@@ -135,7 +135,14 @@ type ToolDefinition = {
   name: string;
   description: string;
   input: unknown;
-  execute: (input: any, context?: ToolContext) => Promise<{ content: string }>;
+  output: unknown;
+  execute: (
+    input: any,
+    context?: ToolContext,
+  ) => Promise<{
+    content: string;
+    output: unknown;
+  }>;
 };
 
 // The worker record one activation tracks per adopted session.
@@ -1210,6 +1217,18 @@ function stateOf(info: unknown): "busy" | "idle" {
   return running ? "busy" : "idle";
 }
 
+// The reply's structured half. Every tool in this module returns its reply
+// as both the content text (JSON, for a native tool-call caller) and this
+// declared output value. The declaration is what carries the reply across
+// the host's two callers: the CodeMode bridge
+// (packages/core/src/codemode/tool.ts, resultValue) hands a script caller
+// `executed.output` only when the tool declares an output schema, and the
+// raw content text otherwise — text a script caller reading `.sessionID`
+// off it sees as object-less, the silent misread PRJ-523 recorded. The
+// schema itself stays permissive on purpose: the reply shapes are the
+// tests' contract, not a runtime validation cliff.
+const REPLY_OUTPUT = { type: "object", additionalProperties: true };
+
 const dispatchSchema = {
   type: "object",
   properties: {
@@ -1753,6 +1772,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "director_dispatch",
     description: `Dispatch a worker session: create a new session in \`directory\` running \`agent\` (default "build"), stamp this session as its coordinator, deliver \`brief\` as a waking prompt, pinning \`model\` ("provider/model") to the session first when given, and return immediately with the session id. The worker also gets an unattended permission policy at creation (every action allowed for that session) so its tool calls never wait on a permission ask no headless session could answer; config-level deny rules are overridden for the worker too. Never spawns a subprocess and never streams stdout; each turn end files a report for this session and wakes it with a fixed notice naming the worker session and the unread count — call report_read to read the bodies. Worker text never rides the notice; a long body is cut to its head, with its last STATUS line, any BLOCKED paragraph, and a pointer to the full text kept. One stored report and at most one notice per turn end (none if the send fails): overlapping plugin activations that see the same turn end are deduped by its event id. A subagent's turns are part of its parent's and never report on their own. A turn interrupted with no recorded reason (a host shutdown) files an interrupted report and wakes you the same way: the host may resume that turn after a restart, and if resumed it reports when it ends. A worker that stays busy across a restart may never report, so check its session (director_worker_status) before re-dispatching or steering it. When \`base\` is given, the target worktree is validated before anything is created: a directory that is not a readable git worktree, a detached HEAD, or a HEAD not exactly at that commit refuses the dispatch at the call with the mismatch named, and the result carries the worktree it validated (path, branch, head, base).`,
     input: dispatchSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const input = raw || {};
       const director = context?.sessionID;
@@ -1884,29 +1904,28 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
           }
         }
         debug("dispatch", { session: sessionID, director, directory, agent });
-        return {
-          content: JSON.stringify({
-            ok: true,
-            sessionID,
-            agent,
-            directory,
-            title,
-            ...(validated
-              ? {
-                  worktree: {
-                    path: directory,
-                    branch: validated.branch,
-                    head: validated.head,
-                    base,
-                    baseCommit: validated.baseCommit,
-                  },
-                }
-              : {}),
-            ...(modelPin ? { model: modelPin.text } : {}),
-            delivery:
-              "waking prompt queued; the turn end files a report and wakes this session — call report_read",
-          }),
+        const reply = {
+          ok: true,
+          sessionID,
+          agent,
+          directory,
+          title,
+          ...(validated
+            ? {
+                worktree: {
+                  path: directory,
+                  branch: validated.branch,
+                  head: validated.head,
+                  base,
+                  baseCommit: validated.baseCommit,
+                },
+              }
+            : {}),
+          ...(modelPin ? { model: modelPin.text } : {}),
+          delivery:
+            "waking prompt queued; the turn end files a report and wakes this session — call report_read",
         };
+        return { content: JSON.stringify(reply), output: reply };
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         // A pin that failed leaves the session watched, unpinned, and
@@ -1930,6 +1949,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "director_steer",
     description: `Deliver \`instruction\` to an existing session as a waking prompt and return immediately. Turn-end reports flow for dispatched workers; the result names whether this session reports back. Each turn end files one stored report and sends at most one wake notice (none if the send fails), deduped by its event id across overlapping plugin activations; report_read returns the bodies.`,
     input: steerSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const input = raw || {};
       const sessionID = String(input.sessionID || "").trim();
@@ -1958,25 +1978,22 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         director: context?.sessionID,
         mailTo: mailTo ?? null,
       });
-      return {
-        content: JSON.stringify(
-          mailTo
-            ? {
-                ok: true,
-                sessionID,
-                delivery: "waking prompt queued",
-                turnMail: mailTo,
-                note: "the turn end files a report for this director — read it with report_read",
-              }
-            : {
-                ok: true,
-                sessionID,
-                delivery: "waking prompt queued",
-                turnMail: null,
-                note: "not a dispatched worker: no turn report will be filed",
-              },
-        ),
-      };
+      const reply = mailTo
+        ? {
+            ok: true,
+            sessionID,
+            delivery: "waking prompt queued",
+            turnMail: mailTo,
+            note: "the turn end files a report for this director — read it with report_read",
+          }
+        : {
+            ok: true,
+            sessionID,
+            delivery: "waking prompt queued",
+            turnMail: null,
+            note: "not a dispatched worker: no turn report will be filed",
+          };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -1984,6 +2001,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "director_worker_status",
     description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, how many of its reports are unread for you, and its context usage when it is readable (contextTokens measured against contextWindow, with contextShare; measured the way compaction measures it, omitted when the session carries no usable tokens or its model has no known window). Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
     input: statusSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const input = raw || {};
       const sessionID = String(input.sessionID || "").trim();
@@ -2034,35 +2052,33 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       // The pin reads as "providerID/modelID" for the caller. The host's
       // live model record wins; the pin the dispatch stamp carries is the
       // fallback when the host row reports none.
-      return {
-        content: JSON.stringify({
-          ok: true,
-          sessionID,
-          title: info?.title ?? null,
-          agent: info?.agent ?? null,
-          model:
-            modelText(info?.model) ?? info?.metadata?.[STAMP]?.model ?? null,
-          directory: info?.location?.directory ?? null,
-          state: stateOf(info ?? {}),
-          outcome: info?.outcome ?? null,
-          watched: Boolean(stamp),
-          dispatchedBy: stamp ?? null,
-          ...(unread
-            ? {
-                unreadReportsFromWorker: unread.fromThisWorker,
-                unreadReportsTotal: unread.total,
-                ...(unread.truncated ? { unreadTruncated: true } : {}),
-              }
-            : {}),
-          ...(usage
-            ? {
-                contextTokens: usage.tokens,
-                contextWindow: usage.window,
-                contextShare: usage.share,
-              }
-            : {}),
-        }),
+      const reply = {
+        ok: true,
+        sessionID,
+        title: info?.title ?? null,
+        agent: info?.agent ?? null,
+        model: modelText(info?.model) ?? info?.metadata?.[STAMP]?.model ?? null,
+        directory: info?.location?.directory ?? null,
+        state: stateOf(info ?? {}),
+        outcome: info?.outcome ?? null,
+        watched: Boolean(stamp),
+        dispatchedBy: stamp ?? null,
+        ...(unread
+          ? {
+              unreadReportsFromWorker: unread.fromThisWorker,
+              unreadReportsTotal: unread.total,
+              ...(unread.truncated ? { unreadTruncated: true } : {}),
+            }
+          : {}),
+        ...(usage
+          ? {
+              contextTokens: usage.tokens,
+              contextWindow: usage.window,
+              contextShare: usage.share,
+            }
+          : {}),
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -2070,6 +2086,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "report_read",
     description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head, with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures and interrupts file as their own kinds. A fixed wake notice names the worker session and the unread count, and adds the worker's context share when it is past half its model's window; this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
     input: readSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const caller = context?.sessionID;
       if (!caller)
@@ -2127,17 +2144,16 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         notes.push("more reports are unread; call report_read again");
       if (truncated)
         notes.push("the report scan hit its page cap; counts are a floor");
-      return {
-        content: JSON.stringify({
-          ok: true,
-          returned: reports.length,
-          unreadRemaining: remaining,
-          ...(marked < taken.length ? { unmarked: taken.length - marked } : {}),
-          ...(truncated ? { truncated } : {}),
-          ...(notes.length ? { note: notes.join(" ") } : {}),
-          reports,
-        }),
+      const reply = {
+        ok: true,
+        returned: reports.length,
+        unreadRemaining: remaining,
+        ...(marked < taken.length ? { unmarked: taken.length - marked } : {}),
+        ...(truncated ? { truncated } : {}),
+        ...(notes.length ? { note: notes.join(" ") } : {}),
+        reports,
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -2153,6 +2169,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "director_sessions",
     description: `Enumerate the sessions the host's session API knows, so a coordinator can poll or steer lanes whose ids it does not already hold: per session, its id, workspace directory, agent, state (busy or idle, read from the session's time record exactly as director_worker_status reads it), and the epoch-millis timestamp of the session's last turn end (null for a session that has never ended one — the host omits time.idle until a turn has ended). Sorted most-recent-turn first; a session with no turn yet sorts last. The walk reads at most ${SESSION_PAGE_CAP} pages of the host's list, dedupes the rows by session id, and when a cursor is still pending after that cap the result carries truncated: true, holding only what the walk reached. Posture: the tool surfaces every session the host's session API knows; filtering is by lane/workspace at the caller's side. Read-only: this tool performs no writes, reads no message contents, and returns no session metadata — only the five fields above. It requires the client surface's session.list; when that surface lacks the method, this tool fails with a named error and tries no fallback.`,
     input: sessionsSchema,
+    output: REPLY_OUTPUT,
     execute: async () => {
       if (typeof ctx.session?.list !== "function") {
         throw new Error(
@@ -2236,14 +2253,13 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
           `[director] director_sessions: stopped at the ${SESSION_PAGE_CAP}-page cap with a cursor pending; the result is truncated`,
         );
       }
-      return {
-        content: JSON.stringify({
-          ok: true,
-          sessions,
-          skipped,
-          ...(truncated ? { truncated } : {}),
-        }),
+      const reply = {
+        ok: true,
+        sessions,
+        skipped,
+        ...(truncated ? { truncated } : {}),
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -2387,6 +2403,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "manifest_write",
     description: `Write one fact into the manifest surface: a row {id, key, fact, owner, at, supersedes?} stored whole under this session's own namespace. \`key\` is a stable label for the slice or subject the fact tracks; \`fact\` is one sentence of what is true now. Writing again under the same key updates it — the view renders only the newest row per key — and \`supersedes\` (a stored row id) retires an older fact explicitly, wherever its row lives. Use this for state that keeps needing line math in a file: facts live here, and files are exports of manifest_read's view, never the source of truth. Nothing delivers on its own; the surface is read-when-read.`,
     input: manifestWriteSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const owner = context?.sessionID;
       if (!owner)
@@ -2450,16 +2467,15 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         row,
       );
       debug("manifest.written", { row: row.id, owner, key });
-      return {
-        content: JSON.stringify({
-          ok: true,
-          id: row.id,
-          key,
-          owner,
-          at: new Date(row.at).toISOString(),
-          ...(supersedes !== undefined ? { supersedes } : {}),
-        }),
+      const reply = {
+        ok: true,
+        id: row.id,
+        key,
+        owner,
+        at: new Date(row.at).toISOString(),
+        ...(supersedes !== undefined ? { supersedes } : {}),
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -2480,6 +2496,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "manifest_read",
     description: `Read the composed manifest view: every current fact — the newest per key, with superseded rows folded out (a count line states how many) — composed from storage at call time. No cached view exists, two sessions or two activations of one host see the same view through the shared store, and the view renders whole in one call: a read consumes nothing, so nothing is unreachable and there is nothing to page. The scan walks every stored row before composing, so a retirement is never lost to a truncation stop; a scan that cannot exhaust fails the read with a named error instead of composing from a partial set.`,
     input: manifestReadSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const caller = context?.sessionID;
       if (!caller)
@@ -2514,14 +2531,13 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
             `${row.key}: ${row.fact} (owner ${row.owner}, ${new Date(row.at).toISOString()}, row ${row.id}${row.supersedes ? `, supersedes ${row.supersedes}` : ""})`,
         ),
       ].join("\n");
-      return {
-        content: JSON.stringify({
-          ok: true,
-          view,
-          facts: rendered.length,
-          folded,
-        }),
+      const reply = {
+        ok: true,
+        view,
+        facts: rendered.length,
+        folded,
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -2546,6 +2562,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "manifest_drop",
     description: `Drop rows from your own manifest namespace only, by \`key\` (every row tracking that label, history included) or by \`id\` (one row) — exactly one of the two. Rows under other sessions' namespaces are invisible to this tool and stay untouched; a drop that matches nothing reports dropped: 0. A dropped row that carried a supersedes link is not lost with it: before the removal, the link is rewritten as a tombstone row (an empty-fact row under your namespace carrying the link), so the fact that link retired never republishes itself as current — the result names what happened to it (keptFolded). Prefer \`manifest_write\` with \`supersedes\` to retire a fact anyone can still see: a drop only clears your own namespace.`,
     input: manifestDropSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const owner = context?.sessionID;
       if (!owner)
@@ -2609,26 +2626,25 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         dropped: matches.length,
         tombstones: tombstones.length,
       });
-      return {
-        content: JSON.stringify({
-          ok: true,
-          dropped: matches.length,
-          ...(tombstones.length
-            ? {
-                tombstones: tombstones.length,
-                keptFolded,
-                note: `${tombstones.length} supersedes link${tombstones.length === 1 ? "" : "s"} preserved as tombstone rows; the fact${keptFolded.length === 1 ? "" : "s"} they retired ${keptFolded.length === 1 ? "stays" : "stay"} out of the view`,
-              }
-            : {}),
-          ...(matches.length === 0
-            ? {
-                note: `nothing under that ${
-                  key !== undefined ? "key" : "id"
-                } in your manifest namespace`,
-              }
-            : {}),
-        }),
+      const reply = {
+        ok: true,
+        dropped: matches.length,
+        ...(tombstones.length
+          ? {
+              tombstones: tombstones.length,
+              keptFolded,
+              note: `${tombstones.length} supersedes link${tombstones.length === 1 ? "" : "s"} preserved as tombstone rows; the fact${keptFolded.length === 1 ? "" : "s"} they retired ${keptFolded.length === 1 ? "stays" : "stay"} out of the view`,
+            }
+          : {}),
+        ...(matches.length === 0
+          ? {
+              note: `nothing under that ${
+                key !== undefined ? "key" : "id"
+              } in your manifest namespace`,
+            }
+          : {}),
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
@@ -2852,6 +2868,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "worktree_add",
     description: `Create a git worktree on a branch and track it. Runs \`git worktree add\` in \`repo\` (this session's directory when omitted): a new branch \`branch\` starting at \`base\` (the repo's HEAD when omitted) is created and checked out at \`path\`; when a local branch named \`branch\` already exists it is checked out instead, and a given \`base\` must then be exactly its tip. The tracking row (worktree_list's source) records the path, branch, head, base, and this session as owner. Fails named — never silently — when git refuses: a path that already exists, a branch already checked out in another worktree, a base that does not resolve.`,
     input: worktreeAddSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const owner = context?.sessionID;
       if (!owner)
@@ -2939,16 +2956,15 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         });
         steps.push(`tracked the worktree for this session`);
         debug("worktree.added", { path, branch, owner });
-        return {
-          content: JSON.stringify({
-            ok: true,
-            path,
-            branch: state.branch ?? branch,
-            head: state.head,
-            base: base ?? null,
-            repo: mainRepo,
-          }),
+        const reply = {
+          ok: true,
+          path,
+          branch: state.branch ?? branch,
+          head: state.head,
+          base: base ?? null,
+          repo: mainRepo,
         };
+        return { content: JSON.stringify(reply), output: reply };
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -2977,6 +2993,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "worktree_remove",
     description: `Remove a tracked git worktree, claims-safe. Before \`git worktree remove\` runs, the tool checks the claims and refuses with the reason named, never force-dropping silently: uncommitted work in the tree (tracked changes and untracked files both count — commit, stash, or discard first), and any live session in the path (busy, or waiting on a first turn — steer or wait them out first). A path the module does not track is refused: the claims that make removal safe live in the tracking row. The branch survives removal — only the worktree directory goes — and the tracking row is dropped with the worktree. A tracked path whose worktree is already gone from its repo prunes the stale row instead (the result says pruned, not removed).`,
     input: worktreeRemoveSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const caller = context?.sessionID;
       if (!caller)
@@ -3025,14 +3042,13 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
           await ctx.storage.remove(key);
           steps.push(`the worktree was already gone from ${row.repo}`);
           debug("worktree.pruned", { path, caller });
-          return {
-            content: JSON.stringify({
-              ok: true,
-              pruned: path,
-              liveSessionCheck: live.mode,
-              note: "no worktree existed at the path; the stale tracking row was dropped",
-            }),
+          const prunedReply = {
+            ok: true,
+            pruned: path,
+            liveSessionCheck: live.mode,
+            note: "no worktree existed at the path; the stale tracking row was dropped",
           };
+          return { content: JSON.stringify(prunedReply), output: prunedReply };
         }
         const status = await gitRun(path, ["status", "--porcelain"]);
         if (status !== "") {
@@ -3048,15 +3064,14 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         await ctx.storage.remove(key);
         steps.push("dropped the tracking row");
         debug("worktree.removed", { path, caller });
-        return {
-          content: JSON.stringify({
-            ok: true,
-            removed: path,
-            branch: liveTree.branch,
-            head: liveTree.head,
-            liveSessionCheck: live.mode,
-          }),
+        const reply = {
+          ok: true,
+          removed: path,
+          branch: liveTree.branch,
+          head: liveTree.head,
+          liveSessionCheck: live.mode,
         };
+        return { content: JSON.stringify(reply), output: reply };
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -3078,6 +3093,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     name: "worktree_list",
     description: `Read the tracked worktrees with their live git state, whole in one call: per worktree, its path, repo, branch and head as they are now, the base it was checked against and that base's recorded commit, the owning session, the worker session living in it (when a validated dispatch named one), and the checks that answer the lifecycle questions — dirty (uncommitted work in the tree), upToDate (head is exactly at the base ref's current tip), merged (the branch, or a detached head, is an ancestor of that tip), stale (the head sits strictly behind that tip). A worktree no longer present in its repo reads state "missing" with the git-derived checks null and an error naming why. Worktrees added without a base carry null for the base checks: the checks answer only what a base can ground. Sorted newest-tracked first; a scan that cannot exhaust fails named instead of composing from a partial set.`,
     input: worktreeListSchema,
+    output: REPLY_OUTPUT,
     execute: async (raw, context) => {
       const caller = context?.sessionID;
       if (!caller)
@@ -3217,13 +3233,12 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         });
       }
       debug("worktree.listed", { caller, worktrees: worktrees.length });
-      return {
-        content: JSON.stringify({
-          ok: true,
-          worktrees,
-          count: worktrees.length,
-        }),
+      const reply = {
+        ok: true,
+        worktrees,
+        count: worktrees.length,
       };
+      return { content: JSON.stringify(reply), output: reply };
     },
   };
 
