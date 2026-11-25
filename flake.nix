@@ -423,6 +423,95 @@
                   touch "$out"
                 '';
 
+            # The status page's notification script (PRJ-502), evaluated
+            # from the BUILT package: the vitest sandbox runs the script
+            # as the dev transform emits it, but production serves tsc's
+            # output — the page embeds dist/status-notify.js's own
+            # composition — and no dev-side check executes those bytes. A
+            # target change or a downleveled helper would pass the suite
+            # and ship a script that dies in the browser; this check runs
+            # the built composition through the same browser-globals
+            # harness and pins the failure-then-retry behavior on it.
+            zenigata-notify-script =
+              pkgs.runCommand "zenigata-notify-script-check"
+                {
+                  nativeBuildInputs = [ pkgs.nodejs_24 ];
+                }
+                ''
+                  node --input-type=module -e "
+                    const { clientScript, SEEN_KEY } = await import('${config.packages.zenigata}/dist/status-notify.js');
+                    const constructed = [];
+                    class Notification {
+                      constructor(title, options) {
+                        constructed.push({ title, options });
+                      }
+                      static permission = 'granted';
+                      static requestPermission() {
+                        return Promise.resolve('granted');
+                      }
+                    }
+                    const store = new Map();
+                    // The storage holds a last check, so the boot poll is
+                    // not a cold start: an empty storage would seed
+                    // silently and the phases below would say nothing.
+                    store.set(
+                      SEEN_KEY,
+                      JSON.stringify(['acme/widget#9@2026-11-01T00:00:00.000Z@posted']),
+                    );
+                    const control = { textContent: undefined, remove() {}, appendChild() {} };
+                    const document = {
+                      getElementById: () => control,
+                      createElement: () => ({ textContent: undefined, addEventListener() {} }),
+                    };
+                    const localStorage = {
+                      getItem: (key) => store.get(key) ?? null,
+                      setItem: (key, value) => store.set(key, value),
+                    };
+                    let served;
+                    const fetch = () =>
+                      Promise.resolve({ ok: true, json: () => Promise.resolve({ runs: served }) });
+                    let interval;
+                    const setInterval = (fn) => {
+                      interval = fn;
+                      return 1;
+                    };
+                    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+                    const boot = new Function(
+                      'document', 'localStorage', 'Notification', 'fetch', 'setInterval',
+                      clientScript(),
+                    );
+                    const run = {
+                      ts: '2026-11-25T12:00:00.000Z',
+                      repo: 'acme/widget',
+                      pr: 2,
+                      outcome: 'failed',
+                      verdict: null,
+                      failure: { stage: 'blind', message: 'the draft never parsed' },
+                    };
+                    served = [run];
+                    boot(document, localStorage, Notification, fetch, setInterval);
+                    await settle();
+                    if (constructed.length !== 1) {
+                      throw new Error('the built script did not raise the failed run exactly once');
+                    }
+                    if (constructed[0].options.tag !== 'acme/widget#2@2026-11-25T12:00:00.000Z@failed') {
+                      throw new Error('the built script carried the wrong notification tag');
+                    }
+                    await interval();
+                    await settle();
+                    if (constructed.length !== 1) {
+                      throw new Error('the built script re-notified the same state');
+                    }
+                    served = [{ ...run, outcome: 'posted', verdict: 'APPROVE' }];
+                    await interval();
+                    await settle();
+                    if (constructed.length !== 2 || constructed[1].options.tag !== 'acme/widget#2@2026-11-25T12:00:00.000Z@posted') {
+                      throw new Error('the built script missed the re-settled outcome');
+                    }
+                    console.log('the built notification script raised the failure, stayed quiet, and spoke the retry');
+                  " && touch "$out"
+                '';
+
             # The hub's bundled interpreter must import the bundled
             # memory_store.store — that is the runtime contract the package
             # exists to satisfy (see hub.nix). Checking it keeps a forgotten

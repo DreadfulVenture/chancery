@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import { forgePullUrl, renderStatusPage } from "../src/ui.js";
+import { diffFinishes, finishPayload, runId } from "../src/status-notify.js";
 import type { FailedDraftView, RunDraftsView, StatusData } from "../src/ui.js";
 
 const FORGE_URL = "https://forge.invalid";
@@ -448,5 +449,46 @@ describe("the page's favicon link", () => {
     );
     expect(page).toContain('href="data:image/svg+xml,&lt;svg xmlns=&quot;');
     expect(page).not.toContain('href="data:image/svg+xml,<svg');
+  });
+});
+
+describe("the page's notifications", () => {
+  it("the page carries the quiet control and the inline script", () => {
+    const page = renderStatusPage(status(), true, [], [], FORGE_URL);
+    expect(page).toContain('<span class="muted" id="notify-control"></span>');
+    expect(page).toContain("<script>");
+    expect(page).toContain('fetch("/status"');
+  });
+
+  it("the served script is composed from the shared functions' own sources", () => {
+    // The page's script must be the tested diff logic itself, not a
+    // hand-mirrored copy: each shared function's serialized source rides
+    // the served text verbatim. A future edit that lets one of them
+    // reference something outside its own body is caught by the sandbox
+    // run in the status-notify suite, which executes the served script
+    // with no module bindings — exactly the browser's scope.
+    const page = renderStatusPage(status(), true, [], [], FORGE_URL);
+    expect(page).toContain(String(runId));
+    expect(page).toContain(String(finishPayload));
+    expect(page).toContain(String(diffFinishes));
+  });
+
+  it("the page embed carries no script closer inside the script", () => {
+    const page = renderStatusPage(status(), true, [], [], FORGE_URL);
+    const start = page.indexOf("<script>");
+    // The anchor is the LAST closer, not the first: the page carries
+    // exactly one script block, so the last closer is its real closing
+    // tag. Anchoring on the first closer would make a closer riding the
+    // composed source become `end` itself, and the slice ending there
+    // could never match — green in exactly the case this check names.
+    const end = page.lastIndexOf("</script>");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    // The opening-tag count above cannot see closers: a literal
+    // `</script` inside the composed source would truncate the inline
+    // script in the browser while every suite stays green.
+    expect(page.slice(start + "<script>".length, end)).not.toMatch(
+      /<\/script/i,
+    );
   });
 });

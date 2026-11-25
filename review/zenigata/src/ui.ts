@@ -1,17 +1,23 @@
 /**
  * The status page renderer. /status serves the JSON machine contract;
  * this renders the human page at / from the same snapshot — one static
- * HTML page: no scripts, no stylesheets, no assets the page would have
- * to fetch. The markup and the one CSS block ship in this module. The
- * route passes the page-only render inputs beside the snapshot, and
- * /status's pinned shape carries none of them.
+ * HTML page: an embedded CSS block, the one inline script the browser
+ * notifications serve (src/status-notify.ts), and no stylesheets or
+ * external assets the page would have to fetch. The markup and the one
+ * CSS block ship in this module. The route passes the page-only render
+ * inputs beside the snapshot, and /status's pinned shape carries none of
+ * them.
  *
  * Escaping discipline: table and list cells compose small amounts of
  * markup (chips, muted spans), so every raw field is routed through esc()
  * at the moment it enters a cell. A cell is only ever markup this module
  * wrote plus escaped leaves — the page cannot become the one place a
- * string sneaks through.
+ * string sneaks through. The notification script is static text the
+ * status-notify module composes; no page data enters it — it reads
+ * /status itself.
  */
+
+import { clientScript } from "./status-notify.js";
 
 export interface UptimeInfo {
   /** Process start, ISO 8601. */
@@ -737,6 +743,18 @@ export function renderStatusPage(
     justify-content: space-between;
     margin-top: 1.4rem;
   }
+  /* The notifications control (PRJ-502): a quiet link-styled button the
+     page's own register can carry; the script renders its states into
+     the span beside it. */
+  footer button {
+    background: none;
+    border: 0;
+    border-bottom: 1px solid currentColor;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+  }
   a { color: #7fb2ff; }
 </style>
 </head>
@@ -806,8 +824,12 @@ export function renderStatusPage(
 </section>
 
 <footer>
+  <span class="muted" id="notify-control"></span>
   <span>the same projection as a machine feed: <a href="/status">GET /status</a></span>
 </footer>
+<script>
+${clientScript()}
+</script>
 </body>
 </html>
 `;

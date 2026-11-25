@@ -732,9 +732,11 @@ describe("status surface", () => {
       expect(positions[n]).toBeGreaterThan(positions[n - 1] ?? 0);
     }
     // The page depends on nothing outside this document: every link the
-    // head carries is the favicon's data URI, riding the document itself.
+    // head carries is the favicon's data URI, and the one script is
+    // inline — the browser notifications — with no src and no external
+    // asset of any kind.
     expect(body.match(/<style>/g)).toHaveLength(1);
-    expect(body).not.toMatch(/<script/i);
+    expect(body.match(/<script/gi)).toHaveLength(1);
     for (const link of body.matchAll(/<link\b[^>]*>/gi)) {
       expect(link[0]).toMatch('rel="icon"');
       expect(link[0]).toMatch(/href="data:image\/svg\+xml,/);

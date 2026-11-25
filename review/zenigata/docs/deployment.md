@@ -30,7 +30,7 @@ shape is pinned, and anything that scrapes it can rely on it byte for byte. The 
 for reading, in the order an operator reads at 2am: the health line (uptime, the bound port, and the adapter's
 reachability), the sessions running or parked right now, the recent runs with their verdicts and wall times, the review
 starts a restart dropped, the bot's own narration as a log tail, and the configuration echo. It is one static page — one
-embedded CSS block, no scripts, no external assets.
+embedded CSS block and the one inline script the notifications serve (below), no stylesheets or external assets.
 
 `GET /` renders that projection with the rendering-only inputs beside it; the JSON's machine-pinned shape carries none
 of them.
@@ -38,6 +38,31 @@ of them.
 The favicon is the page's head link — a data URI composed at boot from the packaged
 `review/zenigata/assets/favicon.svg`. No route serves the asset and the page fetches nothing for the link; an unreadable
 asset renders it off with a log line, and the boot continues.
+
+While the page is open it also notifies. Its inline script polls `GET /status` every 30 seconds — the runs answer is one
+small SQL read, and reviews finish over minutes, so the interval reads as live without costing anything — and each run
+that finished since the last check raises one browser notification: `repo#pr` as the title, the posted run's verdict or
+the failed run's short reason as the body, and the run's identity (repo, pull request, start stamp, and the outcome the
+row carries) as the tag, so a repeat poll never doubles — and a retry that settles the row with a different outcome
+carries a new identity and notifies: the failure's follow-up speaks when the retry posts. The tag is best-effort: WebKit
+parses it but does not coalesce by it (two WebKit bug reports track the no-op), so the dedupe that holds is the
+seen-state, which open tabs of the same origin share through localStorage on every poll. Skipped and aborted runs are
+not finishes — they posted nothing and did not fail — and notify nobody. Permission is requested through the page's own
+quiet control in the footer, because browsers require a user gesture for the prompt: default permission shows a small
+"enable notifications" button, granted shows a muted "notifications on", and a declined grant takes the control off the
+page — the page keeps working, silently, and the seen-state still advances, so a later grant starts with the next finish
+rather than replaying old ones. A cold start — the browser holding no seen-state at all — has no last check to diff
+against: the first poll marks the current window silently and notifications begin with the next finish, the same shape
+the declined path gives a later grant; the choice is deliberate, and an operator who wants the page's opening window
+read aloud can flip it. A boot window with no finishes in it arms the state instead — the cold branch latches on the
+first successful poll — so the first finish observed afterwards speaks rather than being consumed as a seed. The
+seen-state lives in the browser's localStorage under one key, pruned to the current runs window, with a boot-scoped
+in-memory twin beside it — a storage that refuses writes still holds each finish to one notification per tab life, and a
+delivery the browser refuses is consumed, so a broken notification path never loops the window. And on a non-secure
+context — plain HTTP from a non-localhost host, the shape a reverse proxy in front of the loopback bind produces —
+Notification is undefined: the footer shows no control and no hint, and the page works exactly as before. Delivery is
+tab-open only by ruling: the browser's own Notification API, no service worker, no Web Push — closing the tab stops the
+notifications, which is the accepted shape, not a defect.
 
 The surface has no write endpoints of its own and carries no secret — /metrics exposes durations and counters, and the
 status surface redacts at every projection (below); the endpoint is open like `/metrics` and `/healthz`.
