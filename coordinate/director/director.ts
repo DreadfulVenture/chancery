@@ -259,14 +259,36 @@ interface SessionDomain {
   // below and skips the re-assert, so the config floor's deny strips the
   // write-half tools from the director agent's catalog as before the fix.
   // The callback's input is the host's SessionPrompt shape, whose
-  // messageID is required there, not optional — verified in the opencode
+  // messageID is required on the prompt event — verified in the opencode
   // tree, in the SessionPrompt interface
-  // (packages/plugin/src/effect/session.ts).
+  // (packages/plugin/src/effect/session.ts). The union below marks it
+  // optional because the context event carries no messageID.
+  // The context hook is the model-request assembly hook: the host fires it
+  // per model call over the LLM transcript, whose messages carry
+  // {role, content, id?, metadata?} — messages is required and content is
+  // always an array of parts, never a string: Message.make normalizes
+  // string input into a parts array before the event flows
+  // (packages/ai/src/schema/messages.ts at v2.2.5; the event is built from
+  // SessionModelRequest.baseTranscript's toLLMMessages output,
+  // packages/core/src/session/runner/llm.ts, also at v2.2.5). The
+  // delegation reminder's splice registers here (PRJ-529). The two events
+  // share the hook name, not the shape.
   hook?(
     name: string,
     callback: (input: {
       sessionID: string;
-      messageID: string;
+      messageID?: string;
+      agent?: string;
+      messages: Array<{
+        id?: string;
+        role: string;
+        content: Array<{
+          type: string;
+          text?: string;
+          [key: string]: unknown;
+        }>;
+        metadata?: Record<string, unknown>;
+      }>;
       prompt?: unknown;
       metadata?: Record<string, unknown>;
       delivery?: unknown;
@@ -1383,32 +1405,37 @@ const readSchema = {
 
 // The per-turn delegation reminder (PRJ-519): agents holding the director
 // lane forget to hand work off and start implementing in their own session.
-// The mechanism is the plan reminder's: a per-turn prompt hook persists one
-// synthetic through ctx.session.synthetic — a user-role message at the
-// prompt tail, out of the memory plugin's capture paths. It is a reminder,
-// not a block: coordination bookkeeping in the director session (manifests,
-// report reading, PR text) stays legitimate work there. The accumulation
-// cost is stated, not bounded: compaction keeps synthetics verbatim (the
-// note beside the report budget), so a long arc stacks one copy per turn
-// and nothing prunes — the wake notices' accepted cost family, at per-turn
-// frequency.
+// It is a reminder, not a block: coordination bookkeeping in the director
+// session (manifests, report reading, PR text) stays legitimate work there.
 //
-// The boundary is the prompt turn: report wakes admit the inbox item and
-// wake the session without running the prompt path's hook trigger, so the
-// loop's autonomous legs (wake, pull, report) carry no fresh reminder —
-// the reminder exists only on prompt turns. The hook trigger has one call
-// site in the host core, inside the prompt request itself
-// (packages/core/src/session/prompt.ts:42 at the installed v2.2.5; the
-// synthetic wake path is SessionInbox.admit, which never reaches it).
+// The mechanism (PRJ-529): a ctx.session.hook("context") registration
+// splices the reminder onto the model request's message list in memory at
+// assembly time — no host synthetic is stored, nothing is admitted to the
+// inbox, no session wakes, nothing renders in the timeline.
 //
-// Delivery rests on a position distinction the seam's own history records
-// (the header's UP-direction note; ADR 20261116-director-seam-directions):
-// REMINDER is a user message made only of a <system-reminder> block, the
-// shape the deployed provider swallows to "." when it is the turn's only
-// user content — and it never is one here, because it persists at
-// admission beside the prompt's live text. That beside-live-text delivery
-// is expected, not proven: it stays unverified live until the operator's
-// post-deploy glance confirms a director session actually receives it.
+// Provenance, stated so the mechanism's own history is honest: the shape
+// and registration here were verified against the host core at the
+// installed v2.2.5, not copied. The discovery-reminder writ was read for
+// the idea only — its returned "session.context" map is not a registration
+// the promise adapter honors (packages/plugin/src/promise/adapter.ts at
+// v2.2.5 reads setup's return value as nothing but a cleanup function), so
+// that writ has registered nothing through it, and its in-memory splice
+// shape was never live-proven. This module's splice is the proof: it
+// registers the way the host's own plan-mode reminder does
+// (packages/core/src/plugin/plan.ts at v2.2.5, Message.user spliced via
+// event.messages) and reads the event's real message shape — the LLM
+// transcript {role, content, id?} form toLLMMessages builds
+// (packages/core/src/session/runner/to-llm-message.ts at v2.2.5), not the
+// stored {type, text} row form.
+//
+// Reach, stated as the guards make it: the splice fires on request
+// assemblies whose window ends in a user-role message — the first model
+// call of a prompt turn, and wake assemblies whose admitted input rides as
+// user text. A continuation step after tool results ends in a tool- or
+// assistant-role tail and carries no reminder. Nothing persists, so the
+// exact-text dedupe guards a double splice within one assembly and against
+// copies the old persisting mechanism left in stored history — not across
+// turns, where each assembly starts from storage without the reminder.
 const REMINDER = `<system-reminder>
 Director session: the lane is coordination. Slice the objective and hand each slice to a worker — dispatch (director_dispatch), steer (director_steer), verify the worker's claims yourself from the worktree and command output, ship under the standing grant, report. Edits in this session are for coordination bookkeeping only (manifests, worker-report reading, PR text); verification reads and gate runs are yours, implementation edits are not — put the work in a worker's hands.
 </system-reminder>`;
@@ -1633,28 +1660,49 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   let reminderRegistration: { dispose: () => Promise<void> } | undefined;
   try {
     reminderRegistration =
-      (await ctx.session?.hook?.("prompt", async (event) => {
-        // An unreadable session is not a director session: a row the read
-        // cannot resolve carries nothing to scope on.
-        let readable: { agent?: string } | undefined;
+      (await ctx.session?.hook?.("context", async (context) => {
         try {
-          readable = await ctx.session.get({ sessionID: event.sessionID });
-        } catch {
-          return;
-        }
-        if (readable?.agent !== "director") return;
-        try {
-          await ctx.session.synthetic({
-            sessionID: event.sessionID,
-            text: REMINDER,
+          if (context.agent !== "director") return;
+
+          // The dedupe reads the assembled window the way the host's own
+          // plan-mode reminder reads it: a user-role message carrying the
+          // exact reminder text as its one text part.
+          if (
+            context.messages.some(
+              (message) =>
+                message.role === "user" &&
+                message.content.some(
+                  (part) => part.type === "text" && part.text === REMINDER,
+                ),
+            )
+          ) {
+            return;
+          }
+
+          const last = context.messages.at(-1);
+          if (!last || last.role !== "user") return;
+
+          // Before the user's prompt, where the host's plan-mode reminder
+          // splices (packages/core/src/plugin/plan.ts at v2.2.5): the
+          // reminder never becomes the turn's last user message, the
+          // position the deployed provider's user-turn classification
+          // judges. The shape is the LLM transcript's {role, content} form
+          // — content as a parts array, the form toLLMMessages emits and
+          // the request builder consumes. No id: the host's own splice sets
+          // none and nothing downstream reads ours — the dedupe is by
+          // exact text.
+          context.messages.splice(context.messages.length - 1, 0, {
+            role: "user",
+            content: [{ type: "text", text: REMINDER }],
           });
         } catch (error) {
-          // The hook runs awaited inside the host's prompt path, so a send
-          // failure must not take the turn down — the reminder's whole
-          // contract is to be ignorable. Same shape as the wake notice's
-          // catch: the turn proceeds reminder-less, the failure named once.
+          // The hook runs awaited inside the host's request preparation, so
+          // a throw escaping the callback fails the preparation and the
+          // director's turn dies — the reminder's whole contract is to be
+          // ignorable. Same shape as the old send guard's catch: the
+          // request proceeds reminder-less, the failure named once.
           console.error(
-            `[director] reminder to ${event.sessionID} failed: ${error}. The turn proceeds without it.`,
+            `[director] reminder to ${context.sessionID} failed: ${error}. The turn proceeds without it.`,
           );
         }
       })) ?? undefined;

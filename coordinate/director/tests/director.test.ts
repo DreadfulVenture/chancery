@@ -653,8 +653,8 @@ test("the re-assert registers one late transform, on the first prompt only, and 
   await cleanup?.();
   assert.deepEqual(
     fixture.hookDisposals,
-    ["prompt", "prompt"],
-    "the re-assert prompt hook and the delegation reminder's prompt hook both dispose with teardown",
+    ["prompt", "context"],
+    "the re-assert prompt hook and the delegation reminder's context hook both dispose with teardown",
   );
 });
 

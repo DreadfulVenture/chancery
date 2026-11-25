@@ -5,25 +5,58 @@ import plugin from "../director.ts";
 // The director package's own delegation reminder, folded inline into the
 // entry (director.ts must stay a single self-contained file: the
 // mail-watcher package materializes it verbatim and alone, so five watcher
-// sources' cross-layout import resolves). Fake shaped like the suite's
-// fakeContext session domains (director.test.ts): the registration hooks
-// with per-name collection and a fire helper, the session get that throws
-// on an unknown row (the host's NotFoundError), and the synthetic sink. The
-// tool domain is the one the entry's setup touches unguarded and the event
-// stream stays empty, so the pump idles quietly. Every assertion in this
-// file runs through the entry's setup, so an unwired registration fails the suite
-// instead of silently going live-dead.
+// sources' cross-layout import resolves). The fixture is built from the
+// host's session.context event shape — the LLM transcript messages
+// ({role, content, id?}, content as an array of parts) the event carries,
+// and no messageID, which belongs to the prompt event (review 651, 19042).
+// A recorded synthetic sink stays asserted at zero: the splice stores
+// nothing through the host. Every assertion in this file runs through the
+// entry's setup, so an unwired registration fails the suite instead of
+// silently going live-dead.
 
-type SessionRow = { id: string; agent?: string };
+type ContentPart = { type: string; text?: string };
+type TranscriptMessage = {
+  id?: string;
+  role: string;
+  content: Array<ContentPart>;
+};
+type ContextEvent = {
+  sessionID: string;
+  agent: string;
+  // The host's Model.Ref: {providerID, id, variant?}.
+  model: { providerID: string; id: string };
+  system: Array<unknown>;
+  messages: Array<TranscriptMessage>;
+  options: Record<string, unknown>;
+  tools: Record<string, unknown>;
+};
+
+function userPrompt(text: string): TranscriptMessage {
+  return { id: "msg_prompt", role: "user", content: [{ type: "text", text }] };
+}
+
+function requestContext(
+  agent: string,
+  messages: Array<TranscriptMessage> = [userPrompt("hello")],
+): ContextEvent {
+  return {
+    sessionID: "ses-director",
+    agent,
+    model: { providerID: "test", id: "test" },
+    system: [],
+    messages,
+    options: {},
+    tools: {},
+  };
+}
 
 function fakeContext() {
-  const sessions = new Map<string, SessionRow>();
-  const mails: Array<{ sessionID: string; text: string }> = [];
   const hooks: Array<{
     name: string;
     callback: (input: unknown) => Promise<void> | void;
   }> = [];
   const hookDisposals: string[] = [];
+  const synthetics: Array<unknown> = [];
   const fireHook = async (name: string, input: unknown) => {
     for (const hook of hooks) {
       if (hook.name !== name) continue;
@@ -40,10 +73,10 @@ function fakeContext() {
       },
     },
     session: {
-      get: async ({ sessionID }: { sessionID: string }) => {
-        const row = sessions.get(sessionID);
-        if (!row) throw new Error("Session.NotFoundError");
-        return structuredClone(row);
+      // The host synthetic sink: any call here is a persistence the splice
+      // forbids, so the tests assert it stays empty rather than reading it.
+      synthetic: async (input: unknown) => {
+        synthetics.push(structuredClone(input));
       },
       hook: async (
         name: string,
@@ -56,9 +89,6 @@ function fakeContext() {
           },
         };
       },
-      synthetic: async (input: { sessionID: string; text: string }) => {
-        mails.push(structuredClone(input));
-      },
     },
     event: {
       subscribe: async function* ({ signal }: { signal: AbortSignal }) {
@@ -68,95 +98,175 @@ function fakeContext() {
       },
     },
   };
-  return { ctx, sessions, mails, hooks, hookDisposals, fireHook };
+  return { ctx, hooks, hookDisposals, synthetics, fireHook };
 }
 
-test("registers on the prompt hook", async () => {
+// The reminder's text comes from the module through a real splice, not a
+// copied constant: the load-bearing phrases are asserted against the
+// spliced message's content, so the tests prove what a director session
+// receives (review 651, 19046).
+async function reminderText(): Promise<string> {
+  const fixture = fakeContext();
+  await plugin.setup(fixture.ctx);
+  const ctx = requestContext("director");
+  await fixture.fireHook("context", ctx);
+  const spliced = ctx.messages[0] as TranscriptMessage;
+  const part = (spliced.content as Array<ContentPart>)[0];
+  return part.text!;
+}
+
+test("registers on the context hook", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
-  // Two prompt hooks ride the entry: the permission re-assert's and the
-  // reminder's. Both dispose with teardown.
+  // Two hooks ride the entry: the permission re-assert's prompt hook and
+  // the reminder's context hook. Both dispose with teardown.
   assert.equal(fixture.hooks.length, 2);
   assert.deepEqual(
     fixture.hooks.map((hook) => hook.name),
-    ["prompt", "prompt"],
+    ["prompt", "context"],
   );
   await cleanup?.();
-  assert.deepEqual(fixture.hookDisposals, ["prompt", "prompt"]);
+  assert.deepEqual(fixture.hookDisposals, ["prompt", "context"]);
 });
 
-test("persists a synthetic reminder for director sessions", async () => {
+test("splices the reminder before a director request's user prompt", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
-  fixture.sessions.set("ses-director", {
-    id: "ses-director",
-    agent: "director",
-  });
-  await fixture.fireHook("prompt", {
-    sessionID: "ses-director",
-    messageID: "msg-1",
-  });
+  const ctx = requestContext("director");
+  await fixture.fireHook("context", ctx);
 
-  assert.equal(fixture.mails.length, 1);
-  assert.equal(fixture.mails[0].sessionID, "ses-director");
-  // The text assertions run on what the synthetic sink captured when the
-  // hook fired — the load-bearing phrases — so they prove what a director
-  // session receives, not what a constant holds.
-  assert.match(fixture.mails[0].text, /director_dispatch/);
-  assert.match(fixture.mails[0].text, /director_steer/);
-  assert.match(fixture.mails[0].text, /coordination bookkeeping/);
-  assert.match(fixture.mails[0].text, /standing grant/);
+  // The splice lands before the prompt (the host's plan-mode reminder's
+  // position), so the prompt stays the turn's last user message.
+  assert.equal(ctx.messages.length, 2);
+  const spliced = ctx.messages[0] as TranscriptMessage;
+  assert.equal(spliced.role, "user");
+  // No id: the host's own plan.ts splice sets none and nothing downstream
+  // reads ours (review 654, 19073).
+  assert.equal(spliced.id, undefined);
+  const part = (spliced.content as Array<ContentPart>)[0];
+  assert.equal(part.type, "text");
+  const text = part.text!;
+  assert.match(text, /director_dispatch/);
+  assert.match(text, /director_steer/);
+  assert.match(text, /coordination bookkeeping/);
+  assert.match(text, /standing grant/);
+  assert.deepEqual(ctx.messages[1], userPrompt("hello"));
+  // The splice stores nothing through the host: no synthetic was sent.
+  assert.equal(fixture.synthetics.length, 0);
   await cleanup?.();
 });
 
-test("does not persist a reminder for other agents", async () => {
+test("does not splice the reminder for other agents", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
-  fixture.sessions.set("ses-build", { id: "ses-build", agent: "build" });
-  await fixture.fireHook("prompt", {
-    sessionID: "ses-build",
-    messageID: "msg-2",
-  });
+  const ctx = requestContext("build");
+  await fixture.fireHook("context", ctx);
 
-  assert.equal(fixture.mails.length, 0);
+  assert.deepEqual(ctx.messages, [userPrompt("hello")]);
+  assert.equal(fixture.synthetics.length, 0);
   await cleanup?.();
 });
 
-test("does not persist a reminder when the agent is unset", async () => {
+test("does not splice the reminder when the agent is unset", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
-  fixture.sessions.set("ses-plain", { id: "ses-plain" });
-  await fixture.fireHook("prompt", {
-    sessionID: "ses-plain",
-    messageID: "msg-3",
-  });
+  const ctx = requestContext(undefined as never);
+  await fixture.fireHook("context", ctx);
 
-  assert.equal(fixture.mails.length, 0);
+  assert.deepEqual(ctx.messages, [userPrompt("hello")]);
   await cleanup?.();
 });
 
-test("a failed reminder send is caught and logged once; the turn proceeds", async () => {
+test("does not splice when the exact text is already in the window", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
-  fixture.sessions.set("ses-director", {
-    id: "ses-director",
-    agent: "director",
-  });
-  // The sink failure is the wake path's real mode (the suite's
-  // "inbox unavailable" fixture): the hook runs awaited inside the prompt
-  // path, so a throw escaping it would take the director's turn down.
+  // A stored copy from the old persisting mechanism rides history as a
+  // user-role message whose one text part is the exact reminder text.
+  const ctx = requestContext("director", [
+    {
+      id: "msg_old",
+      role: "user",
+      content: [{ type: "text", text: await reminderText() }],
+    },
+    userPrompt("hello"),
+  ]);
+  await fixture.fireHook("context", ctx);
+
+  assert.deepEqual(ctx.messages, [
+    {
+      id: "msg_old",
+      role: "user",
+      content: [{ type: "text", text: await reminderText() }],
+    },
+    userPrompt("hello"),
+  ]);
+  assert.equal(fixture.synthetics.length, 0);
+  await cleanup?.();
+});
+
+test("does not splice behind a tool-result tail", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  const ctx = requestContext("director", [
+    userPrompt("hello"),
+    {
+      id: "msg_tool",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "call_1",
+          name: "read",
+          result: { type: "json", value: "ok" },
+        },
+      ],
+    },
+  ]);
+  await fixture.fireHook("context", ctx);
+
+  assert.equal(ctx.messages.length, 2);
+  assert.equal((ctx.messages[1] as TranscriptMessage).role, "tool");
+  await cleanup?.();
+});
+
+test("does not splice behind an assistant tail", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  const ctx = requestContext("director", [
+    userPrompt("hello"),
+    {
+      id: "msg_asst",
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+    },
+  ]);
+  await fixture.fireHook("context", ctx);
+
+  assert.equal(ctx.messages.length, 2);
+  assert.equal((ctx.messages[1] as TranscriptMessage).role, "assistant");
+  await cleanup?.();
+});
+
+test("a splice failure is caught and logged once; the request resolves reminder-less", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  // Hostile window: the splice's own mutation throws. Through the promise
+  // adapter a rejected callback fails the request preparation and the
+  // director's turn dies, so the catch must resolve it — the deleted
+  // persistence-era test's intent, rebuilt for the splice era.
+  class HostileMessages extends Array<TranscriptMessage> {
+    splice(): never {
+      throw new Error("splice refused");
+    }
+  }
+  const ctx = requestContext("director");
+  ctx.messages = HostileMessages.from([userPrompt("hello")]) as never;
   const logs: string[] = [];
   const originalError = console.error;
   console.error = (...args: unknown[]) => logs.push(args.map(String).join(" "));
   let thrown: unknown;
   try {
-    fixture.ctx.session.synthetic = async () => {
-      throw new Error("inbox unavailable");
-    };
-    await fixture.fireHook("prompt", {
-      sessionID: "ses-director",
-      messageID: "msg-1",
-    });
+    await fixture.fireHook("context", ctx);
   } catch (error) {
     thrown = error;
   } finally {
@@ -165,29 +275,9 @@ test("a failed reminder send is caught and logged once; the turn proceeds", asyn
   await cleanup?.();
 
   assert.equal(thrown, undefined);
-  assert.equal(fixture.mails.length, 0);
+  assert.equal(fixture.synthetics.length, 0);
   assert.equal(logs.length, 1);
   assert.match(logs[0], /\[director\] reminder to ses-director failed/);
-  assert.match(logs[0], /inbox unavailable/);
-});
-
-test("a prompt for an unknown session persists nothing and throws nothing", async () => {
-  const fixture = fakeContext();
-  const cleanup = await plugin.setup(fixture.ctx);
-  let thrown: unknown;
-  try {
-    // The fake's get throws the host's NotFoundError for an id the map
-    // never held: the designed degrade treats the unreadable row as
-    // not-director. Pinned so it holds by design, not by incidence.
-    await fixture.fireHook("prompt", {
-      sessionID: "ses-unknown",
-      messageID: "msg-2",
-    });
-  } catch (error) {
-    thrown = error;
-  }
-  await cleanup?.();
-
-  assert.equal(thrown, undefined);
-  assert.equal(fixture.mails.length, 0);
+  assert.match(logs[0], /splice refused/);
+  assert.match(logs[0], /The turn proceeds without it/);
 });
