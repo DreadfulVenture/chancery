@@ -236,6 +236,11 @@ interface SessionDomain {
   // director_sessions and the worktree removal's live-session check
   // require the enumeration surface and fail named when it is absent.
   list?(input?: { cursor?: string }): Promise<any>;
+  // PRJ-522: the transcript read the usage surfaces ride — the host's
+  // Session.context, the same message list the model replays
+  // (packages/core/src/session/store.ts:201 at v2.3.0). Absent: the
+  // usage reads return nothing.
+  context?(input: { sessionID: string }): Promise<any>;
   // drive-project re-targets the session it runs in to the director agent;
   // the command degrades to a plain prompt when the surface lacks it.
   switchAgent?(input: { sessionID: string; agent: string }): Promise<unknown>;
@@ -313,6 +318,20 @@ interface HostContext {
   options?: PluginOptions;
   storage: StorageDomain;
   session: SessionDomain;
+  // The model catalog (ModelDomain extends ModelApi, v2.3.0
+  // packages/plugin/src/promise/plugin.ts:44): the usage read resolves
+  // the anchor's model ref against it. Optional like the enhancement
+  // domains; without it the usage reads return nothing.
+  model?: {
+    list(input?: { providerID?: string }): Promise<
+      Array<{
+        providerID: string;
+        id: string;
+        modelID: string;
+        limit?: { context?: number; input?: number };
+      }>
+    >;
+  };
   tool: {
     transform(
       callback: (editor: { add: (tool: ToolDefinition) => void }) => unknown,
@@ -1061,16 +1080,108 @@ function renderReportBody(row: ReportRow): string {
   return lines.join("\n");
 }
 
-// The wake notice: fixed apart from the worker session id and the unread
-// count. It is sent as a plain-text synthetic on purpose — see the
+// The wake notice: fixed apart from the worker session id, the unread
+// count, and the worker's context share when it is past the threshold.
+// It is sent as a plain-text synthetic on purpose — see the
 // UP-direction note in the header — with the description and metadata
 // pair that renders it as a "◈ Notice" row.
 const NOTICE_DESCRIPTION = "Director module: worker report ready to read";
 const NOTICE_SOURCE = "director";
 
-function noticeText(worker: string, unread: number): string {
+function noticeText(worker: string, unread: number, share?: number): string {
   const noun = unread === 1 ? "report" : "reports";
-  return `Worker turn report filed by session ${worker}: ${unread} ${noun} unread for you. Call the report_read tool to read ${unread === 1 ? "it" : "them"}.`;
+  const base = `Worker turn report filed by session ${worker}: ${unread} ${noun} unread for you. Call the report_read tool to read ${unread === 1 ? "it" : "them"}.`;
+  if (share === undefined) return base;
+  return `${base} Its context is at ${Math.round(share * 100)}% of its model's window; start its next slice in a fresh session — state rides the manifest.`;
+}
+
+// PRJ-522: a watched worker's context usage, measured the way compaction
+// measures it. The newest trustworthy assistant message carries the
+// session's prompt size in `tokens` (TokenUsage.Info, v2.3.0
+// packages/schema/src/session-message.ts:237); compaction's own anchor
+// measure is input + cache.read + cache.write + output + reasoning
+// (v2.3.0 packages/core/src/session/compaction.ts:1153), taken from the
+// anchor hasMeasuredPrompt accepts (:1194): assistant, no error, tokens
+// present, prompt tokens above zero. The window is the model's limit,
+// sized the same way compaction sizes a request (inputWindow, :1185):
+// the smaller of input and context when both are set, else whichever
+// exists. The model is resolved from the anchor's own ref — the ref the
+// tokens were measured under — against the host's catalog (ModelDomain,
+// packages/plugin/src/promise/plugin.ts:44). Every absence or failure —
+// no context surface, unreadable transcript, no tokened anchor, model
+// not in the catalog, unknown window — returns undefined: the callers
+// render nothing rather than guess, and the read never throws.
+type ContextUsage = {
+  tokens: number;
+  window: number;
+  share: number;
+};
+
+// The operator's number (PRJ-522): a worker past this share of its
+// model's window shows in the wake notice. A constant, not a config
+// option, until a second number is wanted.
+const CONTEXT_WARN_SHARE = 0.5;
+
+const promptTokensOf = (tokens: {
+  input: number;
+  cache?: { read?: number; write?: number };
+}): number =>
+  tokens.input + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
+
+async function contextUsage(
+  ctx: HostContext,
+  sessionID: string,
+): Promise<ContextUsage | undefined> {
+  if (typeof ctx.session?.context !== "function") return undefined;
+  let messages: any[];
+  try {
+    messages = await ctx.session.context({ sessionID });
+  } catch (error) {
+    console.error(`[director] context read for ${sessionID} failed: ${error}`);
+    return undefined;
+  }
+  if (!Array.isArray(messages)) return undefined;
+  const anchor = messages.findLast(
+    (message) =>
+      message?.type === "assistant" &&
+      !message.error &&
+      message.tokens !== undefined &&
+      promptTokensOf(message.tokens) > 0,
+  );
+  if (!anchor) return undefined;
+  const tokens = anchor.tokens;
+  const measured =
+    (tokens.input ?? 0) +
+    (tokens.cache?.read ?? 0) +
+    (tokens.cache?.write ?? 0) +
+    (tokens.output ?? 0) +
+    (tokens.reasoning ?? 0);
+  const ref = anchor.model;
+  if (typeof ref?.providerID !== "string" || typeof ref?.id !== "string")
+    return undefined;
+  if (!ctx.model || typeof ctx.model.list !== "function") return undefined;
+  let models;
+  try {
+    models = await ctx.model.list();
+  } catch (error) {
+    console.error(
+      `[director] model catalog read for ${sessionID} failed: ${error}`,
+    );
+    return undefined;
+  }
+  if (!Array.isArray(models)) return undefined;
+  const model = models.find(
+    (row) =>
+      row?.providerID === ref.providerID &&
+      (row?.id === ref.id || row?.modelID === ref.id),
+  );
+  const limit = model?.limit;
+  const window =
+    limit?.input && limit?.context
+      ? Math.min(limit.input, limit.context)
+      : (limit?.context ?? limit?.input);
+  if (!window || window <= 0) return undefined;
+  return { tokens: measured, window, share: measured / window };
 }
 
 // Epoch-millis comparison for time.busy versus time.idle: "busy" means the
@@ -1598,10 +1709,25 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
         `[director] unread count failed (the notice understates it): ${error}`,
       );
     }
+    // PRJ-522: the worker's context share rides the notice while it is
+    // past half the window — a state made visible on every wake while it
+    // holds, so growth past the threshold stays seen until the director
+    // starts the worker's next slice fresh. A failed read stays quiet:
+    // the report is stored either way, and the wake's job is the
+    // report's.
+    let warnShare: number | undefined;
+    try {
+      const usage = await contextUsage(ctx, sessionID);
+      if (usage && usage.share >= CONTEXT_WARN_SHARE) warnShare = usage.share;
+    } catch (error) {
+      console.error(
+        `[director] context usage read for ${sessionID} failed: ${error}`,
+      );
+    }
     try {
       await ctx.session.synthetic({
         sessionID: entry.director,
-        text: noticeText(sessionID, unread),
+        text: noticeText(sessionID, unread, warnShare),
         description: NOTICE_DESCRIPTION,
         metadata: { source: NOTICE_SOURCE },
       });
@@ -1856,7 +1982,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const statusTool: ToolDefinition = {
     name: "director_worker_status",
-    description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, and how many of its reports are unread for you. Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
+    description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, how many of its reports are unread for you, and its context usage when it is readable (contextTokens measured against contextWindow, with contextShare; measured the way compaction measures it, omitted when the session carries no usable tokens or its model has no known window). Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
     input: statusSchema,
     execute: async (raw, context) => {
       const input = raw || {};
@@ -1901,6 +2027,10 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
           );
         }
       }
+      // PRJ-522: the worker's context usage rides the status whenever it
+      // is readable — the threshold gates only the notice clause, never
+      // the number. An absent or failed read omits the fields.
+      const usage = await contextUsage(ctx, sessionID);
       // The pin reads as "providerID/modelID" for the caller. The host's
       // live model record wins; the pin the dispatch stamp carries is the
       // fallback when the host row reports none.
@@ -1924,6 +2054,13 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
                 ...(unread.truncated ? { unreadTruncated: true } : {}),
               }
             : {}),
+          ...(usage
+            ? {
+                contextTokens: usage.tokens,
+                contextWindow: usage.window,
+                contextShare: usage.share,
+              }
+            : {}),
         }),
       };
     },
@@ -1931,7 +2068,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const readTool: ToolDefinition = {
     name: "report_read",
-    description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head, with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures and interrupts file as their own kinds. A fixed wake notice names the worker session and the unread count; this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
+    description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head, with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures and interrupts file as their own kinds. A fixed wake notice names the worker session and the unread count, and adds the worker's context share when it is past half its model's window; this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
     input: readSchema,
     execute: async (raw, context) => {
       const caller = context?.sessionID;
