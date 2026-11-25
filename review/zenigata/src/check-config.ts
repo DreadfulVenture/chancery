@@ -7,10 +7,14 @@
  * module composes the first two the way a deployed boot composes them —
  * systemd layers the EnvironmentFile over the unit's plain environment —
  * and validates the composition through loadConfig, the same schema every
- * boot pays. The lineage declaration is checked against the daemon's own
- * contract: the memory URL must carry `app=zenigata&initiator=agent`, the
- * shape docs/deployment.md pins, whose `initiator` value is what makes the
- * daemon attribute the bot's writes as agent observations.
+ * boot pays. The check pins the lineage declaration: the memory URL
+ * must carry `app=zenigata&initiator=agent`, the shape docs/deployment.md
+ * pins. The `initiator` value is how the deployment tells the gate its
+ * conversations are agent-started: the gate reads a conversation it has
+ * not seen as the agent-lineage class (`unanchored`) on a declared
+ * connection, as `absent` on an undeclared one. The observation grant is
+ * the same either way; the class the conversation carries and the
+ * refusal its non-observation writes get are what differ.
  */
 
 import { readFileSync } from "node:fs";
@@ -31,13 +35,15 @@ export interface ConfigCheckResult {
 }
 
 /**
- * Parse an environment file's plain KEY=VALUE form — the shape systemd's
- * EnvironmentFile reads, and the shape the deployment's secrets file
- * carries. Blank lines and `#` comments skip; a whole-line surrounding
- * quote pair on the value strips; everything after the first `=` joins
- * verbatim, so an embedded `=` rides inside the value. A non-empty line
- * with no `=` throws: a malformed secrets file must fail named, not
- * silently lose a variable at the boot composition.
+ * Parse an environment file's plain KEY=VALUE form, the subset the
+ * deployment's secrets file uses. That is a subset of what systemd's
+ * EnvironmentFile reader accepts: whole-line `;` comments, backslash
+ * continuations, and quoted-value escapes are beyond this parser. Blank
+ * lines and `#` comments skip; a whole-line surrounding quote pair on
+ * the value strips; everything after the first `=` joins verbatim, so an
+ * embedded `=` rides inside the value. A non-empty line with no `=`
+ * throws: a malformed secrets file must fail named, not silently lose a
+ * variable at the boot composition.
  */
 export function parseEnvironmentFile(text: string): Record<string, string> {
   const entries: Record<string, string> = {};
@@ -147,7 +153,7 @@ export function checkRenderedConfig(input: {
   }
   if (memoryUrl.searchParams.get("initiator") !== "agent") {
     failures.push(
-      "ZENIGATA_MEMORY_URL must carry initiator=agent: without the declaration the daemon's lineage gate mis-derives or refuses every observation write",
+      "ZENIGATA_MEMORY_URL must carry initiator=agent: without the declaration an unseen conversation reads as class 'absent' instead of the agent-lineage class, which changes the conversation's attribution class and the refusal its non-observation writes get — the observation grant itself is the same either way",
     );
   }
   const rendered = {
@@ -170,7 +176,7 @@ export function checkRenderedConfig(input: {
 /**
  * The `zenigata --check-config` entry: three file paths — the rendered
  * unit environment (JSON), the unit's environment file (its secrets, the
- * file the unit's EnvironmentFile sources at boot), and the expected
+ * file the unit's EnvironmentFile reads at boot), and the expected
  * identity lists (JSON). Failures print named, one per line, and the
  * process exits 1 on any and 2 on malformed input.
  */

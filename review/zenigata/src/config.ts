@@ -196,13 +196,12 @@ function splitCsv(value: string): string[] {
 }
 
 /**
- * The account-name shape the deployment's identity variables carry: the
- * login charset the forge itself admits (letters, digits, dot, underscore,
- * hyphen, starting with a letter or digit), minus the comma the CSV
- * rendering cannot carry. The module's option type enforces the same
- * pattern at eval time; this re-check catches a value set in the
- * environment by hand, at boot, naming the variable and the offending
- * entry.
+ * The account-name shape the deployment's identity variables carry: a
+ * conservative charset (letters, digits, dot, underscore, hyphen,
+ * starting with a letter or digit), minus the comma the CSV rendering
+ * cannot carry. The module's option type enforces the same pattern at
+ * eval time; this re-check catches a value set in the environment by
+ * hand, at boot, naming the variable and the offending entry.
  */
 const accountNameSchema = z
   .string()

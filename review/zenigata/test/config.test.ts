@@ -166,7 +166,7 @@ describe("loadConfig identity arrays", () => {
     ).toThrow(/ZENIGATA_ACCESS: 'user@example\.com'/);
   });
 
-  it("accepts the charset the forge admits in account names", () => {
+  it("accepts the conservative account-name shape", () => {
     const config = loadConfig({
       ...baseEnv,
       ZENIGATA_HUMANS: "the-operator.2, worker_bot-3",

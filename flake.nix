@@ -366,15 +366,15 @@
             # two entries per list, neutral names — and the runtime's own
             # bin validates the rendered environment: `zenigata
             # --check-config` composes the unit environment with the unit's
-            # own environment file exactly the way a deployed boot composes
-            # them (systemd layers the EnvironmentFile over the unit's
-            # plain environment) and runs the composition through
-            # loadConfig, the same schema every boot pays. The lineage
-            # declaration rides along: a rendered memoryUrl without
-            # app=zenigata and initiator=agent — the declaration whose
-            # absence re-derives or refuses every observation write at the
-            # daemon's lineage gate — fails here as it fails the module's
-            # own assertion. The deployed deployment's real values are its
+            # own environment file, parsing that file's plain KEY=VALUE
+            # form only — a subset of the EnvironmentFile reader systemd
+            # runs at boot, and the form the test file carries — and runs
+            # the composition through loadConfig, the same schema every
+            # boot pays. The lineage declaration rides along, and this
+            # check is the only enforcement `app=zenigata` has: the
+            # module's own assertion pins the initiator=agent infix alone,
+            # and this check's eval never evaluates the module's
+            # assertions. The deployed deployment's real values are its
             # own tree's business.
             zenigata-rendered-config =
               let

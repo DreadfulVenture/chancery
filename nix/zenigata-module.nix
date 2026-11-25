@@ -30,11 +30,11 @@ let
   # directory grants from the path the service actually writes.
   stateDirName = lib.last (lib.splitString "/" cfg.stateDir);
 
-  # A forge account name — the login charset the forge itself admits
-  # (letters, digits, dot, underscore, hyphen, starting with a letter or
-  # digit). The runtime re-checks the same shape on the rendered variable;
-  # this type rejects a malformed entry where the deployment authors it,
-  # which is also where the comma the CSV join cannot carry fails.
+  # A conservative forge account name: letters, digits, dot, underscore,
+  # hyphen, starting with a letter or digit. The runtime re-checks the
+  # same shape on the rendered variable; this type rejects a malformed
+  # entry where the deployment authors it, which is also where the comma
+  # the CSV join cannot carry fails.
   accountName = types.strMatching "[A-Za-z0-9][A-Za-z0-9._-]*";
 
   package = pkgs.callPackage ../review/zenigata/package.nix { };

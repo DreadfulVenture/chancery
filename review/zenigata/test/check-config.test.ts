@@ -65,7 +65,15 @@ describe("checkRenderedConfig", () => {
       want,
     });
     expect(result.failures).toHaveLength(1);
+    // The consequence the message states is the gate's real one: an
+    // unseen conversation classifies 'absent' rather than the
+    // agent-lineage class, and the observation grant is the same either
+    // way — not a refused or re-derived observation write.
     expect(result.failures[0]).toContain("initiator=agent");
+    expect(result.failures[0]).toContain("class 'absent'");
+    expect(result.failures[0]).toContain(
+      "observation grant itself is the same",
+    );
   });
 
   it("refuses a memory URL that does not name the bot's client", () => {
