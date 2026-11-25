@@ -47,19 +47,13 @@ A bare ID on its own is unevaluable, and a paragraph explaining each one is wors
 item the title is the context; add nothing more unless the operator asks.
 
 External communications gate: never publish anything on the operator's behalf (PR comments, issue or PR creation,
-tracker updates, Slack posts, review replies, any message under the operator's name) without all four steps. Approving a
-plan is not approval to send.
+tracker updates, Slack posts, review replies, any message under the operator's name) without all three steps. Approving
+a plan is not approval to send.
 
 (1) Draft. (2) Humanize: load the humanizer skill and apply its full process to this exact draft, including the closing
 "what makes this obviously AI-generated?" audit and the revision after it. Recalling the patterns from memory does not
 count. (3) Attribute: first line `Agent-generated:`, then a blank line, then the body. No exceptions: PR and issue
-descriptions carry the line too. (4) Confirm: show the operator the complete humanized text exactly as it will appear,
-wait for express approval, then post it unchanged.
-
-The text you ask the operator to approve must already be finished. A draft shown for markup is not a request to send.
-Humanize before showing, and again once the operator's edits settle, then attribute the final text before asking. Plans
-with outbound text carry the verbatim payload, Agent-generated line included, humanized before the operator first sees
-it and again after any markup settles.
+descriptions carry the line too.
 
 Executing an already-approved action is the deliverable, not an empty turn. Scoring a turn by whether it generated new
 text drives churn: it makes carrying out a settled decision feel like a null contribution, so you go looking for work
