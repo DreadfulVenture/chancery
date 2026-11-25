@@ -239,6 +239,11 @@ interface SessionDomain {
     text: string;
     description?: string;
     metadata?: Record<string, unknown>;
+    // PRJ-534: the persistence flag the host gates the wake on
+    // (resume !== false wakes, packages/core/src/session/session.ts:286-310
+    // at v2.3.0); the reminder's persistence carries resume:false so a
+    // stored reminder never wakes the session — no empty turns.
+    resume?: boolean;
   }): Promise<unknown>;
   // director_sessions and the worktree removal's live-session check
   // require the enumeration surface and fail named when it is absent.
@@ -366,8 +371,16 @@ interface HostContext {
       callback: (editor: { add: (tool: ToolDefinition) => void }) => unknown,
     ): Promise<{ dispose?: () => unknown } | undefined>;
   };
+  // The promise adapter's event surface (packages/plugin/src/promise/
+  // adapter.ts:331-335 at v2.3.0): an AsyncIterable over the host's event
+  // stream, with an optional server-side types filter. The mail pump rides
+  // it unfiltered with an abort signal; the reminder's persistence leg
+  // rides it types-filtered, the way plan.ts's subscription does.
   event: {
-    subscribe(input: { signal: AbortSignal }): AsyncIterable<HostEvent>;
+    subscribe(input?: {
+      signal?: AbortSignal;
+      types?: string[];
+    }): AsyncIterable<HostEvent>;
   };
   agent?: AgentDomain;
   skill?: SkillDomain;
@@ -1408,37 +1421,96 @@ const readSchema = {
 // It is a reminder, not a block: coordination bookkeeping in the director
 // session (manifests, report reading, PR text) stays legitimate work there.
 //
-// The mechanism (PRJ-529): a ctx.session.hook("context") registration
-// splices the reminder onto the model request's message list in memory at
-// assembly time — no host synthetic is stored, nothing is admitted to the
-// inbox, no session wakes, nothing renders in the timeline.
+// The mechanism (PRJ-534): the built-in plan plugin's reminder mechanism,
+// mirrored against packages/core/src/plugin/plan.ts at v2.3.0. Two legs:
 //
-// Provenance, stated so the mechanism's own history is honest: the shape
-// and registration here were verified against the host core at the
-// installed v2.2.5, not copied. The discovery-reminder writ was read for
-// the idea only — its returned "session.context" map is not a registration
-// the promise adapter honors (packages/plugin/src/promise/adapter.ts at
-// v2.2.5 reads setup's return value as nothing but a cleanup function), so
-// that writ has registered nothing through it, and its in-memory splice
-// shape was never live-proven. This module's splice is the proof: it
-// registers the way the host's own plan-mode reminder does
-// (packages/core/src/plugin/plan.ts at v2.2.5, Message.user spliced via
-// event.messages) and reads the event's real message shape — the LLM
-// transcript {role, content, id?} form toLLMMessages builds
-// (packages/core/src/session/runner/to-llm-message.ts at v2.2.5), not the
-// stored {type, text} row form.
+// - Persistence. An event subscription over session.created and
+//   session.agent.selected stores the enter reminder as a host synthetic
+//   with resume:false (the host admits the synthetic and gates the wake on
+//   resume !== false, packages/core/src/session/session.ts:286-310 at
+//   v2.3.0; the promise adapter's synthetic endpoint carries the flag, in
+//   the protocol's session.synthetic request schema). A stored reminder
+//   rides the transcript into every model window with no wake and no empty
+//   turn — the transcript carries it, not the hook.
+// - Reconcile. The context hook — the host's model-request assembly hook —
+//   re-checks the window per model call and splices what the window lost
+//   (compaction and committed reverts can strip reminders while the
+//   session's agent stays put): the enter reminder when the agent is the
+//   director and the window lacks it, a leave line when the agent moved
+//   off the director and the window still holds it. What it splices, it
+//   persists the same way, so the splice survives the next window too.
+//   plan.ts's reconcile is this same hook, with the same position rule:
+//   before a user-role tail, else appended at the window's end.
 //
-// Reach, stated as the guards make it: the splice fires on request
-// assemblies whose window ends in a user-role message — the first model
-// call of a prompt turn, and wake assemblies whose admitted input rides as
-// user text. A continuation step after tool results ends in a tool- or
-// assistant-role tail and carries no reminder. Nothing persists, so the
-// exact-text dedupe guards a double splice within one assembly and against
-// copies the old persisting mechanism left in stored history — not across
-// turns, where each assembly starts from storage without the reminder.
+// Provenance, stated so the mechanism's own history is honest: PRJ-529's
+// splice-only era assumed the context hook never fired for a scanned
+// promise-adapter plugin — the deployed 2.3.0 host disproves that. Live
+// probes at the deployed binary (2026-11-25): a minimal probe plugin's
+// context registration fired twice per turn, and this module's splice
+// delivered correctly in a fresh location under the director agent
+// (an observer hook registered after it read the reminder back out of the
+// assembled window). Prompt and context hooks share one registry and one
+// trigger path; plugin hook registrations persist on the plugin
+// activation's scope, not a per-request one. What the probes leave open:
+// the live TUI director session's delivery gap is real (the model's own
+// turn report confirmed its windows lacked the reminder after the serve
+// restart) but unexplained — its registration state lives in the serve's
+// memory, unreadable from outside. The persistence leg is what makes
+// delivery independent of that state: the reminder is in the transcript
+// before any hook must fire, and the reconcile only covers windows that
+// lost it. The splice-era deduction-by-exact-text is retired with the
+// era: the reconcile's scan of the window is the dedupe, exactly plan.ts's
+// lastReminder — any user-role message whose one text part is the enter
+// or leave text counts, copies the old persisting mechanism left in
+// stored history included, with no special-casing.
 const REMINDER = `<system-reminder>
 Director session: the lane is coordination. Slice the objective and hand each slice to a worker — dispatch (director_dispatch), steer (director_steer), verify the worker's claims yourself from the worktree and command output, ship under the standing grant, report. Edits in this session are for coordination bookkeeping only (manifests, worker-report reading, PR text); verification reads and gate runs are yours, implementation edits are not — put the work in a worker's hands.
 </system-reminder>`;
+
+// The stale-reconcile's neutralizing line, plan.ts's leave as the model:
+// the reminder text is addressed to the director lane, so a window that
+// still carries it after the session's agent moved off the director gets
+// this line spliced and persisted in its place.
+const LEAVE = `<system-reminder>
+You are no longer the director lane's coordinator. The previous delegation reminder no longer applies: nothing here asks you to dispatch or steer workers, and the session's edit restrictions tied to that reminder are lifted.
+</system-reminder>`;
+
+// The reconcile's window scan, plan.ts's lastReminder as the model: the
+// newest reminder in the window, enter or leave, by exact text. The scan
+// is the dedupe — a window carrying either copy counts as carried, and
+// nothing is special-cased by age or origin.
+function lastReminder(
+  messages: Array<{
+    role: string;
+    content: Array<{ type: string; text?: string }>;
+  }>,
+): string | undefined {
+  return messages.reduce<string | undefined>((found, message) => {
+    const part =
+      message.role === "user" && message.content?.length === 1
+        ? message.content[0]
+        : undefined;
+    if (part?.type !== "text") return found;
+    return part.text === REMINDER || part.text === LEAVE ? part.text : found;
+  }, undefined);
+}
+
+// The persistence trigger's reminder choice, plan.ts's switchReminder as
+// the model: the enter reminder on a session created as the director or
+// switched onto the director, the leave line on a switch off it, nothing
+// otherwise.
+function switchReminder(event: HostEvent): string | undefined {
+  const data = event.data ?? {};
+  if (event.type === "session.created") {
+    if (data.agent !== "director") return undefined;
+    return REMINDER;
+  }
+  if (event.type !== "session.agent.selected") return undefined;
+  if (data.agent === data.previous) return undefined;
+  if (data.agent === "director") return REMINDER;
+  if (data.previous === "director") return LEAVE;
+  return undefined;
+}
 
 const setup = async (ctx: HostContext): Promise<() => void> => {
   // The debug switch rides the plugin options (the object-form config
@@ -1657,44 +1729,57 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   // single self-contained file: the mail-watcher package materializes this
   // module verbatim and alone, so nothing the entry imports may live outside
   // its own bytes. Same degrade as the other registrations.
+  //
+  // The reconcile leg: the context hook re-checks the window per model
+  // call and splices what it lost, the way plan.ts's reconcile does. What
+  // it splices it persists with resume:false, so the reminder survives the
+  // next window too. Both the reminder and the leave line ride as
+  // user-role messages in the LLM transcript's {role, content} form —
+  // content as a parts array, the form the request builder consumes. No
+  // id on the spliced message: the host's own splice sets none and
+  // nothing downstream reads ours — the dedupe is by exact text.
   let reminderRegistration: { dispose: () => Promise<void> } | undefined;
   try {
     reminderRegistration =
       (await ctx.session?.hook?.("context", async (context) => {
         try {
-          if (context.agent !== "director") return;
+          const reminder = lastReminder(context.messages);
+          const missing = context.agent === "director" && reminder !== REMINDER;
+          const stale = context.agent !== "director" && reminder === REMINDER;
+          const text = missing ? REMINDER : stale ? LEAVE : undefined;
+          if (!text) return;
 
-          // The dedupe reads the assembled window the way the host's own
-          // plan-mode reminder reads it: a user-role message carrying the
-          // exact reminder text as its one text part.
-          if (
-            context.messages.some(
-              (message) =>
-                message.role === "user" &&
-                message.content.some(
-                  (part) => part.type === "text" && part.text === REMINDER,
-                ),
-            )
-          ) {
-            return;
-          }
-
-          const last = context.messages.at(-1);
-          if (!last || last.role !== "user") return;
-
-          // Before the user's prompt, where the host's plan-mode reminder
-          // splices (packages/core/src/plugin/plan.ts at v2.2.5): the
-          // reminder never becomes the turn's last user message, the
-          // position the deployed provider's user-turn classification
-          // judges. The shape is the LLM transcript's {role, content} form
-          // — content as a parts array, the form toLLMMessages emits and
-          // the request builder consumes. No id: the host's own splice sets
-          // none and nothing downstream reads ours — the dedupe is by
-          // exact text.
-          context.messages.splice(context.messages.length - 1, 0, {
+          // plan.ts's position rule: before the user's prompt when the
+          // window ends in one, else appended at the window's end (a
+          // continuation step after tool results). The splice shape is the
+          // LLM transcript's {role, content} form — content as a parts
+          // array, the form toLLMMessages emits and the request builder
+          // consumes.
+          const at =
+            context.messages.at(-1)?.role === "user"
+              ? context.messages.length - 1
+              : context.messages.length;
+          context.messages.splice(at, 0, {
             role: "user",
-            content: [{ type: "text", text: REMINDER }],
+            content: [{ type: "text", text }],
           });
+
+          // Persist what was spliced, resume:false — the transcript
+          // carries it into the next window without a wake (the host
+          // gates the wake on resume !== false). Its own catch: the
+          // splice already landed in this window; a failed store must
+          // not turn the reconciled window into a failed request.
+          try {
+            await ctx.session?.synthetic?.({
+              sessionID: context.sessionID,
+              text,
+              resume: false,
+            });
+          } catch (error) {
+            console.error(
+              `[director] reminder persistence for ${context.sessionID} failed: ${error}. This window keeps the spliced copy.`,
+            );
+          }
         } catch (error) {
           // The hook runs awaited inside the host's request preparation, so
           // a throw escaping the callback fails the preparation and the
@@ -1708,6 +1793,49 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       })) ?? undefined;
   } catch (error) {
     console.error(`[director] reminder registration skipped: ${error}`);
+  }
+
+  // The persistence leg: the enter reminder (and the leave line on a
+  // switch off the director) stored as a synthetic with resume:false the
+  // moment the lane changes, so the transcript carries the reminder into
+  // every window before any hook must fire. plan.ts subscribes the same
+  // two event types; the promise adapter hands the subscription over as
+  // an AsyncIterable, with the types filter applied host-side. A
+  // degradation, like every registration here: without the event surface
+  // the reconcile leg alone stands, and the load does not fail. The
+  // stream ends on the cleanup's abort (and the adapter closes its async
+  // iterators on the plugin scope at unload regardless), so the loop
+  // needs no other teardown; its whole lifetime is this setup's.
+  let reminderController: AbortController | undefined;
+  if (typeof ctx.event?.subscribe === "function") {
+    reminderController = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe!({
+        signal: reminderController!.signal,
+        types: ["session.created", "session.agent.selected"],
+      })) {
+        const text = switchReminder(event);
+        if (!text) continue;
+        const sessionID = event.data?.sessionID;
+        if (!sessionID) continue;
+        // Per-event isolation, the pump's rule: one session's failed
+        // store must not end the loop — later switches would ride
+        // reminder-less forever.
+        try {
+          await ctx.session?.synthetic?.({
+            sessionID,
+            text,
+            resume: false,
+          });
+        } catch (error) {
+          console.error(
+            `[director] reminder persistence for ${sessionID} failed: ${error}.`,
+          );
+        }
+      }
+    })().catch((error: unknown) => {
+      console.error(`[director] reminder persistence stream failed: ${error}`);
+    });
   }
 
   // Children this activation delivers for, and the text buffered toward the
@@ -3559,6 +3687,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   return () => {
     controller.abort();
+    reminderController?.abort();
     void Promise.resolve(registration?.dispose?.());
     void Promise.resolve(hookRegistration?.dispose?.());
     void Promise.resolve(reminderRegistration?.dispose?.());

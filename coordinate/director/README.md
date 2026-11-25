@@ -12,11 +12,12 @@ The module (`director.ts`) is the server part and has no npm dependencies — no
 the mail-watcher imports; one envelope definition for the family, never a fork. The files it reads at load time resolve
 beside itself, so the packaged layout mirrors the source layout: `agent/`, `skills/`, `commands/` at the artifact root.
 The entry's setup also registers the per-turn delegation reminder (PRJ-519), inline in the entry so the folder ships no
-second module file: one synthetic reminder per live activation per prompt turn, for director sessions only. During a
-location-reload window each live activation persists its own copy, bounded by teardown — the same window the suite's
-"overlapping activations holding different buffers send one mail per terminal event" test models, and the plan reminder
-ships unguarded the same way. The copies accumulate across a long arc, verbatim and unpruned (compaction keeps
-synthetics whole), the same accepted cost family as the wake notices, at per-turn frequency.
+second module file. The mechanism is the built-in plan plugin's: the reminder is stored as a host synthetic with
+`resume: false` the moment a session is created as the director or switched onto it, so the transcript carries it into
+every model window with no wake and no empty turn, and the model-request assembly hook re-checks each window and splices
+(and re-stores) what compaction stripped — or a leave line, when the session's agent moved off the director. Two
+activations that both see a lane change each persist their own copy; the reconcile's exact-text scan of the window
+treats any copy as carried, the same unguarded shape the plan reminder ships with.
 
 ## Install
 
