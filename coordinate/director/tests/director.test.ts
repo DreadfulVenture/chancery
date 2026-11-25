@@ -3781,7 +3781,118 @@ test("worktree_remove without a session.list checks the tracked session instead,
   }
 });
 
-test("worktree_remove refuses when the live-session walk truncates: a partial check is no check", async () => {
+test("worktree_remove walks past the old 10-page cap: a live session parked late refuses named", async () => {
+  const repo = await seedRepo();
+  const path = sibling(repo, "wt-u");
+  try {
+    const fixture = fakeContext([], { directory: repo });
+    const cleanup = await plugin.setup(fixture.ctx);
+    try {
+      await runTool(fixture, "worktree_add", {
+        path,
+        branch: "feat/u",
+        base: "main",
+      });
+      // Twelve pages: filler sessions on every page the old 10-page walk
+      // could reach, and the live session parked on page 10. The walk must
+      // exhaust the list and refuse naming that session — the old code
+      // stopped with a cursor pending and refused on the truncation
+      // instead, having seen neither the session nor the cursor (PRJ-472's
+      // live occurrence).
+      let calls = 0;
+      fixture.ctx.session.list = async (input?: { cursor?: string }) => {
+        const page = input?.cursor === undefined ? 0 : Number(input.cursor);
+        calls += 1;
+        return {
+          data:
+            page === 10
+              ? [
+                  {
+                    id: "ses-late-worker",
+                    agent: "build",
+                    location: { directory: path },
+                    time: { created: 1, updated: 2 },
+                  },
+                ]
+              : [
+                  {
+                    id: `ses-filler-${page}`,
+                    agent: "build",
+                    location: { directory: `/tmp/worktree-filler-${page}` },
+                    time: { created: 1, updated: 1, idle: 2 },
+                  },
+                ],
+          cursor: page < 11 ? { next: String(page + 1) } : {},
+        };
+      };
+      await assert.rejects(
+        runTool(fixture, "worktree_remove", { path }),
+        (error: Error) => {
+          assert.match(error.message, /1 live session/);
+          assert.match(error.message, /ses-late-worker/);
+          // The refusal names the session the walk saw, not the bound:
+          // the whole list was read.
+          assert.ok(!error.message.includes("partial session list"));
+          return true;
+        },
+      );
+      assert.equal(calls, 12);
+      assert.equal(trackedWorktrees(fixture).length, 1);
+      assert.ok(existsSync(path));
+    } finally {
+      await cleanup?.();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("worktree_remove proceeds when the exhausted walk carries no live session in any late page", async () => {
+  const repo = await seedRepo();
+  const path = sibling(repo, "wt-v");
+  try {
+    const fixture = fakeContext([], { directory: repo });
+    const cleanup = await plugin.setup(fixture.ctx);
+    try {
+      await runTool(fixture, "worktree_add", {
+        path,
+        branch: "feat/v",
+        base: "main",
+      });
+      // Twelve pages of filler sessions, none of them in the tree: the
+      // walk drains the whole cursor chain and removal goes.
+      let calls = 0;
+      fixture.ctx.session.list = async (input?: { cursor?: string }) => {
+        const page = input?.cursor === undefined ? 0 : Number(input.cursor);
+        calls += 1;
+        return {
+          data: [
+            {
+              id: `ses-filler-${page}`,
+              agent: "build",
+              location: { directory: `/tmp/worktree-filler-${page}` },
+              time: { created: 1, updated: 1, idle: 2 },
+            },
+          ],
+          cursor: page < 11 ? { next: String(page + 1) } : {},
+        };
+      };
+      const removed = await runTool(fixture, "worktree_remove", { path });
+      assert.equal(removed.ok, true);
+      assert.equal(removed.removed, path);
+      assert.equal(removed.liveSessionCheck, "list");
+      // The walk ran past the old 10-page cap and drained the cursor.
+      assert.equal(calls, 12);
+      assert.equal(trackedWorktrees(fixture).length, 0);
+    } finally {
+      await cleanup?.();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("worktree_remove refuses when the walk never exhausts, failing named at the bound", async () => {
   const repo = await seedRepo();
   const path = sibling(repo, "wt-t");
   try {
@@ -3793,8 +3904,10 @@ test("worktree_remove refuses when the live-session walk truncates: a partial ch
         branch: "feat/t",
         base: "main",
       });
-      // A list that always serves a cursor: the walk hits its cap with
-      // sessions unseen, and removal refuses named — nothing was removed.
+      // A pathological host: every page serves an empty page and another
+      // cursor. The walk runs to its bound and the removal refuses named —
+      // the check never acts on a partial session list (PRJ-393 review
+      // 225's shape, carried to the session walk by PRJ-472).
       fixture.ctx.session.list = async () => ({
         data: [],
         cursor: { next: "cursor-never-ends" },
@@ -3802,8 +3915,14 @@ test("worktree_remove refuses when the live-session walk truncates: a partial ch
       await assert.rejects(
         runTool(fixture, "worktree_remove", { path }),
         (error: Error) => {
-          assert.match(error.message, /live-session walk hit its 10-page cap/);
-          assert.match(error.message, /check is incomplete/);
+          assert.match(
+            error.message,
+            /did not exhaust within the 10000-page cap/,
+          );
+          assert.match(
+            error.message,
+            /refusing to act on a partial session list/,
+          );
           return true;
         },
       );

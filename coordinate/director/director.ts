@@ -891,6 +891,18 @@ async function scanRows(
 // pruned and capped, so truncation there is a bounded, stated condition.
 const MANIFEST_SCAN_PAGE_CAP = 10000;
 
+// PRJ-472: worktree_remove's live-session check never acts on a partial
+// session list either. The check exists because a live session in the
+// tree must stop the removal, so a walk that stopped at a page cap with
+// a cursor pending is not a safe refusal: it is the check failing while
+// looking like one (2026-11-21: two removals refused because the host's
+// session list had outgrown 10 pages). Its walk goes to exhaustion like
+// the manifest's scans, with the page cap as the loop bound, and a host
+// still serving cursors past the bound fails named. director_sessions
+// keeps its stopping walk: honest truncation is the right shape for
+// discovery, which claims nothing by what it reached.
+const LIVE_SESSION_PAGE_CAP = 10000;
+
 async function scanEveryRow(
   storage: StorageDomain,
   prefix: string,
@@ -2513,21 +2525,22 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     const blocking = (info: any): boolean =>
       stateOf(info) === "busy" || epoch(info?.time?.idle) === undefined;
     if (typeof ctx.session?.list === "function") {
+      // Walk to exhaustion (PRJ-472): the cap bounds the loop, it never
+      // stops it — a live session in an unseen page is the exact danger
+      // the check exists for. A host that keeps serving cursors past the
+      // bound fails the call named, like scanEveryRow.
       let cursor: string | undefined;
       const rows: any[] = [];
-      for (let page = 0; page < SESSION_PAGE_CAP; page += 1) {
+      for (let page = 0; page < LIVE_SESSION_PAGE_CAP; page += 1) {
         const listed = await ctx.session.list(cursor ? { cursor } : undefined);
         const pageRows = Array.isArray(listed) ? listed : (listed?.data ?? []);
         rows.push(...pageRows);
         cursor = Array.isArray(listed) ? undefined : listed?.cursor?.next;
         if (!cursor) break;
       }
-      // A walk still holding a cursor at the cap saw only part of the
-      // host's sessions, so the check is incomplete: removal refuses
-      // named rather than proceed on a partial claim set.
       if (cursor)
         throw new Error(
-          `the live-session walk hit its ${SESSION_PAGE_CAP}-page cap with a cursor pending; the check is incomplete and removal refuses until the host's session list is walkable`,
+          `the live-session walk did not exhaust within the ${LIVE_SESSION_PAGE_CAP}-page cap; refusing to act on a partial session list`,
         );
       const found: Array<{
         sessionID: string;
