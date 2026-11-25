@@ -628,7 +628,11 @@ test("the re-assert registers one late transform, on the first prompt only, and 
   await fixture.fireHook("prompt", { sessionID: "ses-c", messageID: "msg-3" });
   assert.equal(fixture.agentTransforms.length, afterFirst);
   await cleanup?.();
-  assert.deepEqual(fixture.hookDisposals, ["prompt"]);
+  assert.deepEqual(
+    fixture.hookDisposals,
+    ["prompt", "prompt"],
+    "the re-assert prompt hook and the delegation reminder's prompt hook both dispose with teardown",
+  );
 });
 
 test("a prompt firing while a first re-assert is still in flight registers exactly one late transform", async () => {

@@ -1177,6 +1177,21 @@ const readSchema = {
   additionalProperties: false,
 };
 
+// The per-turn delegation reminder (PRJ-519): agents holding the director
+// lane forget to hand work off and start implementing in their own session.
+// The mechanism is the plan reminder's: a per-turn prompt hook persists one
+// synthetic through ctx.session.synthetic — a user-role message at the
+// prompt tail, out of the memory plugin's capture paths. It is a reminder,
+// not a block: coordination bookkeeping in the director session (manifests,
+// report reading, PR text) stays legitimate work there. The accumulation
+// cost is stated, not bounded: compaction keeps synthetics verbatim (the
+// note beside the report budget), so a long arc stacks one copy per turn
+// and nothing prunes — the wake notices' accepted cost family, at per-turn
+// frequency.
+const REMINDER = `<system-reminder>
+Director session: the lane is coordination. Slice the objective and hand each slice to a worker — dispatch (director_dispatch), steer (director_steer), verify the worker's claims yourself from the worktree and command output, ship under the standing grant, report. Edits in this session are for coordination bookkeeping only (manifests, worker-report reading, PR text); verification reads and gate runs are yours, implementation edits are not — put the work in a worker's hands.
+</system-reminder>`;
+
 const setup = async (ctx: HostContext): Promise<() => void> => {
   // The debug switch rides the plugin options (the object-form config
   // entry); a discovered plugin carries none, so it defaults off. The
@@ -1388,6 +1403,42 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     console.error(
       `[director] permission re-assert registration skipped: ${error}`,
     );
+  }
+
+  // The per-turn delegation reminder (PRJ-519), inline so the entry stays a
+  // single self-contained file: the mail-watcher package materializes this
+  // module verbatim and alone, so nothing the entry imports may live outside
+  // its own bytes. Same degrade as the other registrations.
+  let reminderRegistration: { dispose: () => Promise<void> } | undefined;
+  try {
+    reminderRegistration =
+      (await ctx.session?.hook?.("prompt", async (event) => {
+        // An unreadable session is not a director session: a row the read
+        // cannot resolve carries nothing to scope on.
+        let readable: { agent?: string } | undefined;
+        try {
+          readable = await ctx.session.get({ sessionID: event.sessionID });
+        } catch {
+          return;
+        }
+        if (readable?.agent !== "director") return;
+        try {
+          await ctx.session.synthetic({
+            sessionID: event.sessionID,
+            text: REMINDER,
+          });
+        } catch (error) {
+          // The hook runs awaited inside the host's prompt path, so a send
+          // failure must not take the turn down — the reminder's whole
+          // contract is to be ignorable. Same shape as the wake notice's
+          // catch: the turn proceeds reminder-less, the failure named once.
+          console.error(
+            `[director] reminder to ${event.sessionID} failed: ${error}. The turn proceeds without it.`,
+          );
+        }
+      })) ?? undefined;
+  } catch (error) {
+    console.error(`[director] reminder registration skipped: ${error}`);
   }
 
   // Children this activation delivers for, and the text buffered toward the
@@ -3137,6 +3188,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     controller.abort();
     void Promise.resolve(registration?.dispose?.());
     void Promise.resolve(hookRegistration?.dispose?.());
+    void Promise.resolve(reminderRegistration?.dispose?.());
   };
 };
 

@@ -11,6 +11,12 @@ The coordination plugin for OpenCode: one folder that gives a director session i
 The module (`director.ts`) is the server part and has no npm dependencies — node builtins only. It is also the mail leg
 the mail-watcher imports; one envelope definition for the family, never a fork. The files it reads at load time resolve
 beside itself, so the packaged layout mirrors the source layout: `agent/`, `skills/`, `commands/` at the artifact root.
+The entry's setup also registers the per-turn delegation reminder (PRJ-519), inline in the entry so the folder ships no
+second module file: one synthetic reminder per live activation per prompt turn, for director sessions only. During a
+location-reload window each live activation persists its own copy, bounded by teardown — the same window the suite's
+"overlapping activations holding different buffers send one mail per terminal event" test models, and the plan reminder
+ships unguarded the same way. The copies accumulate across a long arc, verbatim and unpruned (compaction keeps
+synthetics whole), the same accepted cost family as the wake notices, at per-turn frequency.
 
 ## Install
 
