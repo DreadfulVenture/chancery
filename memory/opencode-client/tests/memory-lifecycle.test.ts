@@ -455,3 +455,59 @@ test("origin lineage: the coordinator stamp alone keeps the coalescing key and r
     },
   );
 });
+
+test("origin lineage: the record's parent trims like the driven pointer, and a blank parent is absent", async () => {
+  await withDaemon(
+    () => SILENT,
+    async ({ fire, sessionHooks, sessions }) => {
+      // A padded-but-real parent registers with the trimmed id — the
+      // same trust step the driven path applies to its external
+      // pointer: trim, then accept only what is usable.
+      sessions.set("s-padded", {
+        metadata: {
+          chancery_origin: { initiator: "program", parent: "  ses-outer  " },
+        },
+      });
+      await fire(sessionHooks, "prompt", {
+        sessionID: "s-padded",
+        prompt: { text: "the padded declaration's first turn" },
+      });
+      const padded = queued().find((line) => line.kind === "session");
+      assert.ok(padded, "the padded record registered its lineage");
+      assert.equal(padded.conversation_id, "s-padded");
+      assert.equal(padded.parent_conversation_id, "ses-outer");
+      const paddedCapture = queued().find(
+        (line) => line.role === "user" && line.conversation_id === "s-padded",
+      );
+      assert.ok(paddedCapture, "the declared capture proceeds");
+      assert.equal(paddedCapture.initiator, "agent");
+
+      // A whitespace parent names no session: blank after the trim is
+      // absent, exactly like a half-written record — nothing registers
+      // and the capture keeps the human default (review 580, count
+      // 18519).
+      sessions.set("s-blank", {
+        metadata: {
+          chancery_origin: { initiator: "program", parent: "   " },
+        },
+      });
+      await fire(sessionHooks, "prompt", {
+        sessionID: "s-blank",
+        prompt: { text: "a turn whose parent never names a session" },
+      });
+      assert.equal(
+        queued().find(
+          (line) =>
+            line.kind === "session" && line.conversation_id === "s-blank",
+        ),
+        undefined,
+        "a blank parent cannot invent a parent link",
+      );
+      const blankCapture = queued().find(
+        (line) => line.role === "user" && line.conversation_id === "s-blank",
+      );
+      assert.ok(blankCapture, "capture proceeds as before");
+      assert.equal(blankCapture.initiator, "human");
+    },
+  );
+});

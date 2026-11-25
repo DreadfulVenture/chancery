@@ -3,7 +3,8 @@
 - **Status**: Draft
 - **Provenance**:
   - Authored: agent (design decided with the operator across the 2026-11-24 review-bot re-think)
-  - Edited: the operator (supplied the `chancery_origin` key name and §4's downgrade-bias rationale, 2026-11-24)
+  - Edited: the operator (supplied the `chancery_origin` key name and §4's downgrade-bias rationale, 2026-11-24), and
+    zenigata review 580's count 18520, directed into the gaps section by the operator (2026-11-24)
   - Approved: none
 
 ## Problem
@@ -94,3 +95,7 @@ One origin signal, on the opencode-native surface, per the operator's ruling of 
   territory.
 - The human side of the signal assumes the interactive client (TUI) remains the only human-joining path that creates
   root sessions. The provenance ADR convention applies to follow-on records.
+- A worker dispatched before the client update carries a director stamp with no origin record; prompting it after the
+  client deploys registers nothing, and that straddling worker captures as human voice. The director module and the
+  memory client ship from one repo, so a deploy carrying them together leaves only the workers straddling that deploy in
+  the window — a recorded choice (zenigata review 580, count 18520).

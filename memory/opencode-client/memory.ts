@@ -412,10 +412,13 @@ const createCore = ({
   // client, the signal's one mapping point.
   const ORIGIN_STAMP = "chancery_origin";
   // The origin record parsed, or null — undeclared. A value that does
-  // not parse exactly (an initiator outside the vocabulary, or a missing
-  // or empty parent) reads as undeclared, never as programmatic:
-  // absence is the human default, so a half-written record or an
-  // unrelated stamp under a different key cannot invent a parent link.
+  // not parse exactly (an initiator outside the vocabulary, or a parent
+  // that is missing, or blank after trimming) reads as undeclared,
+  // never as programmatic: absence is the human default, so a half-
+  // written record or an unrelated stamp under a different key cannot
+  // invent a parent link. The parent trims before it is trusted, the
+  // way the driven path trims its external pointer: only a usable,
+  // trimmed id registers or declares a parent.
   type OriginRecord = { initiator: "human" | "program"; parent: string };
   const originRecordOf = (raw: unknown): OriginRecord | null => {
     if (typeof raw !== "object" || raw === null) return null;
@@ -423,9 +426,9 @@ const createCore = ({
     if (
       (value.initiator === "human" || value.initiator === "program") &&
       typeof value.parent === "string" &&
-      value.parent
+      value.parent.trim()
     ) {
-      return { initiator: value.initiator, parent: value.parent };
+      return { initiator: value.initiator, parent: value.parent.trim() };
     }
     return null;
   };
