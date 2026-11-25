@@ -4638,25 +4638,21 @@ test("worker_status renders usage under the threshold too, and omits it when the
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
   try {
-    const dispatched = await dispatchWorker(fixture, {
-      directory: "/tmp/worktree-a",
-      brief: "do the slice work",
-    });
     const status = fixture.tools.get("director_worker_status")!;
-    const statusOf = async () =>
+    const statusOf = async (sessionID: string) =>
       JSON.parse(
-        (
-          await status.execute(
-            { sessionID: dispatched.sessionID },
-            { sessionID: "ses-director" },
-          )
-        ).content,
+        (await status.execute({ sessionID }, { sessionID: "ses-director" }))
+          .content,
       );
 
     // Under the threshold: the number still shows. The threshold gates
     // only the notice clause, never the status fields.
+    const under = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
     fixture.messages.set(
-      dispatched.sessionID,
+      under.sessionID,
       usageTranscript({
         input: 25_000,
         output: 2_000,
@@ -4668,22 +4664,35 @@ test("worker_status renders usage under the threshold too, and omits it when the
       ...usageModel,
       limit: { context: 200_000, output: 32_000 },
     });
-    let row = await statusOf();
+    const row = await statusOf(under.sessionID);
     assert.equal(row.contextTokens, 30_000);
     assert.equal(row.contextWindow, 200_000);
     assert.ok(Math.abs(row.contextShare - 0.15) < 1e-12);
 
+    // Each read that finds nothing below gets a fresh session: the
+    // restart fallback is one transcript read per session, so a later
+    // read on the same session would replay the recorded sample, not
+    // the transcript.
+
     // No tokened assistant anchor (user turns only): no fields.
-    fixture.messages.set(dispatched.sessionID, [
+    const userOnly = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.messages.set(userOnly.sessionID, [
       { type: "user", text: "do the slice work" },
     ]);
-    row = await statusOf();
-    assert.equal(row.contextTokens, undefined);
-    assert.equal(row.contextWindow, undefined);
-    assert.equal(row.contextShare, undefined);
+    const userOnlyRow = await statusOf(userOnly.sessionID);
+    assert.equal(userOnlyRow.contextTokens, undefined);
+    assert.equal(userOnlyRow.contextWindow, undefined);
+    assert.equal(userOnlyRow.contextShare, undefined);
 
     // No tokened assistant anchor (an error turn last): no fields.
-    fixture.messages.set(dispatched.sessionID, [
+    const errored = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.messages.set(errored.sessionID, [
       {
         type: "assistant",
         error: { code: "provider_error" },
@@ -4696,29 +4705,20 @@ test("worker_status renders usage under the threshold too, and omits it when the
         },
       },
     ]);
-    row = await statusOf();
-    assert.equal(row.contextTokens, undefined);
-
-    // The anchor's model is not in the catalog: no fields.
-    fixture.messages.set(
-      dispatched.sessionID,
-      usageTranscript({
-        input: 25_000,
-        output: 2_000,
-        reasoning: 500,
-        cache: { read: 2_000, write: 500 },
-      }),
-    );
-    fixture.models.length = 0;
-    row = await statusOf();
-    assert.equal(row.contextTokens, undefined);
+    const erroredRow = await statusOf(errored.sessionID);
+    assert.equal(erroredRow.contextTokens, undefined);
 
     // A `tokens: null` row rides the deployed schema's unmeasured
     // encoding, not a zero-token turn: skipped as the anchor without a
     // throw, and the older tokened turn beneath it still anchors the
     // read.
+    const nullTokens = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.models.length = 0;
     fixture.models.push(usageModel);
-    fixture.messages.set(dispatched.sessionID, [
+    fixture.messages.set(nullTokens.sessionID, [
       ...usageTranscript({
         input: 25_000,
         output: 2_000,
@@ -4732,9 +4732,27 @@ test("worker_status renders usage under the threshold too, and omits it when the
         tokens: null,
       },
     ]);
-    row = await statusOf();
-    assert.equal(row.contextTokens, 30_000);
-    assert.equal(row.contextWindow, 180_000);
+    const nullTokensRow = await statusOf(nullTokens.sessionID);
+    assert.equal(nullTokensRow.contextTokens, 30_000);
+    assert.equal(nullTokensRow.contextWindow, 180_000);
+
+    // The anchor's model is not in the catalog: no fields.
+    const uncataloged = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.messages.set(
+      uncataloged.sessionID,
+      usageTranscript({
+        input: 25_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 2_000, write: 500 },
+      }),
+    );
+    fixture.models.length = 0;
+    const uncatalogedRow = await statusOf(uncataloged.sessionID);
+    assert.equal(uncatalogedRow.contextTokens, undefined);
   } finally {
     await cleanup?.();
   }
@@ -4744,12 +4762,55 @@ test("worker_status degrades quiet when the usage reads fail", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
   try {
-    const dispatched = await dispatchWorker(fixture, {
+    const status = fixture.tools.get("director_worker_status")!;
+    const statusOf = async (sessionID: string) =>
+      JSON.parse(
+        (await status.execute({ sessionID }, { sessionID: "ses-director" }))
+          .content,
+      );
+    const contextHeld = fixture.ctx.session.context;
+
+    // Each failure gets a fresh session: the restart fallback is one
+    // transcript read per session, so a shared session would spend its
+    // single attempt on the first branch and the later branches would
+    // never reach the read at all.
+
+    // No context surface at all: no fields, no throw.
+    const surfaced = await dispatchWorker(fixture, {
       directory: "/tmp/worktree-a",
       brief: "do the slice work",
     });
+    fixture.ctx.session.context = undefined;
+    const surfacedRow = await statusOf(surfaced.sessionID);
+    assert.equal(surfacedRow.contextTokens, undefined);
+    assert.ok(surfacedRow.watched);
+
+    // The context read throws: no fields, the failure named in the log.
+    const thrown = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.ctx.session.context = async () => {
+      throw new Error("transcript unreadable");
+    };
+    let logs: string[] = [];
+    await captureErrorLogs(async (captured) => {
+      logs = captured;
+      const row = await statusOf(thrown.sessionID);
+      assert.equal(row.contextTokens, undefined);
+    });
+    assert.ok(logs.some((line) => line.includes("transcript unreadable")));
+
+    // The catalog read throws: no fields, the failure named in the log.
+    // The transcript read succeeds here, so the sample is recorded and
+    // the catalog is what fails.
+    const uncataloged = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.ctx.session.context = contextHeld;
     fixture.messages.set(
-      dispatched.sessionID,
+      uncataloged.sessionID,
       usageTranscript({
         input: 90_000,
         output: 2_000,
@@ -4757,48 +4818,15 @@ test("worker_status degrades quiet when the usage reads fail", async () => {
         cache: { read: 20_000, write: 5_000 },
       }),
     );
-    fixture.models.push(usageModel);
-    const status = fixture.tools.get("director_worker_status")!;
-    const statusOf = async () =>
-      JSON.parse(
-        (
-          await status.execute(
-            { sessionID: dispatched.sessionID },
-            { sessionID: "ses-director" },
-          )
-        ).content,
-      );
-
-    // No context surface at all: no fields, no throw.
-    const contextHeld = fixture.ctx.session.context;
-    fixture.ctx.session.context = undefined;
-    let row = await statusOf();
-    assert.equal(row.contextTokens, undefined);
-    assert.ok(row.watched);
-
-    // The context read throws: no fields, the failure named in the log.
-    fixture.ctx.session.context = async () => {
-      throw new Error("transcript unreadable");
-    };
-    let logs: string[] = [];
-    await captureErrorLogs(async (captured) => {
-      logs = captured;
-      row = await statusOf();
-    });
-    assert.equal(row.contextTokens, undefined);
-    assert.ok(logs.some((line) => line.includes("transcript unreadable")));
-
-    // The catalog read throws: no fields, the failure named in the log.
-    fixture.ctx.session.context = contextHeld;
     const listHeld = fixture.ctx.model.list;
     fixture.ctx.model.list = async () => {
       throw new Error("catalog unavailable");
     };
     await captureErrorLogs(async (captured) => {
       logs = captured;
-      row = await statusOf();
+      const row = await statusOf(uncataloged.sessionID);
+      assert.equal(row.contextTokens, undefined);
     });
-    assert.equal(row.contextTokens, undefined);
     assert.ok(logs.some((line) => line.includes("catalog unavailable")));
     fixture.ctx.model.list = listHeld;
   } finally {
@@ -5035,6 +5063,346 @@ test("a failed usage read stays quiet in the wake: the notice goes out unchanged
     assert.ok(logs.some((line) => line.includes("transcript unreadable")));
     // The report itself is stored either way.
     assert.equal(storedRows(fixture).length, 1);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+// PRJ-525: the usage stream. A worker's steps record their tokens as
+// they complete, the reads use the recorded sample, and the transcript
+// is replayed exactly once per session when no sample exists — the
+// shape a host restart leaves.
+
+// A transcript read counter: wraps the fake's context read so a test can
+// assert the stream, not the transcript, is the source.
+const countedContext = (
+  fixture: ReturnType<typeof fakeContext>,
+): { reads: () => number } => {
+  let reads = 0;
+  const held = fixture.ctx.session.context;
+  fixture.ctx.session.context = async (input: { sessionID: string }) => {
+    reads += 1;
+    return held(input);
+  };
+  return { reads: () => reads };
+};
+
+test("step events record the usage; status reads the map without a transcript read", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.models.push({
+      ...usageModel,
+      limit: { context: 200_000, output: 32_000 },
+    });
+    const context = countedContext(fixture);
+
+    await fixture.emit("session.step.started", {
+      sessionID: dispatched.sessionID,
+      model: { providerID: "example-proxy", id: "example-model" },
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: dispatched.sessionID,
+      tokens: {
+        input: 25_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 2_000, write: 500 },
+      },
+    });
+    const status = fixture.tools.get("director_worker_status")!;
+    const row = JSON.parse(
+      (
+        await status.execute(
+          { sessionID: dispatched.sessionID },
+          { sessionID: "ses-director" },
+        )
+      ).content,
+    );
+    assert.equal(row.contextTokens, 30_000);
+    assert.equal(row.contextWindow, 200_000);
+    assert.ok(Math.abs(row.contextShare - 0.15) < 1e-12);
+    // The stream is the source: the transcript was never read.
+    assert.equal(context.reads(), 0);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("the wake notice computes the share from the stream, not the transcript", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    const worker = dispatched.sessionID;
+    fixture.models.push({
+      ...usageModel,
+      limit: { context: 200_000, output: 32_000 },
+    });
+    const context = countedContext(fixture);
+
+    // 130_000 of 200_000: past half, 65% in the clause — recorded by the
+    // steps, before the turn's text and terminal arrive.
+    await fixture.emit("session.step.started", {
+      sessionID: worker,
+      model: { providerID: "example-proxy", id: "example-model" },
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: worker,
+      tokens: {
+        input: 100_000,
+        output: 4_000,
+        reasoning: 1_000,
+        cache: { read: 20_000, write: 5_000 },
+      },
+    });
+    await fixture.emit("session.text.ended", {
+      sessionID: worker,
+      text: "The slice landed.\n\nSTATUS: done",
+    });
+    await fixture.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => fixture.mails.length === 1);
+    const notice = fixture.mails[0];
+    assert.ok(notice.text.includes("1 report unread"));
+    assert.ok(notice.text.includes("65% of its model's window"));
+    assert.ok(notice.text.includes("start its next slice in a fresh session"));
+    // The transcript was never read: the notice computed from the map.
+    assert.equal(context.reads(), 0);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("the restart fallback reads the transcript exactly once, and the stream re-arms", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.models.push(usageModel);
+    // No step events: the plugin holds no sample, the shape a host
+    // restart leaves. The first read replays the transcript.
+    fixture.messages.set(
+      dispatched.sessionID,
+      usageTranscript({
+        input: 90_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 20_000, write: 5_000 },
+      }),
+    );
+    const context = countedContext(fixture);
+    const status = fixture.tools.get("director_worker_status")!;
+    const statusOf = async () =>
+      JSON.parse(
+        (
+          await status.execute(
+            { sessionID: dispatched.sessionID },
+            { sessionID: "ses-director" },
+          )
+        ).content,
+      );
+
+    let row = await statusOf();
+    assert.equal(row.contextTokens, 117_500);
+    assert.equal(row.contextWindow, 180_000);
+
+    // The attempt is spent: a second read replays nothing.
+    row = await statusOf();
+    assert.equal(row.contextTokens, 117_500);
+    assert.equal(context.reads(), 1);
+
+    // The stream re-arms: the next step's sample replaces the fallback's.
+    await fixture.emit("session.step.started", {
+      sessionID: dispatched.sessionID,
+      model: { providerID: "example-proxy", id: "example-model" },
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: dispatched.sessionID,
+      tokens: {
+        input: 25_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 2_000, write: 500 },
+      },
+    });
+    row = await statusOf();
+    assert.equal(row.contextTokens, 30_000);
+    assert.equal(context.reads(), 1);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("usage records only for watched workers", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    // A session the pump never adopted — unstamped, so the adoption
+    // marks it foreign: its step events must leave the map untouched.
+    fixture.sessions.set("ses-untracked", {
+      id: "ses-untracked",
+      title: "not a worker",
+      agent: "build",
+      metadata: {},
+      location: { directory: "/tmp/worktree-a" },
+    });
+    fixture.models.push({
+      ...usageModel,
+      limit: { context: 200_000, output: 32_000 },
+    });
+    const context = countedContext(fixture);
+
+    await fixture.emit("session.step.started", {
+      sessionID: "ses-untracked",
+      model: { providerID: "example-proxy", id: "example-model" },
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: "ses-untracked",
+      tokens: {
+        input: 25_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 2_000, write: 500 },
+      },
+    });
+    const status = fixture.tools.get("director_worker_status")!;
+    const row = JSON.parse(
+      (
+        await status.execute(
+          { sessionID: "ses-untracked" },
+          { sessionID: "ses-director" },
+        )
+      ).content,
+    );
+    // No sample: the first read spent the fallback on a transcript with
+    // no anchor, and the fields stay absent.
+    assert.equal(row.contextTokens, undefined);
+    assert.equal(row.watched, false);
+    assert.equal(context.reads(), 1);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("a step end without a recorded start falls back instead of seeding the map", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.models.push(usageModel);
+    fixture.messages.set(
+      dispatched.sessionID,
+      usageTranscript({
+        input: 90_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 20_000, write: 5_000 },
+      }),
+    );
+    const context = countedContext(fixture);
+
+    // The execution start adopts the worker; the step end arrives with
+    // no remembered ref — a start this activation never saw — so the
+    // tokens are not recorded.
+    await fixture.emit("session.execution.started", {
+      sessionID: dispatched.sessionID,
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: dispatched.sessionID,
+      tokens: {
+        input: 25_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 2_000, write: 500 },
+      },
+    });
+    const status = fixture.tools.get("director_worker_status")!;
+    const row = JSON.parse(
+      (
+        await status.execute(
+          { sessionID: dispatched.sessionID },
+          { sessionID: "ses-director" },
+        )
+      ).content,
+    );
+    // The fallback answered, seeded by the transcript's anchor.
+    assert.equal(row.contextTokens, 117_500);
+    assert.equal(context.reads(), 1);
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("a malformed step payload degrades quiet", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    fixture.models.push(usageModel);
+    fixture.messages.set(
+      dispatched.sessionID,
+      usageTranscript({
+        input: 90_000,
+        output: 2_000,
+        reasoning: 500,
+        cache: { read: 20_000, write: 5_000 },
+      }),
+    );
+    const context = countedContext(fixture);
+
+    await fixture.emit("session.execution.started", {
+      sessionID: dispatched.sessionID,
+    });
+    await fixture.emit("session.step.started", {
+      sessionID: dispatched.sessionID,
+      model: { providerID: "example-proxy", id: "example-model" },
+    });
+    // Tokens of every unusable shape: null, no prompt tokens, all zero.
+    await fixture.emit("session.step.ended", {
+      sessionID: dispatched.sessionID,
+      tokens: null,
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: dispatched.sessionID,
+      tokens: { output: 100, cache: { read: 0, write: 0 } },
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: dispatched.sessionID,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    });
+    const status = fixture.tools.get("director_worker_status")!;
+    const row = JSON.parse(
+      (
+        await status.execute(
+          { sessionID: dispatched.sessionID },
+          { sessionID: "ses-director" },
+        )
+      ).content,
+    );
+    // No throw, no sample: the fallback's transcript anchor answers.
+    assert.equal(row.contextTokens, 117_500);
+    assert.equal(context.reads(), 1);
   } finally {
     await cleanup?.();
   }

@@ -1102,22 +1102,54 @@ function noticeText(worker: string, unread: number, share?: number): string {
   return `${base} Its context is at ${Math.round(share * 100)}% of its model's window; start its next slice in a fresh session — state rides the manifest.`;
 }
 
-// PRJ-522: a watched worker's context usage, measured the way compaction
-// measures it. The newest trustworthy assistant message carries the
-// session's prompt size in `tokens` (TokenUsage.Info, v2.3.0
-// packages/schema/src/session-message.ts:237); compaction's own anchor
-// measure is input + cache.read + cache.write + output + reasoning
-// (v2.3.0 packages/core/src/session/compaction.ts:1153), taken from the
-// anchor hasMeasuredPrompt accepts (:1194): assistant, no error, tokens
-// present, prompt tokens above zero. The window is the model's limit,
-// sized the same way compaction sizes a request (inputWindow, :1185):
-// the smaller of input and context when both are set, else whichever
-// exists. The model is resolved from the anchor's own ref — the ref the
-// tokens were measured under — against the host's catalog (ModelDomain,
+// PRJ-525: a watched worker's context usage rides the host's event
+// stream. The host emits one session.step.started and one
+// session.step.ended per provider step (v2.3.0
+// packages/schema/src/session-event.ts): the start carries the model ref
+// the step is measured under, the end carries the step's full
+// TokenUsage.Info, and the TUI's footer computes the same tokens +
+// percent pair from the ended event instead of replaying anything
+// (v2.3.0 packages/tui/src/mini/stream-v2.transport.ts). Per-step
+// composes to per-turn: a turn's last step is the transcript's newest
+// tokened assistant anchor, so the newest step.ended per session carries
+// what the transcript's findLast would have found. The pump records the
+// newest usable sample per watched worker, and the reads below use the
+// recorded sample without touching the transcript while one exists. The
+// one transcript read left is the restart fallback: after a host
+// restart the plugin's memory is empty, so the first read for a session
+// replays the transcript once — the same anchor walk PRJ-522 used — and
+// the stream re-arms from there.
+//
+// Measurement is still the way compaction measures it (PRJ-522): the
+// anchor measure is input + cache.read + cache.write + output +
+// reasoning (v2.3.0 packages/core/src/session/compaction.ts:1153), taken
+// from the anchor hasMeasuredPrompt accepts (:1194): assistant, no
+// error, tokens present, prompt tokens above zero — on the event path
+// the same prompt-tokens-above-zero test keeps a zero-token step from
+// overwriting a good sample. The window is the model's limit, sized the
+// same way compaction sizes a request (inputWindow, :1185): the smaller
+// of input and context when both are set, else whichever exists. The
+// model is resolved from the sample's own ref — the ref the tokens were
+// measured under — against the host's catalog (ModelDomain,
 // packages/plugin/src/promise/plugin.ts:44). Every absence or failure —
-// no context surface, unreadable transcript, no tokened anchor, model
-// not in the catalog, unknown window — returns undefined: the callers
-// render nothing rather than guess, and the read never throws.
+// no sample, a spent fallback, unreadable transcript, no tokened
+// anchor, model not in the catalog, unknown window — returns undefined:
+// the callers render nothing rather than guess, and the read never
+// throws.
+
+// One step's measurement, recorded by the pump and replayed by the
+// reads: the raw TokenUsage.Info the step ended with, and the model ref
+// the step started under.
+type UsageSample = {
+  tokens: {
+    input: number;
+    output: number;
+    reasoning: number;
+    cache: { read: number; write: number };
+  };
+  model: { providerID: string; id: string };
+};
+
 type ContextUsage = {
   tokens: number;
   window: number;
@@ -1136,10 +1168,26 @@ const promptTokensOf = (tokens: {
 }): number =>
   tokens.input + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
 
-async function contextUsage(
+const sumTokensOf = (tokens: {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache?: { read?: number; write?: number };
+}): number =>
+  (tokens.input ?? 0) +
+  (tokens.cache?.read ?? 0) +
+  (tokens.cache?.write ?? 0) +
+  (tokens.output ?? 0) +
+  (tokens.reasoning ?? 0);
+
+// The transcript read: the restart fallback's anchor walk, unchanged
+// from PRJ-522. The tokens-null guard and the prompt-tokens test are the
+// anchor's own usability rule; the ref guards keep a message without a
+// usable model ref from seeding a sample.
+async function transcriptSample(
   ctx: HostContext,
   sessionID: string,
-): Promise<ContextUsage | undefined> {
+): Promise<UsageSample | undefined> {
   if (typeof ctx.session?.context !== "function") return undefined;
   let messages: any[];
   try {
@@ -1165,15 +1213,33 @@ async function contextUsage(
   );
   if (!anchor) return undefined;
   const tokens = anchor.tokens;
-  const measured =
-    (tokens.input ?? 0) +
-    (tokens.cache?.read ?? 0) +
-    (tokens.cache?.write ?? 0) +
-    (tokens.output ?? 0) +
-    (tokens.reasoning ?? 0);
   const ref = anchor.model;
   if (typeof ref?.providerID !== "string" || typeof ref?.id !== "string")
     return undefined;
+  return {
+    tokens: {
+      input: tokens.input ?? 0,
+      output: tokens.output ?? 0,
+      reasoning: tokens.reasoning ?? 0,
+      cache: {
+        read: tokens.cache?.read ?? 0,
+        write: tokens.cache?.write ?? 0,
+      },
+    },
+    model: { providerID: ref.providerID, id: ref.id },
+  };
+}
+
+// The window: the model's limit sized the way compaction sizes a
+// request, resolved from the sample's own ref against the host's
+// catalog. The catalog read happens per usage read, the way the old
+// transcript read's did — the window tracks the catalog, not the sample.
+async function measureUsage(
+  ctx: HostContext,
+  sample: UsageSample,
+  sessionID: string,
+): Promise<ContextUsage | undefined> {
+  const measured = sumTokensOf(sample.tokens);
   if (!ctx.model || typeof ctx.model.list !== "function") return undefined;
   let models;
   try {
@@ -1187,8 +1253,8 @@ async function contextUsage(
   if (!Array.isArray(models)) return undefined;
   const model = models.find(
     (row) =>
-      row?.providerID === ref.providerID &&
-      (row?.id === ref.id || row?.modelID === ref.id),
+      row?.providerID === sample.model.providerID &&
+      (row?.id === sample.model.id || row?.modelID === sample.model.id),
   );
   const limit = model?.limit;
   const window =
@@ -1605,6 +1671,14 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   const buffers = new Map<string, Array<{ text: string }>>();
   const foreign = new Set<string>();
   const here = ctx.location?.directory;
+  // PRJ-525: the usage stream's state, bounded like track — one sample
+  // and one model ref per watched session, pruned by forget(). The
+  // spentFallbacks set carries the restart fallback's budget: one
+  // transcript read per session, spent on the first read that finds no
+  // sample, whatever it finds.
+  const usageSamples = new Map<string, UsageSample>();
+  const stepModels = new Map<string, { providerID: string; id: string }>();
+  const spentFallbacks = new Set<string>();
 
   // Lazy adoption from the dispatch stamp. The session's directory must
   // equal this activation's exactly; a subagent child carries its parent's
@@ -1660,6 +1734,28 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     track.delete(sessionID);
     buffers.delete(sessionID);
     foreign.delete(sessionID);
+    usageSamples.delete(sessionID);
+    stepModels.delete(sessionID);
+    spentFallbacks.delete(sessionID);
+  };
+
+  // The read the callers use (PRJ-525): the recorded sample first, the
+  // transcript exactly once when the pump holds none for the session —
+  // the shape a host restart leaves. The attempt is spent whether or
+  // not it finds an anchor, because a dead transcript must never become
+  // a per-wake cost again; the stream re-arms the map on the worker's
+  // next turn either way.
+  const contextUsage = async (
+    sessionID: string,
+  ): Promise<ContextUsage | undefined> => {
+    const sample = usageSamples.get(sessionID);
+    if (sample) return measureUsage(ctx, sample, sessionID);
+    if (spentFallbacks.has(sessionID)) return undefined;
+    spentFallbacks.add(sessionID);
+    const read = await transcriptSample(ctx, sessionID);
+    if (!read) return undefined;
+    usageSamples.set(sessionID, read);
+    return measureUsage(ctx, read, sessionID);
   };
 
   // At most one stored report and one wake notice per turn end. Any
@@ -1746,7 +1842,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     // stored either way, and the wake's job is the report's.
     let warnShare: number | undefined;
     try {
-      const usage = await contextUsage(ctx, sessionID);
+      const usage = await contextUsage(sessionID);
       if (usage && usage.share >= CONTEXT_WARN_SHARE) warnShare = usage.share;
     } catch (error) {
       console.error(
@@ -2009,7 +2105,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const statusTool: ToolDefinition = {
     name: "director_worker_status",
-    description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, how many of its reports are unread for you, and its context usage when it is readable (contextTokens measured against contextWindow, with contextShare; measured the way compaction measures it, omitted when the session carries no usable tokens or its model has no known window). contextWindow belongs to the model the measurement was taken under — the anchor message's model ref, not the session's live model field, so a session that switched models mid-flight reports the window the tokens were measured under. Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
+    description: `Read a session's live state from the session API: busy or idle, its last completed outcome, location, dispatch stamp, how many of its reports are unread for you, and its context usage when it is readable (contextTokens measured against contextWindow, with contextShare; measured the way compaction measures it, from the worker's last completed step event — replayed from the transcript once per session when no step measurement is held, after a restart — omitted when there are no usable tokens or the model has no known window). contextWindow belongs to the model the measurement was taken under — the sample's model ref, not the session's live model field, so a session that switched models mid-flight reports the window the tokens were measured under. Convenience only — it is never authoritative over the worktree; landed work is verified in the worktree itself.`,
     input: statusSchema,
     output: REPLY_OUTPUT,
     execute: async (raw, context) => {
@@ -2058,10 +2154,11 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       // PRJ-522: the worker's context usage rides the status whenever it
       // is readable — the threshold gates only the notice clause, never
       // the number. An absent or failed read omits the fields. The
-      // window is the anchor's model's window: the measurement was
-      // taken under that ref, so a session whose row switched models
-      // still reports the window its tokens were measured against.
-      const usage = await contextUsage(ctx, sessionID);
+      // window is the model the sample was measured under: the ref
+      // rides the step's start event (or the fallback's anchor), so a
+      // session whose row switched models still reports the window its
+      // tokens were measured against.
+      const usage = await contextUsage(sessionID);
       // The pin reads as "providerID/modelID" for the caller. The host's
       // live model record wins; the pin the dispatch stamp carries is the
       // fallback when the host row reports none.
@@ -3316,6 +3413,52 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
               const buffer = buffers.get(data.sessionID) || [];
               buffer.push({ text: data.text || "" });
               buffers.set(data.sessionID, buffer);
+              break;
+            }
+            // The usage stream (PRJ-525): a step's start carries the model
+            // ref its usage is measured under, so the ref is remembered
+            // per session and paired with the tokens the step's end
+            // carries. The start adopts the worker like an execution
+            // start — it is the turn's beginning, and a just-dispatched
+            // worker's first turn records its usage this way.
+            case "session.step.started": {
+              const entry = await adopted(data.sessionID);
+              const ref = data.model;
+              if (
+                entry &&
+                ref &&
+                typeof ref.providerID === "string" &&
+                typeof ref.id === "string"
+              )
+                stepModels.set(data.sessionID, {
+                  providerID: ref.providerID,
+                  id: ref.id,
+                });
+              break;
+            }
+            // A step's end carries the step's full TokenUsage.Info. It is
+            // recorded only for already-tracked workers — adopting here
+            // could mislabel a mid-turn activation, since a start-less end
+            // means this activation came in mid-turn — and only when the
+            // tokens pass the anchor's own usability test, so a
+            // zero-token step never overwrites a good sample. A failed
+            // step's partial tokens (session.step.failed) are never
+            // recorded: the turn's last completed step is the anchor
+            // equivalent, not its failure.
+            case "session.step.ended": {
+              if (foreign.has(data.sessionID) || !track.has(data.sessionID))
+                break;
+              const model = stepModels.get(data.sessionID);
+              const tokens = data.tokens;
+              if (
+                !model ||
+                !tokens ||
+                typeof tokens !== "object" ||
+                typeof tokens.input !== "number"
+              )
+                break;
+              if (!(promptTokensOf(tokens) > 0)) break;
+              usageSamples.set(data.sessionID, { tokens, model });
               break;
             }
             case "session.execution.succeeded":
