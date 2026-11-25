@@ -18,8 +18,6 @@ const renderedEnv: Record<string, string | undefined> = {
   ZENIGATA_MEMORY_URL:
     "http://127.0.0.1:28132/mcp?app=zenigata&initiator=agent",
   ZENIGATA_HUMANS: "example-user",
-  ZENIGATA_AGENTS: "example-bot",
-  ZENIGATA_ACCESS: "example-user,example-bot",
 };
 
 const secretsEnv: Record<string, string | undefined> = {
@@ -29,8 +27,6 @@ const secretsEnv: Record<string, string | undefined> = {
 
 const want = {
   humans: ["example-user"],
-  agents: ["example-bot"],
-  access: ["example-user", "example-bot"],
 };
 
 describe("checkRenderedConfig", () => {
@@ -42,8 +38,6 @@ describe("checkRenderedConfig", () => {
     });
     expect(result.failures).toEqual([]);
     expect(result.config?.humans).toEqual(["example-user"]);
-    expect(result.config?.agents).toEqual(["example-bot"]);
-    expect(result.config?.access).toEqual(["example-user", "example-bot"]);
   });
 
   it("names the boot-time validation failure when the environment is incomplete", () => {
@@ -92,13 +86,25 @@ describe("checkRenderedConfig", () => {
 
   it("fails the identity list whose rendering diverged", () => {
     const result = checkRenderedConfig({
-      rendered: { ...renderedEnv, ZENIGATA_AGENTS: "" },
+      rendered: { ...renderedEnv, ZENIGATA_HUMANS: "" },
       secrets: secretsEnv,
       want,
     });
     expect(result.failures).toEqual([
-      "the identity list 'agents' rendered as [], wanted [\"example-bot\"]",
+      "the identity list 'humans' rendered as [], wanted [\"example-user\"]",
     ]);
+  });
+
+  it("names a rendered environment that still carries a retired key", () => {
+    const result = checkRenderedConfig({
+      rendered: { ...renderedEnv, ZENIGATA_AGENTS: "example-bot" },
+      secrets: secretsEnv,
+      want,
+    });
+    expect(result.failures).toEqual([
+      "the composed boot environment fails boot-time validation: ZENIGATA_AGENTS: retired (PRJ-518); remove the variable from the configuration",
+    ]);
+    expect(result.config).toBeUndefined();
   });
 });
 
@@ -158,7 +164,7 @@ describe("file readers", () => {
     );
   });
 
-  it("reads identity expectations of three arrays, naming a foreign entry", async () => {
+  it("reads identity expectations of an array of account names, naming a foreign entry", async () => {
     expect(
       readIdentityExpectations(
         await writeTemp("want.json", JSON.stringify(want)),
@@ -166,14 +172,14 @@ describe("file readers", () => {
     ).toEqual(want);
     const nonArray = await writeTemp(
       "want.json",
-      JSON.stringify({ ...want, agents: "example-bot" }),
+      JSON.stringify({ ...want, humans: "example-user" }),
     );
     expect(() => readIdentityExpectations(nonArray)).toThrow(
-      /'agents' must be an array/,
+      /'humans' must be an array/,
     );
     const nonString = await writeTemp(
       "want.json",
-      JSON.stringify({ ...want, humans: [3] }),
+      JSON.stringify({ humans: [3] }),
     );
     expect(() => readIdentityExpectations(nonString)).toThrow(
       /'humans' must be an array/,

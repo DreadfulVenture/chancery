@@ -127,23 +127,17 @@ describe("loadConfig retention window", () => {
 });
 
 describe("loadConfig identity arrays", () => {
-  it("defaults all three lists to empty", () => {
+  it("defaults the humans list to empty", () => {
     const config = loadConfig(baseEnv);
     expect(config.humans).toEqual([]);
-    expect(config.agents).toEqual([]);
-    expect(config.access).toEqual([]);
   });
 
-  it("parses the three lists from their CSV variables", () => {
+  it("parses the humans list from its CSV variable", () => {
     const config = loadConfig({
       ...baseEnv,
       ZENIGATA_HUMANS: "example-user, second-user",
-      ZENIGATA_AGENTS: "example-bot",
-      ZENIGATA_ACCESS: "example-user, example-bot",
     });
     expect(config.humans).toEqual(["example-user", "second-user"]);
-    expect(config.agents).toEqual(["example-bot"]);
-    expect(config.access).toEqual(["example-user", "example-bot"]);
   });
 
   it("tolerates whitespace and empty segments in the CSV", () => {
@@ -158,12 +152,6 @@ describe("loadConfig identity arrays", () => {
     expect(() =>
       loadConfig({ ...baseEnv, ZENIGATA_HUMANS: " example-user, space name" }),
     ).toThrow(/ZENIGATA_HUMANS: 'space name'/);
-    expect(() => loadConfig({ ...baseEnv, ZENIGATA_AGENTS: "bot!" })).toThrow(
-      /ZENIGATA_AGENTS: 'bot!'/,
-    );
-    expect(() =>
-      loadConfig({ ...baseEnv, ZENIGATA_ACCESS: "user@example.com" }),
-    ).toThrow(/ZENIGATA_ACCESS: 'user@example\.com'/);
   });
 
   it("accepts the conservative account-name shape", () => {
@@ -172,5 +160,27 @@ describe("loadConfig identity arrays", () => {
       ZENIGATA_HUMANS: "the-operator.2, worker_bot-3",
     });
     expect(config.humans).toEqual(["the-operator.2", "worker_bot-3"]);
+  });
+});
+
+describe("loadConfig unknown and retired variables", () => {
+  it("refuses a retired variable, naming its retirement", () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, ZENIGATA_AGENTS: "example-bot" }),
+    ).toThrow(/ZENIGATA_AGENTS: retired \(PRJ-518\)/);
+    expect(() =>
+      loadConfig({ ...baseEnv, ZENIGATA_ACCESS: "example-user" }),
+    ).toThrow(/ZENIGATA_ACCESS: retired \(PRJ-518\)/);
+  });
+
+  it("refuses an unknown variable, naming it", () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, ZENIGATA_NOT_A_VARIABLE: "1" }),
+    ).toThrow(/ZENIGATA_NOT_A_VARIABLE: unknown configuration variable/);
+  });
+
+  it("treats an empty-valued key as unset, retired names included", () => {
+    const config = loadConfig({ ...baseEnv, ZENIGATA_AGENTS: "" });
+    expect(config.humans).toEqual([]);
   });
 });

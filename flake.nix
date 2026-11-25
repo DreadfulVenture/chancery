@@ -362,8 +362,8 @@
             '';
 
             # The rendered-config gate (PRJ-505): the NixOS module renders a
-            # test deployment carrying the three identity arrays — one or
-            # two entries per list, neutral names — and the runtime's own
+            # test deployment carrying the humans list — neutral names —
+            # and the runtime's own
             # bin validates the rendered environment: `zenigata
             # --check-config` composes the unit environment with the unit's
             # own environment file, parsing that file's plain KEY=VALUE
@@ -383,11 +383,6 @@
                 # compares the rendered lists against.
                 identity = {
                   humans = [ "example-user" ];
-                  agents = [ "example-bot" ];
-                  access = [
-                    "example-user"
-                    "example-bot"
-                  ];
                 };
                 eval = inputs.nixpkgs.lib.nixosSystem {
                   inherit (pkgs) system;
@@ -397,7 +392,7 @@
                       services.zenigata = {
                         enable = true;
                         allowedLogins = [ "example-user" ];
-                        inherit (identity) humans agents access;
+                        inherit (identity) humans;
                         adapterUrl = "http://adapter.invalid";
                         forgeUrl = "https://forge.example.com";
                         opencodeUrl = "http://opencode.invalid";

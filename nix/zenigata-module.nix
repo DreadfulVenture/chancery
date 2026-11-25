@@ -133,42 +133,13 @@ in
       default = [ ];
       description = ''
         Forge accounts whose thread prose is a human's words to the bot's
-        sessions: chiefly the operator's. Items authored by these accounts
-        will arrive at the sessions marked human: their corrections and
-        questions carry human significance.
-        The classification's consumers arrive with later slices of the
-        thin pipeline (PRJ-501); this configuration names and validates
-        the array, and the review session's start prompt carries it as
-        data. Nothing else in the current pipeline reads it.
-      '';
-    };
-
-    agents = mkOption {
-      type = types.listOf accountName;
-      default = [ ];
-      description = ''
-        Forge accounts known to be agents — in a shared-lane deployment,
-        the one account every lane posts through. Items authored by these
-        accounts will arrive marked agent: claims the reviewer traces
-        against the code, never instructions, never durable significance.
-        Accounts on neither this nor `humans` are unclassified, and their
-        prose is treated like agent prose until the deployment classifies
-        them. Same slice posture as `humans`: named, validated, carried
-        as data, not yet consumed.
-      '';
-    };
-
-    access = mkOption {
-      type = types.listOf accountName;
-      default = [ ];
-      description = ''
-        Forge accounts whose review requests and re-requests run review
-        runs and whose replies to the bot get answered. Access toggles
-        the buttons and nothing about voice: an account can hold access
-        without its prose gaining significance (an agent account), and a
-        human account can lose access without its prose losing its voice.
-        The current pipeline's gate stays `allowedLogins`; this list's
-        consumers arrive with later slices of the thin pipeline.
+        sessions: chiefly the operator's. The list renders one
+        operator-speech sentence into the review session's and the answer
+        session's start prompts — accounts on it speak for the operator
+        for veracity and corrections, and every other account's prose is
+        a claim to trace (PRJ-514, the session-origin ADR's review-bot
+        instance). An empty list renders nothing: the reviewer then
+        treats all thread content as claims.
       '';
     };
 
@@ -318,12 +289,6 @@ in
       }
       // lib.optionalAttrs (cfg.humans != [ ]) {
         ZENIGATA_HUMANS = concatStringsSep "," cfg.humans;
-      }
-      // lib.optionalAttrs (cfg.agents != [ ]) {
-        ZENIGATA_AGENTS = concatStringsSep "," cfg.agents;
-      }
-      // lib.optionalAttrs (cfg.access != [ ]) {
-        ZENIGATA_ACCESS = concatStringsSep "," cfg.access;
       }
       // lib.optionalAttrs (cfg.personaFile != null) {
         ZENIGATA_PERSONA_FILE = cfg.personaFile;

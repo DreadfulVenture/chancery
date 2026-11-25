@@ -311,8 +311,6 @@ describe("sweep steps (unit): idempotency and failure classification", () => {
     allowedLogins: [],
     allowedRepos: [],
     humans: [],
-    agents: [],
-    access: [],
     adapterUrl: "http://adapter.invalid",
     forgeUrl: "https://forge.invalid",
     adapterToken: "t",

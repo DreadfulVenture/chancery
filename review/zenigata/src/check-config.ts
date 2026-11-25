@@ -3,7 +3,7 @@
  * `zenigata-rendered-config` check evaluates the NixOS module, renders one
  * test deployment's unit environment to a JSON file, and hands three files
  * to `zenigata --check-config`: the rendered environment, the unit's own
- * environment file, and the identity lists that deployment carries. This
+ * environment file, and the identity list that deployment carries. This
  * module composes the first two the way a deployed boot composes them —
  * systemd layers the EnvironmentFile over the unit's plain environment —
  * and validates the composition through loadConfig, the same schema every
@@ -20,11 +20,9 @@
 import { readFileSync } from "node:fs";
 import { loadConfig, type Config } from "./config.js";
 
-/** The identity lists the test deployment is expected to carry. */
+/** The identity list the test deployment is expected to carry. */
 export interface IdentityExpectations {
   humans: string[];
-  agents: string[];
-  access: string[];
 }
 
 export interface ConfigCheckResult {
@@ -87,7 +85,7 @@ export function readRenderedEnvironment(path: string): Record<string, string> {
   return entries;
 }
 
-/** Read the expected identity lists: three arrays of account names. */
+/** Read the expected identity list: an array of account names. */
 export function readIdentityExpectations(path: string): IdentityExpectations {
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -105,17 +103,15 @@ export function readIdentityExpectations(path: string): IdentityExpectations {
   };
   return {
     humans: read("humans"),
-    agents: read("agents"),
-    access: read("access"),
   };
 }
 
 /**
  * Validate one rendered deployment the boot path validates itself: the
  * composition must load clean, its memory URL must carry the lineage
- * gate's declaration, and the three identity lists must equal the arrays
- * the test deployment sets — the expectation pins what the module
- * actually rendered, not what its condition happened to produce.
+ * gate's declaration, and the identity list must equal the array the test
+ * deployment sets — the expectation pins what the module actually
+ * rendered, not what its condition happened to produce.
  */
 export function checkRenderedConfig(input: {
   rendered: Record<string, string | undefined>;
@@ -156,19 +152,10 @@ export function checkRenderedConfig(input: {
       "ZENIGATA_MEMORY_URL must carry initiator=agent: without the declaration an unseen conversation reads as class 'absent' instead of the agent-lineage class, which changes the conversation's attribution class and the refusal its non-observation writes get — the observation grant itself is the same either way",
     );
   }
-  const rendered = {
-    humans: config.humans,
-    agents: config.agents,
-    access: config.access,
-  };
-  for (const field of ["humans", "agents", "access"] as const) {
-    if (JSON.stringify(rendered[field]) !== JSON.stringify(input.want[field])) {
-      failures.push(
-        `the identity list '${field}' rendered as ${JSON.stringify(
-          rendered[field],
-        )}, wanted ${JSON.stringify(input.want[field])}`,
-      );
-    }
+  if (JSON.stringify(config.humans) !== JSON.stringify(input.want.humans)) {
+    failures.push(
+      `the identity list 'humans' rendered as ${JSON.stringify(config.humans)}, wanted ${JSON.stringify(input.want.humans)}`,
+    );
   }
   return { config, failures };
 }

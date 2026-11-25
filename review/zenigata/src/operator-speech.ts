@@ -8,9 +8,7 @@
  * name. An empty list renders nothing — the reviewer then treats all
  * thread content as claims, the honest default. The review pass and the
  * answer session both compose the sentence through this builder, so one
- * wording carries the rule in both flows (PRJ-514). The agents and
- * access options stay unconsumed; their retirement is recorded on
- * PRJ-514.
+ * wording carries the rule in both flows (PRJ-514).
  */
 
 /** Join account names the way prose reads them: "a and b", "a, b and c". */

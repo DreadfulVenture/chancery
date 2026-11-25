@@ -12,17 +12,12 @@ export interface Config {
   allowedLogins: string[];
   allowedRepos: string[];
   /**
-   * The deployment's account lists (the config layer landed as the
-   * rendered-config slice). The humans list renders one operator-speech
-   * sentence into the review session's start prompt: accounts on it speak
-   * for the operator — veracity and corrections — and every other
-   * account's prose is a claim to trace. The agents and access lists stay
-   * validated and unconsumed by bot code; their retirement is recorded on
-   * PRJ-514 and lands in a later slice.
+   * The deployment's humans list. It renders one operator-speech sentence
+   * into the review session's and the answer session's start prompts:
+   * accounts on it speak for the operator — veracity and corrections —
+   * and every other account's prose is a claim to trace.
    */
   humans: string[];
-  agents: string[];
-  access: string[];
   personaFile?: string;
   adapterUrl: string;
   /**
@@ -228,8 +223,79 @@ function accountNames(
   return entries;
 }
 
+/**
+ * Every ZENIGATA_-prefixed variable loadConfig reads — the configuration's
+ * whole surface. An environment naming a variable outside this set fails
+ * at boot naming itself, instead of being silently swallowed: an unknown
+ * variable is as unrepairable as a missing one. A value that trims empty
+ * is treated as unset (the contract optional() and csvOf() honor) and is
+ * not named.
+ */
+const KNOWN_VARIABLES: readonly string[] = [
+  "ZENIGATA_LISTEN_PORT",
+  "ZENIGATA_STATE_DIR",
+  "ZENIGATA_ALLOWED_LOGINS",
+  "ZENIGATA_ALLOWED_REPOS",
+  "ZENIGATA_HUMANS",
+  "ZENIGATA_PERSONA_FILE",
+  "ZENIGATA_ADAPTER_URL",
+  "ZENIGATA_FORGE_URL",
+  "ZENIGATA_ADAPTER_TOKEN",
+  "ZENIGATA_EVENT_TOKEN",
+  "ZENIGATA_OPENCODE_URL",
+  "ZENIGATA_OPENCODE_KEY",
+  "ZENIGATA_MEMORY_URL",
+  "ZENIGATA_REVIEW_TIMEOUT_SECONDS",
+  "ZENIGATA_WORKTREES_DIR",
+  "ZENIGATA_TURN_POLL_SECONDS",
+  "ZENIGATA_TURN_BUDGET_SECONDS",
+  "ZENIGATA_RETENTION_WINDOW_SECONDS",
+  "ZENIGATA_RETRY_POLICY",
+  "ZENIGATA_AGENT",
+];
+
+/**
+ * Variables a configuration can no longer carry: the unknown-variable
+ * check consults this map so a retired name fails with its own removal
+ * note instead of a generic unknown-variable refusal.
+ */
+const RETIRED_VARIABLES: Readonly<Record<string, string>> = {
+  ZENIGATA_AGENTS:
+    "retired (PRJ-518); remove the variable from the configuration",
+  ZENIGATA_ACCESS:
+    "retired (PRJ-518); remove the variable from the configuration",
+};
+
+/**
+ * The loud end of the variable surface: a retired name carries its own
+ * removal note, any other unknown ZENIGATA_-prefixed variable refuses as
+ * unknown, and both reach every loadConfig caller — the boot, the
+ * --check-config gate, the tests.
+ */
+function refuseForeignVariables(env: Record<string, string | undefined>): void {
+  const refusals: string[] = [];
+  for (const name of Object.keys(env)
+    .filter((name) => name.startsWith("ZENIGATA_"))
+    .sort()) {
+    const value = env[name];
+    if (value === undefined || value.trim() === "") {
+      continue;
+    }
+    const retired = RETIRED_VARIABLES[name];
+    if (retired !== undefined) {
+      refusals.push(`${name}: ${retired}`);
+    } else if (!KNOWN_VARIABLES.includes(name)) {
+      refusals.push(`${name}: unknown configuration variable`);
+    }
+  }
+  if (refusals.length > 0) {
+    throw new Error(refusals.join("; "));
+  }
+}
+
 /** Parse configuration from an environment-shaped record. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
+  refuseForeignVariables(env);
   const stateDir = required(env, "ZENIGATA_STATE_DIR");
   return {
     listenPort: int(env, "ZENIGATA_LISTEN_PORT", portSchema, 8471),
@@ -237,8 +303,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     allowedLogins: csv(env, "ZENIGATA_ALLOWED_LOGINS"),
     allowedRepos: csvOf(env, "ZENIGATA_ALLOWED_REPOS", []),
     humans: accountNames(env, "ZENIGATA_HUMANS"),
-    agents: accountNames(env, "ZENIGATA_AGENTS"),
-    access: accountNames(env, "ZENIGATA_ACCESS"),
     personaFile: optional(env, "ZENIGATA_PERSONA_FILE"),
     adapterUrl: url(env, "ZENIGATA_ADAPTER_URL"),
     forgeUrl: url(env, "ZENIGATA_FORGE_URL"),

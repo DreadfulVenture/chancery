@@ -596,8 +596,6 @@ describe("review flow operator speech", () => {
       script: happyScript(),
       env: {
         ZENIGATA_HUMANS: "example-user, example-two",
-        ZENIGATA_AGENTS: "example-bot",
-        ZENIGATA_ACCESS: "example-user, example-bot",
       },
     });
     await postReviewEvent(h);
@@ -619,26 +617,6 @@ describe("review flow operator speech", () => {
     expect(personaEnd).toBeGreaterThanOrEqual(0);
     expect(sentenceStart).toBeGreaterThan(personaEnd);
     expect(passStart).toBeGreaterThan(sentenceStart);
-    // The agents and access lists stay unconsumed: nothing renders for
-    // them (no data slot and no machinery).
-    expect(start).not.toContain("Deployment identity data:");
-    expect(start).not.toContain("- agents:");
-    expect(start).not.toContain("- access:");
-  });
-
-  it("renders nothing when the humans list is empty, whatever the other lists carry", async () => {
-    const h = await harness({
-      script: happyScript(),
-      env: {
-        ZENIGATA_AGENTS: "example-bot",
-        ZENIGATA_ACCESS: "example-user",
-      },
-    });
-    await postReviewEvent(h);
-    // Only the humans list drives the render: agents/access ride no
-    // instruction, so the prompt keeps its pre-config shape.
-    expect(h.sessions.prompts[0]?.text).not.toContain("Operator speech:");
-    expect(h.forge.postedReviews).toHaveLength(1);
   });
 
   it("leaves a default deployment's start prompt free of the sentence", async () => {
