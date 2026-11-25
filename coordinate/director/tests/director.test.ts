@@ -764,6 +764,13 @@ test("dispatch creates the worker in the directory, stamps the coordinator, and 
       fixture.created[0].metadata.chancery.coordinatedBy,
       "ses-director",
     );
+    // The origin declaration rides the same create call (PRJ-513): a
+    // programmatic spawn declares who created it, and the memory client
+    // registers the worker's lineage from this record.
+    assert.deepEqual(fixture.created[0].metadata.chancery_origin, {
+      initiator: "program",
+      parent: "ses-director",
+    });
     assert.equal(fixture.prompts[0].sessionID, result.sessionID);
     assert.equal(fixture.prompts[0].text, "do the slice work");
     assert.equal(fixture.mails.length, 0);

@@ -72,7 +72,7 @@ test("lifecycle: the compaction marker rides the queue", async () => {
 test("lifecycle: a child session registers with its parent link", async () => {
   await withDaemon(
     () => SILENT,
-    async ({ emit }) => {
+    async ({ emit, fire, sessionHooks, sessions }) => {
       await emit("session.created", {
         sessionID: "child9",
         parentID: "top1",
@@ -82,6 +82,35 @@ test("lifecycle: a child session registers with its parent link", async () => {
       assert.ok(registration, "child registration enqueued");
       assert.equal(registration.conversation_id, "child9");
       assert.equal(registration.parent_conversation_id, "top1");
+
+      // The host's parentID path is the parented carve-out (ADR
+      // 20261124-session-origin-signal): even an origin record riding
+      // the child's inherited metadata bag adds no second line, and a
+      // child captures no turns — the parentID event already settled it.
+      sessions.set("child9", {
+        metadata: {
+          chancery_origin: { initiator: "program", parent: "top1" },
+        },
+      });
+      await fire(sessionHooks, "prompt", {
+        sessionID: "child9",
+        prompt: { text: "a subagent's own turn, which its parent reported" },
+      });
+      assert.equal(
+        queued().filter(
+          (line) =>
+            line.conversation_id === "child9" && line.kind === "session",
+        ).length,
+        1,
+        "the host parent link is the carve-out; the record adds nothing",
+      );
+      assert.equal(
+        queued().filter(
+          (line) => line.conversation_id === "child9" && line.role === "user",
+        ).length,
+        0,
+        "a child captures no turns",
+      );
     },
   );
 });
@@ -102,20 +131,25 @@ test("lifecycle: a top-level session registers nothing", async () => {
   );
 });
 
-// The dispatch stamp's lineage registration (PRJ-510): a director-
-// dispatched worker reads its coordinator from the session stamp and
-// registers the parent link itself, on the first prompt and ahead of
-// its first capture row.
+// The origin declaration's lineage registration (PRJ-513): a
+// programmatic spawn reads its declared record from the session metadata
+// and registers the parent link itself, on the first prompt and ahead
+// of its first capture row. The dispatch stamps the declaration beside
+// the coordinator stamp, so the test rows carry both — the way the real
+// create call writes them.
 
-const stamped = (coordinator: string) => ({
-  metadata: { chancery: { coordinatedBy: coordinator } },
+const dispatched = (director: string) => ({
+  metadata: {
+    chancery: { coordinatedBy: director },
+    chancery_origin: { initiator: "program", parent: director },
+  },
 });
 
 test("dispatch lineage: the worker registers its parent before its first capture", async () => {
   await withDaemon(
     () => SILENT,
     async ({ fire, sessionHooks, sessions }) => {
-      sessions.set("s-worker", stamped("ses-director"));
+      sessions.set("s-worker", dispatched("ses-director"));
       const turn = (text: string) =>
         fire(sessionHooks, "prompt", {
           sessionID: "s-worker",
@@ -162,7 +196,7 @@ test("dispatch lineage: an unstamped session captures with the default initiator
       assert.equal(
         queued().find((line) => line.kind === "session"),
         undefined,
-        "no stamp, no registration line",
+        "no declaration, no registration line",
       );
       const capture = queued().find((line) => line.role === "user");
       assert.ok(capture, "capture proceeds as before");
@@ -171,19 +205,19 @@ test("dispatch lineage: an unstamped session captures with the default initiator
   );
 });
 
-test("dispatch lineage: a stamp naming its own session registers nothing", async () => {
+test("dispatch lineage: a record naming its own session as parent registers nothing", async () => {
   await withDaemon(
     () => SILENT,
     async ({ fire, sessionHooks, sessions }) => {
-      sessions.set("s-self", stamped("s-self"));
+      sessions.set("s-self", dispatched("s-self"));
       await fire(sessionHooks, "prompt", {
         sessionID: "s-self",
-        prompt: { text: "a malformed stamp names itself" },
+        prompt: { text: "a malformed record names itself as parent" },
       });
       assert.equal(
         queued().find((line) => line.kind === "session"),
         undefined,
-        "a self-stamped session carries no parent link to register",
+        "a self-declared session carries no parent link to register",
       );
       const capture = queued().find((line) => line.role === "user");
       assert.ok(capture, "capture proceeds as before");
@@ -209,7 +243,7 @@ test("dispatch lineage: a failed stamp read neither marks nor captures, and retr
         "nothing marked and nothing captured while the stamp was unreadable",
       );
       // The row lands before the second prompt; the read now succeeds.
-      sessions.set("s-unreadable", stamped("ses-director"));
+      sessions.set("s-unreadable", dispatched("ses-director"));
       await turn();
       const rows = queued();
       assert.equal(
@@ -240,7 +274,7 @@ test("dispatch lineage: deleting the session clears the stamp cache", async () =
   await withDaemon(
     () => SILENT,
     async ({ fire, sessionHooks, emit, sessions, sessionGetLog }) => {
-      sessions.set("s-reborn", stamped("ses-director"));
+      sessions.set("s-reborn", dispatched("ses-director"));
       await fire(sessionHooks, "prompt", {
         sessionID: "s-reborn",
         prompt: { text: "the first turn before deletion" },
@@ -275,7 +309,7 @@ test("dispatch lineage: the stamp lookup is shared with the coalescing read", as
   await withDaemon(
     (body, url) => (url === "/session-open" ? OPEN : SILENT),
     async ({ fire, sessionHooks, sessions, sessionGetLog, synthetics }) => {
-      sessions.set("s-shared", stamped("ses-director"));
+      sessions.set("s-shared", dispatched("ses-director"));
       const turn = () =>
         fire(sessionHooks, "prompt", {
           sessionID: "s-shared",
@@ -293,6 +327,131 @@ test("dispatch lineage: the stamp lookup is shared with the coalescing read", as
       );
       await turn();
       assert.deepEqual(sessionGetLog, ["s-shared"]);
+    },
+  );
+});
+
+// The remaining resolution shapes (ADR 20261124-session-origin-signal):
+// declaration → programmatic whatever tool wrote the record; an
+// unparsable record reads as undeclared; the coordinator stamp alone
+// keeps the coalescing key and registers nothing.
+
+test("origin lineage: a declaration from any tool registers, no coordinator stamp needed", async () => {
+  await withDaemon(
+    () => SILENT,
+    async ({ fire, sessionHooks, sessions }) => {
+      // Another tool's runtime spawn: the origin record alone — no
+      // coordinator stamp, which stays the director module's mail key.
+      sessions.set("s-tool", {
+        metadata: {
+          chancery_origin: { initiator: "program", parent: "ses-runtime" },
+        },
+      });
+      const turn = () =>
+        fire(sessionHooks, "prompt", {
+          sessionID: "s-tool",
+          prompt: { text: "the runtime session's own first turn" },
+        });
+      await turn();
+
+      const rows = queued();
+      const registration = rows.find((line) => line.kind === "session");
+      assert.ok(registration, "the declared session registered its lineage");
+      assert.equal(registration.conversation_id, "s-tool");
+      assert.equal(registration.parent_conversation_id, "ses-runtime");
+      assert.equal(registration.initiator, "agent");
+      assert.equal(rows[0].kind, "session", "registration precedes capture");
+      assert.equal(rows[1].role, "user");
+      assert.equal(
+        rows[1].initiator,
+        "agent",
+        "the declared session's prose is agent voice",
+      );
+
+      // One-time: later prompts capture, never re-register.
+      await turn();
+      assert.equal(
+        queued().filter((line) => line.kind === "session").length,
+        1,
+        "the registration is a one-time line per session",
+      );
+    },
+  );
+});
+
+test("origin lineage: a foreign stamp or an unparsable record stays undeclared", async () => {
+  await withDaemon(
+    () => SILENT,
+    async ({ fire, sessionHooks, sessions }) => {
+      // A stamp under another key never reads as a declaration, and a
+      // record using a vocabulary the declaration does not carry (the
+      // opencode `agent` word) or missing its parent does not parse —
+      // absence is the human default.
+      sessions.set("s-foreign", {
+        metadata: {
+          bot_origin: { initiator: "program", parent: "ses-tool" },
+          chancery_origin: { initiator: "agent" },
+        },
+      });
+      await fire(sessionHooks, "prompt", {
+        sessionID: "s-foreign",
+        prompt: { text: "a turn whose metadata never declared an origin" },
+      });
+      assert.equal(
+        queued().find((line) => line.kind === "session"),
+        undefined,
+        "an unparsable record cannot invent a parent link",
+      );
+      const capture = queued().find((line) => line.role === "user");
+      assert.ok(capture, "capture proceeds as before");
+      assert.equal(capture.initiator, "human");
+    },
+  );
+});
+
+test("origin lineage: the coordinator stamp alone keeps the coalescing key and registers nothing", async () => {
+  const OPEN = {
+    json: {
+      status: "ok",
+      project: "memory-store",
+      doc: "The store writes deliberate rows through one gate.",
+      doc_created_at: "2026-11-05T00:00:00Z",
+      inputs_count: 1,
+      topk: [],
+    },
+  };
+  await withDaemon(
+    (body, url) => (url === "/session-open" ? OPEN : SILENT),
+    async ({ fire, sessionHooks, sessions, synthetics }) => {
+      // A worker dispatched by a director predating the declaration: the
+      // coordinator stamp alone. The wake ordering still coalesces its
+      // block (the key is unchanged), and without a declaration the
+      // session stays on the human default.
+      sessions.set("s-legacy", {
+        metadata: { chancery: { coordinatedBy: "ses-director" } },
+      });
+      const event = await fire(sessionHooks, "prompt", {
+        sessionID: "s-legacy",
+        prompt: { text: "the legacy worker's brief" },
+      });
+      assert.match(
+        event.prompt.text,
+        /Project knowledge:/,
+        "the coordinator stamp still drives the coalescing route",
+      );
+      assert.equal(
+        synthetics.length,
+        0,
+        "the coordinator-stamped session coalesced, it did not inject",
+      );
+      assert.equal(
+        queued().find((line) => line.kind === "session"),
+        undefined,
+        "without a declaration there is no lineage to register",
+      );
+      const capture = queued().find((line) => line.role === "user");
+      assert.ok(capture, "capture proceeds as before");
+      assert.equal(capture.initiator, "human");
     },
   );
 });

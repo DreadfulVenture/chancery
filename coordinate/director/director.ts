@@ -328,6 +328,13 @@ interface HostContext {
 
 const STAMP = "chancery";
 const DIRECTOR_STAMP = "coordinatedBy";
+// The origin declaration (ADR 20261124-session-origin-signal): every
+// programmatic spawn declares its origin at create time. The dispatch
+// stamps the record beside the coordinator stamp — the memory client
+// reads it to register the worker's lineage, while the coordinator
+// stamp above stays the mail machinery's key: two stamps, one bag,
+// different consumers.
+const ORIGIN_STAMP = "chancery_origin";
 
 // PRJ-343: the unattended-worker contract. The host's rule evaluation takes
 // the LAST matching rule, and a session's own rules merge after its agent's,
@@ -1598,6 +1605,11 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
           permissions: UNATTENDED_POLICY,
           // from @sysread/thatch (src/opencode/v2.ts ~788, MIT): the coordinator-stamp
           // pattern — a namespaced metadata record carries the coordinating session id.
+          // The origin record rides the same create call (ADR
+          // 20261124-session-origin-signal): the dispatch is a programmatic
+          // spawn and declares it, so the memory client registers the
+          // worker's lineage from the declaration at create time and no
+          // post-hoc read ever has to recover it.
           metadata: {
             [STAMP]: {
               [DIRECTOR_STAMP]: director,
@@ -1605,6 +1617,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
               dispatchedAt: new Date().toISOString(),
               ...(modelPin ? { model: modelPin.text } : {}),
             },
+            [ORIGIN_STAMP]: { initiator: "program", parent: director },
           },
           location: { directory },
         });

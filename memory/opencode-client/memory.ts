@@ -398,16 +398,44 @@ const createCore = ({
   // the session that dispatched it. The plugin runs in the worker's
   // process, so the worker's own session row is the record of it; read
   // live through the session domain rather than from the event pump,
-  // whose delivery can race the brief's first prompt.
+  // whose delivery can race the brief's first prompt. The coordinator
+  // stamp keeps driving the director's mail machinery and the wake
+  // ordering: the coalescing check below reads it and nothing else.
   const DIRECTOR_STAMP = "chancery";
   const DIRECTOR_DIRECTOR = "coordinatedBy";
+  // The origin declaration (ADR 20261124-session-origin-signal): the
+  // create-time record a programmatic spawn stamps beside the
+  // coordinator stamp, `{ initiator, parent }` — the cross-tool lineage
+  // signal. Whatever tool spawned the session declares it, and the
+  // vocabulary deliberately avoids opencode's `agent` word (that names
+  // the persona role); the store's own vocabulary is applied at this
+  // client, the signal's one mapping point.
+  const ORIGIN_STAMP = "chancery_origin";
+  // The origin record parsed, or null — undeclared. A value that does
+  // not parse exactly (an initiator outside the vocabulary, or a missing
+  // or empty parent) reads as undeclared, never as programmatic:
+  // absence is the human default, so a half-written record or an
+  // unrelated stamp under a different key cannot invent a parent link.
+  type OriginRecord = { initiator: "human" | "program"; parent: string };
+  const originRecordOf = (raw: unknown): OriginRecord | null => {
+    if (typeof raw !== "object" || raw === null) return null;
+    const value = raw as { initiator?: unknown; parent?: unknown };
+    if (
+      (value.initiator === "human" || value.initiator === "program") &&
+      typeof value.parent === "string" &&
+      value.parent
+    ) {
+      return { initiator: value.initiator, parent: value.parent };
+    }
+    return null;
+  };
   // The dispatch carries no parent link, so the worker's registration
   // line is the only way the session registry learns the structure
-  // (PRJ-510): parent = the coordinating session, initiator agent, the
-  // conversation chaining worker -> director session -> human root. That
-  // keeps the full write surface the lineage gate grants a line under a
-  // human root and attributes the worker's captured turns as agent voice
-  // (PRD 20261114-lineage-gated-writes).
+  // (PRJ-510): parent = the declared record's parent session, initiator
+  // agent, the conversation chaining worker -> director session -> human
+  // root. That keeps the full write surface the lineage gate grants a
+  // line under a human root and attributes the worker's captured turns
+  // as agent voice (PRD 20261114-lineage-gated-writes).
   // PRJ-344: opencode 2.2.5 promotes one inbox item per turn boundary.
   // The director module queues the brief as the waking prompt, and this
   // hook runs inside that prompt's admission — an item injected here as
@@ -418,58 +446,78 @@ const createCore = ({
   // waking prompt itself, through the hook's mutable prompt contract.
   // Interactive sessions keep the synthetic injection: the contract
   // there is configured and shipped as is.
-  // The lookup both stamp consumers share (PRJ-510): the coalescing
-  // boolean (PRJ-344) and the lineage registration read the same cached
-  // stamp, so one prompt pays one session.get. A failed live read
-  // answers nothing and caches nothing — the session keeps today's
-  // route for this prompt and the lookup is paid again next prompt, so
-  // a transient blip never hardens into an answer.
-  const dispatchStamps = new Map<string, string | null>();
-  // The sessions whose stamp registered a lineage link: one-time per
-  // session lifetime, the way driven adoption is; cleared on delete, so
-  // a re-prompted session re-looks-up and re-links.
+  // One lookup, every stamp consumer shared (PRJ-510): the coordinator
+  // stamp and the origin declaration ride one durable metadata bag, so
+  // one session.get answers the coalescing boolean (PRJ-344) and the
+  // lineage registration together, and one prompt pays one session.get.
+  // A failed live read answers nothing and caches nothing — the session
+  // keeps today's route for this prompt and the lookup is paid again
+  // next prompt, so a transient blip never hardens into an answer. A
+  // settled read caches both fields; an absent stamp parses as null,
+  // never as a read failure.
+  type SessionStamps = {
+    coordinator: string | null;
+    origin: OriginRecord | null;
+  };
+  const sessionStamps = new Map<string, SessionStamps>();
+  // The sessions whose declaration registered a lineage link: one-time
+  // per session lifetime, the way driven adoption is; cleared on
+  // delete, so a re-prompted session re-looks-up and re-links.
   const dispatchLinked = new Set<string>();
-  const dispatchStampOf = async (
+  const stampsOf = async (
     sessionID: string,
-  ): Promise<string | null | undefined> => {
-    const cached = dispatchStamps.get(sessionID);
-    if (cached !== undefined) return cached;
+  ): Promise<SessionStamps | undefined> => {
+    const cached = sessionStamps.get(sessionID);
+    if (cached) return cached;
     try {
       const info = await sessionApi.get({ sessionID });
-      const raw = info?.metadata?.[DIRECTOR_STAMP]?.[DIRECTOR_DIRECTOR];
-      const stamp = typeof raw === "string" && raw ? raw : null;
-      dispatchStamps.set(sessionID, stamp);
-      return stamp;
+      const metadata = info?.metadata;
+      const raw = metadata?.[DIRECTOR_STAMP]?.[DIRECTOR_DIRECTOR];
+      const settled: SessionStamps = {
+        coordinator: typeof raw === "string" && raw ? raw : null,
+        origin: originRecordOf(metadata?.[ORIGIN_STAMP]),
+      };
+      sessionStamps.set(sessionID, settled);
+      return settled;
     } catch {
       debug("session.dispatch.lookup.failed", { session: sessionID });
       return undefined;
     }
   };
   const isDirectorDispatched = async (sessionID: string): Promise<boolean> => {
-    const stamp = await dispatchStampOf(sessionID);
-    return Boolean(stamp);
+    const stamps = await stampsOf(sessionID);
+    return Boolean(stamps?.coordinator);
   };
-  // One-time registration of the link the dispatch stamp carries,
-  // mirroring the driven adoption. A truthy stamp naming a session
-  // other than this one enqueues the registration row; no stamp, or a
-  // stamp equal to this session's own id, registers nothing and stays
-  // silent. A failed read enqueues nothing and marks nothing — the next
-  // prompt retries. Returns false when the stamp read failed, so the
-  // caller knows the session's lineage state is still unresolved.
+  // One-time registration of the link the origin declaration carries,
+  // mirroring the driven adoption. A record declaring initiator
+  // "program" with a parent other than this session enqueues the
+  // registration row; no record, a record that parses as undeclared, or
+  // a parent equal to this session's own id registers nothing and stays
+  // silent — the human default. A failed read enqueues nothing and marks
+  // nothing — the next prompt retries. Returns false when the read
+  // failed, so the caller knows the session's lineage state is still
+  // unresolved.
   const adoptDispatchParent = async (sessionID: string): Promise<boolean> => {
-    const stamp = await dispatchStampOf(sessionID);
-    if (stamp === undefined) return false;
-    if (stamp && stamp !== sessionID && !dispatchLinked.has(sessionID)) {
+    const stamps = await stampsOf(sessionID);
+    if (stamps === undefined) return false;
+    const origin = stamps.origin;
+    if (
+      origin &&
+      origin.initiator === "program" &&
+      origin.parent !== sessionID &&
+      !dispatchLinked.has(sessionID)
+    ) {
       dispatchLinked.add(sessionID);
       enqueue(queueDir, {
         kind: "session",
         conversation_id: sessionID,
-        parent_conversation_id: stamp,
+        parent_conversation_id: origin.parent,
         cwd: root,
         app: "opencode",
-        // A dispatched session is started by its parent agent, whatever
-        // the root above it is — the lineage walk decides anchoring
-        // (the same rationale as a child session's registration).
+        // A declared-programmatic session is started by its creating
+        // agent, whatever the root above it is — the lineage walk
+        // decides anchoring (the same rationale as a child session's
+        // registration).
         initiator: "agent",
         ts: Date.now() / 1000,
       });
@@ -481,7 +529,7 @@ const createCore = ({
   // 20261114-lineage-gated-writes). A deployment whose sessions are all
   // agent-driven (the webhook bot) declares it in client.json or env; a
   // session with a parent, one driven through MEMORY_PARENT_
-  // CONVERSATION_ID, or one whose registered dispatch link marks it
+  // CONVERSATION_ID, or one whose registered origin link marks it
   // agent-started, is agent-started by construction; everything else
   // is the human's own session. It rides the connection URL (the
   // deployment's default for this client) and each capture's payload
@@ -778,7 +826,7 @@ const createCore = ({
     async userPrompt(sessionID: string, text: string): Promise<void> {
       adoptDrivenParent(sessionID);
       if (childSessions.has(sessionID) || compacting.has(sessionID)) return;
-      // The dispatch stamp's registration row must precede this session's
+      // The origin declaration's registration row must precede this session's
       // first capture row in the queue: the drain registers a conversation
       // from the first payload that names it, and a turn registering
       // first would create the row with the deployment's default
@@ -865,7 +913,7 @@ const createCore = ({
       sessionOpenDone.delete(sessionID);
       sessionOpenBusy.delete(sessionID);
       sessionOpenBusyUntil.delete(sessionID);
-      dispatchStamps.delete(sessionID);
+      sessionStamps.delete(sessionID);
       dispatchLinked.delete(sessionID);
       toolMomentBusyUntil.delete(sessionID);
       complianceBusyUntil.delete(sessionID);
