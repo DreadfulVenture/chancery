@@ -47,7 +47,8 @@ workers. Dispatch and steering are plugin calls on this session:
   agent defaults to `build` — stamps this session as its coordinator, and delivers the brief as a waking prompt. It
   returns immediately with the session id and an acknowledged status. When `base` names the commit the worktree's HEAD
   must be at, the worktree is validated at the call and a stale or detached HEAD refuses with both commits named,
-  instead of a worker discovering it mid-turn.
+  instead of a worker discovering it mid-turn. The dispatched session's memory lineage is registered by the memory
+  client from the stamp (parent = the coordinating session, initiator agent).
 - `director_steer(sessionID, instruction)` re-prompts an existing session as a waking prompt; it returns immediately.
 - `director_worker_status(sessionID)` reads a session's live state (busy or idle, its last outcome, the dispatch stamp);
   convenience only, never authoritative over the worktree.

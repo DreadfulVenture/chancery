@@ -23,8 +23,11 @@ test("a prompt is captured and persists no synthetic", async () => {
   // and the retired channels (/nudge, /tool-recall) never fire.
   await withDaemon(
     () => SILENT,
-    async ({ fire, sessionHooks, synthetics, bodies }) => {
+    async ({ fire, sessionHooks, synthetics, bodies, sessions }) => {
       const typed = "this is a long enough test prompt message";
+      // The host row a live session has: the stamp lookup reads it once
+      // and settles on no dispatch link.
+      sessions.set("s-capture", { metadata: {} });
       const admitted = await fire(sessionHooks, "prompt", {
         sessionID: "s-capture",
         messageID: "um-7",
@@ -52,7 +55,8 @@ test("a prompt is captured and persists no synthetic", async () => {
 test("a short acknowledgement is captured by nothing", async () => {
   await withDaemon(
     () => SILENT,
-    async ({ fire, sessionHooks, synthetics, bodies }) => {
+    async ({ fire, sessionHooks, synthetics, bodies, sessions }) => {
+      sessions.set("s-ack", { metadata: {} });
       const event = await fire(sessionHooks, "prompt", {
         sessionID: "s-ack",
         messageID: "msg-1",
@@ -96,7 +100,8 @@ test("the compaction boundary is announced to the summarizing request", async ()
 test("an assistant turn is captured when its execution ends", async () => {
   await withDaemon(
     () => SILENT,
-    async ({ fire, sessionHooks, emit }) => {
+    async ({ fire, sessionHooks, emit, sessions }) => {
+      sessions.set("s-reply", { metadata: {} });
       await fire(sessionHooks, "prompt", {
         sessionID: "s-reply",
         messageID: "msg-1",

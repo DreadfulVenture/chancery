@@ -401,6 +401,13 @@ const createCore = ({
   // whose delivery can race the brief's first prompt.
   const DIRECTOR_STAMP = "chancery";
   const DIRECTOR_DIRECTOR = "coordinatedBy";
+  // The dispatch carries no parent link, so the worker's registration
+  // line is the only way the session registry learns the structure
+  // (PRJ-510): parent = the coordinating session, initiator agent, the
+  // conversation chaining worker -> director session -> human root. That
+  // keeps the full write surface the lineage gate grants a line under a
+  // human root and attributes the worker's captured turns as agent voice
+  // (PRD 20261114-lineage-gated-writes).
   // PRJ-344: opencode 2.2.5 promotes one inbox item per turn boundary.
   // The director module queues the brief as the waking prompt, and this
   // hook runs inside that prompt's admission — an item injected here as
@@ -411,31 +418,71 @@ const createCore = ({
   // waking prompt itself, through the hook's mutable prompt contract.
   // Interactive sessions keep the synthetic injection: the contract
   // there is configured and shipped as is.
-  const directorDispatched = new Map<string, boolean>();
-  const isDirectorDispatched = async (sessionID: string): Promise<boolean> => {
-    const known = directorDispatched.get(sessionID);
-    if (known !== undefined) return known;
-    let dispatched = false;
+  // The lookup both stamp consumers share (PRJ-510): the coalescing
+  // boolean (PRJ-344) and the lineage registration read the same cached
+  // stamp, so one prompt pays one session.get. A failed live read
+  // answers nothing and caches nothing — the session keeps today's
+  // route for this prompt and the lookup is paid again next prompt, so
+  // a transient blip never hardens into an answer.
+  const dispatchStamps = new Map<string, string | null>();
+  // The sessions whose stamp registered a lineage link: one-time per
+  // session lifetime, the way driven adoption is; cleared on delete, so
+  // a re-prompted session re-looks-up and re-links.
+  const dispatchLinked = new Set<string>();
+  const dispatchStampOf = async (
+    sessionID: string,
+  ): Promise<string | null | undefined> => {
+    const cached = dispatchStamps.get(sessionID);
+    if (cached !== undefined) return cached;
     try {
       const info = await sessionApi.get({ sessionID });
-      dispatched = Boolean(
-        info?.metadata?.[DIRECTOR_STAMP]?.[DIRECTOR_DIRECTOR],
-      );
+      const raw = info?.metadata?.[DIRECTOR_STAMP]?.[DIRECTOR_DIRECTOR];
+      const stamp = typeof raw === "string" && raw ? raw : null;
+      dispatchStamps.set(sessionID, stamp);
+      return stamp;
     } catch {
-      // A read that failed answers nothing: the session keeps today's
-      // route for this prompt and the lookup is paid again next prompt.
       debug("session.dispatch.lookup.failed", { session: sessionID });
-      return false;
+      return undefined;
     }
-    directorDispatched.set(sessionID, dispatched);
-    return dispatched;
+  };
+  const isDirectorDispatched = async (sessionID: string): Promise<boolean> => {
+    const stamp = await dispatchStampOf(sessionID);
+    return Boolean(stamp);
+  };
+  // One-time registration of the link the dispatch stamp carries,
+  // mirroring the driven adoption. A truthy stamp naming a session
+  // other than this one enqueues the registration row; no stamp, or a
+  // stamp equal to this session's own id, registers nothing and stays
+  // silent. A failed read enqueues nothing and marks nothing — the next
+  // prompt retries. Returns false when the stamp read failed, so the
+  // caller knows the session's lineage state is still unresolved.
+  const adoptDispatchParent = async (sessionID: string): Promise<boolean> => {
+    const stamp = await dispatchStampOf(sessionID);
+    if (stamp === undefined) return false;
+    if (stamp && stamp !== sessionID && !dispatchLinked.has(sessionID)) {
+      dispatchLinked.add(sessionID);
+      enqueue(queueDir, {
+        kind: "session",
+        conversation_id: sessionID,
+        parent_conversation_id: stamp,
+        cwd: root,
+        app: "opencode",
+        // A dispatched session is started by its parent agent, whatever
+        // the root above it is — the lineage walk decides anchoring
+        // (the same rationale as a child session's registration).
+        initiator: "agent",
+        ts: Date.now() / 1000,
+      });
+    }
+    return true;
   };
 
   // Who started a session — the lineage gate's initiator (PRD
   // 20261114-lineage-gated-writes). A deployment whose sessions are all
   // agent-driven (the webhook bot) declares it in client.json or env; a
-  // session with a parent, or one driven through MEMORY_PARENT_
-  // CONVERSATION_ID, is agent-started by construction; everything else
+  // session with a parent, one driven through MEMORY_PARENT_
+  // CONVERSATION_ID, or one whose registered dispatch link marks it
+  // agent-started, is agent-started by construction; everything else
   // is the human's own session. It rides the connection URL (the
   // deployment's default for this client) and each capture's payload
   // (the per-session value), never a model-supplied argument.
@@ -448,7 +495,11 @@ const createCore = ({
     return declared === "agent" ? "agent" : "human";
   })();
   const initiatorOf = (sessionID: string): "agent" | "human" => {
-    if (childSessions.has(sessionID) || drivenRegistered.has(sessionID)) {
+    if (
+      childSessions.has(sessionID) ||
+      drivenRegistered.has(sessionID) ||
+      dispatchLinked.has(sessionID)
+    ) {
       return "agent";
     }
     return declaredInitiator;
@@ -724,9 +775,16 @@ const createCore = ({
     // Captures the turn for the store. Nothing is delivered here: content
     // never rides message arrival (ADR 20261104-retire-per-message-delivery)
     // — this is the capture boundary, not a recall one.
-    userPrompt(sessionID: string, text: string): void {
+    async userPrompt(sessionID: string, text: string): Promise<void> {
       adoptDrivenParent(sessionID);
       if (childSessions.has(sessionID) || compacting.has(sessionID)) return;
+      // The dispatch stamp's registration row must precede this session's
+      // first capture row in the queue: the drain registers a conversation
+      // from the first payload that names it, and a turn registering
+      // first would create the row with the deployment's default
+      // initiator — agent prose stamped human voice. A failed stamp read
+      // captures nothing this prompt and retries on the next one.
+      if (!(await adoptDispatchParent(sessionID))) return;
       if (
         !text ||
         text.startsWith("/") ||
@@ -807,7 +865,8 @@ const createCore = ({
       sessionOpenDone.delete(sessionID);
       sessionOpenBusy.delete(sessionID);
       sessionOpenBusyUntil.delete(sessionID);
-      directorDispatched.delete(sessionID);
+      dispatchStamps.delete(sessionID);
+      dispatchLinked.delete(sessionID);
       toolMomentBusyUntil.delete(sessionID);
       complianceBusyUntil.delete(sessionID);
       for (const key of [...toolMomentPending.keys()]) {
@@ -860,7 +919,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       }
     }
     // Capture only — content never rides message arrival.
-    core.userPrompt(event.sessionID, text);
+    await core.userPrompt(event.sessionID, text);
     // The compliance ladder's turn leg (PRD-179): the daemon decides
     // whether this many silent active turns deserve a reminder, and the
     // reminder is the only thing this hook delivers — no memory content.

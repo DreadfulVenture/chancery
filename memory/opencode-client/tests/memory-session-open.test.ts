@@ -80,9 +80,13 @@ test("a director-dispatched worker's block coalesces into the waking prompt", as
         "a coalesced block settles its session like a synthetic one",
       );
       // Capture keeps the coordinator's words: the block is context the
-      // plugin delivered, not the turn's own prompt.
+      // plugin delivered, not the turn's own prompt. (The kind:"session"
+      // registration row the stamped worker also enqueues is asserted in
+      // the lifecycle suite; this test judges the capture rows.)
       assert.deepEqual(
-        queued().map((row) => row.text),
+        queued()
+          .filter((row) => row.role === "user")
+          .map((row) => row.text),
         [brief, brief],
       );
     },

@@ -26,6 +26,9 @@ export function fakeContext() {
   // them through ctx.session.get (the dispatch stamp lives in durable
   // metadata). A session with no row throws, the way the host does.
   const sessions = new Map<string, { metadata?: Record<string, unknown> }>();
+  // The session ids the plugin read live, in order: the stamp lookup's
+  // cost is one host read per prompt, and the tests count them.
+  const sessionGetLog: string[] = [];
   let push: (() => void) | undefined;
 
   const register = (map: Map<string, Function[]>) => (name, callback) => {
@@ -48,6 +51,7 @@ export function fakeContext() {
     session: {
       hook: register(session),
       get: async ({ sessionID }: { sessionID: string }) => {
+        sessionGetLog.push(sessionID);
         const row = sessions.get(sessionID);
         if (!row) throw new Error("Session.NotFoundError");
         return structuredClone(row);
@@ -77,6 +81,7 @@ export function fakeContext() {
     mcp,
     synthetics,
     sessions,
+    sessionGetLog,
     async fire(map: Map<string, Function[]>, name: string, event: unknown) {
       for (const callback of map.get(name) || []) await callback(event);
       return event;
