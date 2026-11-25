@@ -89,7 +89,7 @@ export function readRenderedEnvironment(path: string): Record<string, string> {
 export function readIdentityExpectations(path: string): IdentityExpectations {
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new Error(`${path}: expected a JSON object of identity lists`);
+    throw new Error(`${path}: expected a JSON object of the identity list`);
   }
   const read = (field: string): string[] => {
     const value = (raw as Record<string, unknown>)[field];
@@ -164,7 +164,7 @@ export function checkRenderedConfig(input: {
  * The `zenigata --check-config` entry: three file paths — the rendered
  * unit environment (JSON), the unit's environment file (its secrets, the
  * file the unit's EnvironmentFile reads at boot), and the expected
- * identity lists (JSON). Failures print named, one per line, and the
+ * identity list (JSON). Failures print named, one per line, and the
  * process exits 1 on any and 2 on malformed input.
  */
 export function runConfigCheck(args: string[]): void {
@@ -196,6 +196,6 @@ export function runConfigCheck(args: string[]): void {
     process.exit(1);
   }
   console.log(
-    "zenigata --check-config: the composed boot environment loads clean, declares its lineage, and carries the identity lists",
+    "zenigata --check-config: the composed boot environment loads clean, declares its lineage, and carries the identity list",
   );
 }

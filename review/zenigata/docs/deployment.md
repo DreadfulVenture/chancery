@@ -265,9 +265,16 @@ session-origin ADR's review-bot instance):
   prompt and the answer session's prompt; prose from any other account is a claim to trace against the code. An empty
   list renders nothing, and the reviewer treats all thread content as claims — the honest default.
 
-The `agents` and `access` lists the earlier design carried are retired (PRJ-518): the module options and the
-`ZENIGATA_AGENTS`/`ZENIGATA_ACCESS` variables are gone, and a configuration that still names either fails at boot naming
-the retirement.
+The `agents` and `access` lists the earlier design carried are retired (PRJ-518), and each path a stale configuration
+names them by fails its own way:
+
+- Setting the module's `agents`/`access` options fails at evaluation with NixOS's own unknown-option error. That is
+  deliberate, not a defect: evaluation runs before any deploy, so a stale configuration stops visibly at build time. A
+  follow-up review asked for a retirement note there; the operator chose the native error.
+- A `ZENIGATA_AGENTS`/`ZENIGATA_ACCESS` variable carrying a value fails at boot naming itself, through the boot-time
+  known-set check.
+- An empty-valued one counts as unset — the unset-or-empty contract every list variable honors — and fails nothing: an
+  empty list names nobody, so there is nothing to refuse.
 
 Every humans entry is validated against the forge's account-name shape at module evaluation and again at boot (naming
 the variable and the offending entry). The bot declares its own origin to the store: every session the runtime creates

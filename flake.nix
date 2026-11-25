@@ -380,7 +380,7 @@
               let
                 # One source for both sides of the check: the test
                 # deployment's options and the expectation file the bin
-                # compares the rendered lists against.
+                # compares the rendered list against.
                 identity = {
                   humans = [ "example-user" ];
                 };

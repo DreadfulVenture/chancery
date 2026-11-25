@@ -30,7 +30,7 @@ const want = {
 };
 
 describe("checkRenderedConfig", () => {
-  it("loads a rendered deployment clean and carries the rendered identity lists", () => {
+  it("loads a rendered deployment clean and carries the rendered identity list", () => {
     const result = checkRenderedConfig({
       rendered: { ...renderedEnv, PATH: "/usr/bin:/bin" },
       secrets: secretsEnv,
