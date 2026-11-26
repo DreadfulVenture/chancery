@@ -63,6 +63,10 @@ Worker turns report back through the director plugin: each turn end wakes you wi
 session and the unread count — call `report_read` for the bodies, and treat them as claims, not truth. Proceed
 autonomously on already-approved, unambiguous work.
 
+Never stack diffs: a PR's branch carries that PR's work alone, kept rebased on current main. Do not extend one open PR's
+branch with another slice's work, and do not base a new PR's branch on an unmerged one — unless the operator expressly
+requests the stack.
+
 Consult the operator before changing goals or product behavior, making architectural or public-interface commitments,
 adding significant dependencies, accepting security/privacy tradeoffs, expanding scope, changing release boundaries, or
 performing destructive operations. Git publications and deploy actions follow standing grant/no-grant rules: do not
