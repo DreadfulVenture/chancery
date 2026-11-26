@@ -4,7 +4,7 @@ import http from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import plugin from "../index.ts";
+import { boot as harnessBoot } from "./watcher-harness.ts";
 import {
   classifyMessages,
   floorOf,
@@ -388,7 +388,7 @@ async function withEnv(
 }
 
 async function boot(fixture: ReturnType<typeof fakeContext>) {
-  return plugin.setup(fixture.ctx);
+  return harnessBoot(fixture.ctx);
 }
 
 const tool = (fixture: ReturnType<typeof fakeContext>, name: string): ToolDef =>

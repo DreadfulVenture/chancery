@@ -47,11 +47,15 @@
         # the two deployments stay decoupled.
         homeManagerModules.director = import ./coordinate/director/module.nix { inherit self; };
 
-        # The Zenigata review bot's NixOS module.
-        nixosModules.zenigata = import ./nix/zenigata-module.nix;
-
-        # The Forgejo adapter for Zenigata.
-        nixosModules.forgejo-adapter = import ./nix/forgejo-adapter-module.nix;
+        # The Zenigata review bot's NixOS module, its forge adapter, and
+        # the watcher daemon (PRJ-540): the standalone watcher that holds
+        # the forge and source tokens and serves the credential-free
+        # local route the session-side tools proxy to.
+        nixosModules = {
+          zenigata = import ./nix/zenigata-module.nix;
+          forgejo-adapter = import ./nix/forgejo-adapter-module.nix;
+          watcher-daemon = import ./nix/watcher-daemon-module.nix;
+        };
 
         # The config contribution other repos overlay onto their own OpenCode
         # configuration: plan-mode permissions and the watched instruction files
@@ -540,7 +544,35 @@
                   console.error('the packaged mail-watcher entry loaded, but exports no plugin with id forgejo-watcher and a setup function');
                   process.exit(1);
                 }
+                // The plugin side holds no kernel and no credential; the
+                // daemon's composition must load beside it in the packaged
+                // layout, and the route server's module with it.
+                await import('${config.packages.mail-watcher}/lib/mail-watcher/daemon/composition.ts');
+                await import('${config.packages.mail-watcher}/lib/mail-watcher/daemon/route.ts');
               " && touch "$out"
+            '';
+
+            # The watcher daemon's settings boundary (PRJ-540, zenigata
+            # review 700): the rendered config file is a store path,
+            # world-readable by construction, so the module must refuse a
+            # token anywhere in settings — the sources read the
+            # environment first and the block wins per key, and a token
+            # pasted here would silently override the secrets file. The
+            # check (nix/watcher-daemon-token-refusal.nix) runs one eval
+            # per source placement — the forge's top-level forgeToken and
+            # a token inside each of the four source blocks — plus a
+            # clean control: each refusal must fire and name that
+            # source's secret, and the control must pass clean.
+            watcher-daemon-token-refusal-check = pkgs.runCommand "watcher-daemon-token-refusal-check" { } ''
+              # The eval-only nix invocation redirects its state dirs to
+              # the build's tmp: the sandbox grants no /nix/var writes.
+              export NIX_STATE_DIR="$TMPDIR/state"
+              export NIX_CONF_DIR="$TMPDIR/conf"
+              export HOME="$TMPDIR/home"
+              ${pkgs.nix}/bin/nix-instantiate --eval --strict \
+                --arg modulePath ${./nix/watcher-daemon-module.nix} \
+                --arg nixpkgsPath ${pkgs.path} \
+                ${./nix/watcher-daemon-token-refusal.nix} && touch "$out"
             '';
 
             # The director's own surface load: the packaged entry must be a

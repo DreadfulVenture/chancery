@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import plugin from "../index.ts";
+import { boot as harnessBoot } from "./watcher-harness.ts";
 
 // The PR-state projection (PRJ-406) as the watcher's poll pass writes it:
 // per watched repo, the pass walks the open-PR list to its empty page,
@@ -324,7 +324,7 @@ const fixtureOptions = (dbPath: string, url: string) => ({
 });
 
 async function boot(fixture: ReturnType<typeof fakeContext>) {
-  const cleanup = await plugin.setup(fixture.ctx);
+  const cleanup = await harnessBoot(fixture.ctx);
   return cleanup;
 }
 

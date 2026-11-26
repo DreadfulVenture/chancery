@@ -29,11 +29,13 @@ Its forge adapter (`review/forgejo-adapter`) receives the forge's webhooks; its 
 
 ### the mail-watcher
 
-An OpenCode plugin (`watch/mail-watcher`) that watches event sources and delivers what it sees as session mail. The
-forge source watches Forgejo runs and wakes its session when a pull-request review arrives after the watch registers;
-the PagerDuty source turns PagerDuty incidents into mail the same way; the Linear source turns ticket changes on watched
-Linear projects into mail under the same temporal rule — a ticket's changes wake only from its registration cursor
-onward, never the pre-registration backlog. Its design record is `docs/adr/20261119-watcher-family.md`.
+An OpenCode plugin (`watch/mail-watcher`) and the standalone daemon behind it, watching event sources and delivering
+what they see as session mail. The forge source watches Forgejo runs and wakes its session when a pull-request review
+arrives after the watch registers; the PagerDuty source turns PagerDuty incidents into mail the same way; the Linear
+source turns ticket changes on watched Linear projects into mail under the same temporal rule — a ticket's changes wake
+only from its registration cursor onward, never the pre-registration backlog. All of the reading and every source token
+live in the standalone daemon (`bin/watcher-daemon`, PRJ-540): the plugin in the session carries no credential and
+proxies the watch tools to the daemon's local route. Its design record is `docs/adr/20261119-watcher-family.md`.
 
 ### the director
 
@@ -216,13 +218,18 @@ and a renderer overrides it wholesale. The default keeps the ADR and PRD directo
 plan mode from launching the implementer subagent, which runs with its own permissions and could otherwise edit despite
 the plan agent's own restrictions.
 
-`mail-watcher` is not linked by the module. It needs `options.watcher` (the forge's credential and poll cadence, and the
-PagerDuty and Linear mappings), and OpenCode gives options only to plugins its config names, so the package ships it as
-a directory plugin at `lib/mail-watcher`. A deployment adds that path to its OpenCode `plugins` with the option set, for
-example
-`{ "package": "<store path>/lib/mail-watcher", "options": { "watcher": { "forgeUrl": "https://forge.example.com" } } }`.
-Without the option the watcher disables itself and logs how to set it. It must not also be copied into a scanned
-`plugins/` directory, or it loads twice.
+`mail-watcher` is not linked by the module. Since the split (PRJ-540) it is two halves. The plugin — a directory plugin
+at `lib/mail-watcher` — is the credential-free half: it registers the watch tools and proxies them to the daemon's local
+route, and OpenCode gives options only to plugins its config names, so the deployment adds that path with the route
+address, for example
+`{ "package": "<store path>/lib/mail-watcher", "options": { "watcher": { "daemonUrl": "http://127.0.0.1:8473" } } }`. It
+must not also be copied into a scanned `plugins/` directory, or it loads twice. The daemon — `bin/watcher-daemon` in the
+same package, run by `services.watcher-daemon.enable` (`nixosModules.watcher-daemon`) — holds every source token in its
+own secrets file and does all the forge (and GitHub, Slack, PagerDuty, Linear) reading there; the operator's ruling of
+2026-11-26 is the shape: forge credentials never land in the opencode environment. The daemon's `settings` is the
+watcher block's non-secret surface (`forgeUrl`, `pollSeconds`, the source blocks); the secrets file feeds the unit's
+`EnvironmentFile` (`FORGEJO_TOKEN` and the other tokens, plus `WATCHER_OPENCODE_PASSWORD`), and `opencodeUrl` states the
+opencode server the daemon delivers mail through. Without the daemon running, the tools error named on the call.
 
 The other non-memory plugins load the same two ways. The reminders ride the scanned plugins directory like the memory
 plugin — `plan-reminder` and `discovery-reminder` ship as flat files the module links out of their packages. The
@@ -242,13 +249,15 @@ product's `cursor-client/`, installed at the `clients/cursor` layout the daemon 
 `instructions/`, and a `VERSION` stamp, land at `lib/memory-store` in the store path, and it wires nothing on their
 behalf: no launchd agent, no systemd unit, no client registration. The sibling packages round out the suite
 (`.#memory-hub`, the sync relay; `.#memory-store-plugin`, the OpenCode capture plugin; `.#zenigata`, the pull-request
-review bot; `.#forgejo-adapter`, its forge adapter; `.#mail-watcher`, the OpenCode plugin that reports watched Forgejo
-runs as session mail, wakes its session on pull-request reviews that arrive after the watch registers — never on the
-backlog the PR already carried, never on an unsubmitted draft — and turns PagerDuty incidents and Linear ticket changes
-into mail the same way; `.#director`, the coordination plugin; and the writs' reminder plugins, `.#plan-reminder` and
-`.#discovery-reminder`). A host without home-manager runs the daemon straight out of that package, with the recipe its
-own module uses on Linux — `<app-src>` below is the package's `lib/memory-store` path, and the recipe points the
-daemon's package imports at it via `PYTHONPATH`, the package's import root:
+review bot; `.#forgejo-adapter`, its forge adapter; `.#mail-watcher`, the OpenCode plugin and the watcher daemon behind
+it — the plugin reports watched Forgejo runs as session mail, wakes its session on pull-request reviews that arrive
+after the watch registers — never on the backlog the PR already carried, never on an unsubmitted draft — and turns
+PagerDuty incidents and Linear ticket changes into mail the same way, all of it read by the standalone daemon
+(`services.watcher-daemon`), which holds the tokens and serves the credential-free route the plugin proxies to;
+`.#director`, the coordination plugin; and the writs' reminder plugins, `.#plan-reminder` and `.#discovery-reminder`). A
+host without home-manager runs the daemon straight out of that package, with the recipe its own module uses on Linux —
+`<app-src>` below is the package's `lib/memory-store` path, and the recipe points the daemon's package imports at it via
+`PYTHONPATH`, the package's import root:
 
 ```sh
 export UV_PYTHON=<nixpkgs python>/bin/python3.12

@@ -4,7 +4,7 @@ import http from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import plugin from "../index.ts";
+import { boot as harnessBoot } from "./watcher-harness.ts";
 
 // The watcher as OpenCode 2 hosts it, reading the Forgejo REST API
 // directly (the operator's ruling on #89): setup() reads the operator's
@@ -435,7 +435,7 @@ async function withEnv(
 // Setup as the host runs it: inside the plugin batch, then the batch
 // ends and the host's next read of its mcp state rebuilds it.
 async function boot(fixture: ReturnType<typeof fakeContext>) {
-  const cleanup = await plugin.setup(fixture.ctx);
+  const cleanup = await harnessBoot(fixture.ctx);
   return cleanup;
 }
 
@@ -474,11 +474,11 @@ test("setup validates the watcher options; the forge config rides options or the
   await withEnv({}, async () => {
     // No base url, no token: each disables the watcher at setup.
     await assert.rejects(
-      plugin.setup(fakeContext([], {}).ctx),
+      harnessBoot(fakeContext([], {}).ctx),
       /no forge base url — set options\.watcher\.forgeUrl.*FORGEJO_BASE_URL/,
     );
     await assert.rejects(
-      plugin.setup(
+      harnessBoot(
         fakeContext([], { watcher: { forgeUrl: "https://example.invalid" } })
           .ctx,
       ),
@@ -486,7 +486,7 @@ test("setup validates the watcher options; the forge config rides options or the
     );
     // A bad poll cadence still disables the plugin at setup.
     await assert.rejects(
-      plugin.setup(
+      harnessBoot(
         fakeContext([], {
           watcher: {
             forgeUrl: "https://example.invalid",
@@ -499,7 +499,7 @@ test("setup validates the watcher options; the forge config rides options or the
     );
     // A wrong-typed or wrong-scheme url.
     await assert.rejects(
-      plugin.setup(
+      harnessBoot(
         fakeContext([], {
           watcher: { forgeUrl: "ftp://nope", forgeToken: TOKEN },
         }).ctx,

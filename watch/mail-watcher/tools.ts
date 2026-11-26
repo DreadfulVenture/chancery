@@ -1,10 +1,10 @@
 // The family's tool surface (the ADR: one tool surface with a source
 // discriminator; a source does not mint its own tools):
-// watcher_register / watcher_list / watcher_forget over the kernel, and
-// the projection's forge_state over the board. The schemas and the
-// execute handlers are today's, moved verbatim from the entry.
-
-import { readStamps } from "./kernel.ts";
+// watcher_register / watcher_list / watcher_forget and the projection's
+// forge_state. Since the split (PRJ-540) the tools hold no kernel and
+// no credential: the schemas and the result strings are today's,
+// byte-identical, and the execute handlers proxy to the watcher
+// daemon's local route with the calling session's id.
 
 // The register request's JSON schema, as the tool carries it.
 const registerSchema = {
@@ -69,7 +69,8 @@ const stateSchema = {
   },
   additionalProperties: false,
 };
-export const createTools = ({ ctx, kernel, debug, projectionDb }) => {
+
+export const createTools = ({ route }) => {
   const registerTool = {
     name: "watcher_register",
     description: `Watch a Forgejo run, PR, branch, or a PR's reviews and report into this session as chat mail. Watches ride this session's metadata, survive plugin reloads and host restarts, and live until watcher_forget — no expiry. A pr watch ends itself at the pull request's close: one terminal mail (merged, or closed unmerged) and the watch dissolves, no forget needed. A pr-reviews watch delivers one wake per new review on the pull request — every reviewer's, this session's own included; the reviews the PR already carries at register are the spent backlog, and an unsubmitted draft never wakes. A slack-channel watch delivers one wake per new message on the Slack channel — the message's content, sender, and timestamp in the wake; bot messages included, the subscriber filters, and the channel's history at register is the spent backlog. A github-pr or github-issue watch follows one GitHub pull request or issue: one wake per new review, comment, or state change — the reviews and comments it already carries at register are the spent backlog — and a github-pr watch ends itself at the PR's close with one terminal mail (merged, or closed unmerged). Re-registering the same pr or branch returns the existing claimed watch instead of a second owner; a github-pr watch claims the same way, a github-issue watch does not.`,
@@ -79,7 +80,7 @@ export const createTools = ({ ctx, kernel, debug, projectionDb }) => {
       const caller = context?.sessionID;
       if (!caller)
         throw new Error("watcher_register: tool context carried no session id");
-      const parsed = await kernel.register(input, caller);
+      const parsed = await route.register(input, caller);
       if (parsed.outcome === "claimed") {
         return {
           content: JSON.stringify({
@@ -117,15 +118,16 @@ export const createTools = ({ ctx, kernel, debug, projectionDb }) => {
     description:
       "List this session's Forgejo watches, with their delivered verdicts.",
     input: listSchema,
-    execute: async (raw, context) => {
+    execute: async (_raw, context) => {
       const caller = context?.sessionID;
       if (!caller)
         throw new Error("watcher_list: tool context carried no session id");
-      const rows = await readStamps(ctx, debug, caller);
+      const answer = await route.list(caller);
+      const rows = Array.isArray(answer.rows) ? answer.rows : [];
       return {
         content: JSON.stringify({
           ok: true,
-          watches: (rows ?? []).map((row) => ({
+          watches: rows.map((row) => ({
             id: row?.id,
             kind: row?.kind,
             repo: row?.repo,
@@ -150,39 +152,25 @@ export const createTools = ({ ctx, kernel, debug, projectionDb }) => {
         throw new Error("watcher_forget: tool context carried no session id");
       const id = String(input.id || "").trim();
       if (!id) throw new Error("watcher_forget: id is required");
-      await kernel.forget(id, caller);
+      await route.forget(id, caller);
       return { content: JSON.stringify({ ok: true, id }) };
     },
   };
 
   // The projection's agent surface (PRJ-406): the whole board in one
   // call, rows exactly as the poll pass mapped them, staleness carried
-  // by each row's syncedAt and said plainly in the description.
+  // by each row's syncedAt and said plainly in the description. The
+  // board lives behind the daemon's route now; the answer's shape is
+  // today's.
   const stateTool = {
     name: "forge_state",
     description:
       "The forgejo watcher's PR-state projection: for each watched repo, every open pull request, its reviews, and its head's CI statuses, as the last poll pass read them — the whole board in one call instead of a scour of forge reads. This is a mirror, not the forge: every row is exactly as stale as its syncedAt says, and a decision that needs point-truth takes a live forge read, not this projection.",
     input: stateSchema,
     execute: async (raw) => {
-      let db;
-      try {
-        db = projectionDb();
-      } catch (error) {
-        return {
-          content: JSON.stringify({
-            ok: false,
-            error: `the pr-state projection is unavailable: ${error?.message ?? error}`,
-          }),
-        };
-      }
       const repo = String(raw?.repo ?? "").trim();
-      return {
-        content: JSON.stringify({
-          ok: true,
-          ...(repo ? { repo } : {}),
-          ...db.board(repo || null),
-        }),
-      };
+      const answer = await route.state(repo || null);
+      return { content: JSON.stringify(answer) };
     },
   };
   return { registerTool, listTool, forgetTool, stateTool };
