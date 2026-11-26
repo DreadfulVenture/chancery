@@ -70,9 +70,14 @@ let
   #     granted actions by behavior, but nothing in the driver exercises
   #     websearch, so a serve that renamed the action would ship this
   #     grant dead with nothing red.
-  #   - `plugin.use` deny is safe for the serve's own machinery: internal
-  #     config plugins are registered directly, outside the policy-gated
-  #     load path.
+  #   - `plugin.use` has no blanket denial in the floor (PRJ-535): the
+  #     earliest-loaded policy wins the union, so a floor deny would make
+  #     every deployment-layer allow ungrantable; without the row the
+  #     decision defaults to allow and a plugin loads where the deployment
+  #     grants it. The note that matters stays true: the serve's own
+  #     internal config plugins are registered directly, outside the
+  #     policy-gated load path, so the floor never needed the deny for
+  #     its own machinery.
   runtimeConfig = {
     "$schema" = "https://opencode.ai/config.json";
     # A Nix-packaged binary must not self-update; a review session carries
@@ -100,7 +105,10 @@ let
     # named for the MCP server that deployment runs. A deployment that
     # pins no rows gets a reviewer that cannot post — the correct default:
     # the shipped definition stays free of any one deployment's server
-    # naming.
+    # naming. Plugins are the same posture (PRJ-535): no blanket plugin.use
+    # denial here, so plugins load only where a deployment grants them —
+    # config-declared or scanned alike — and a deployment that grants no
+    # plugin gets none.
     # Deliberately NOT `integration.use`: that action also
     # covers providers and models supplied from local config rather than
     # an account, so its deny takes out the deployment's own model route
@@ -108,11 +116,6 @@ let
     policies = [
       {
         action = "integration.connect";
-        resource = "*";
-        effect = "deny";
-      }
-      {
-        action = "plugin.use";
         resource = "*";
         effect = "deny";
       }

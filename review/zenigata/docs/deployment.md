@@ -216,10 +216,12 @@ the row alone.
 The grants do not make the reviewer harmless. `shell` on `*` subsumes every authoring tool — redirection, `git apply`,
 `rm` — so a build writing through the shell is the grant working. The forge surface changed shape with review 665: the
 session holds the forge capability the deployment's MCP carries, scoped by the ruleset to the review-posting tools, and
-every other MCP server's tools stay behind the deny-all. The integrations and plugin channels stay denied at the policy
-level, the runtime floor no longer refuses `mcp.use` (the deployment's MCP catalog is how the session reaches the
-forge), and the bot's forge adapter keeps its read side — the intake guards and the bookkeeping lookup — while nothing
-in the pipeline posts any more.
+every other MCP server's tools stay behind the deny-all. The integration channel stays denied at the policy level; the
+runtime floor no longer refuses `mcp.use` (the deployment's MCP catalog is how the session reaches the forge), and —
+since PRJ-535 — no longer carries a blanket `plugin.use` denial either: the earliest-loaded policy wins the serve's
+union, so a floor deny would have made every deployment-layer plugin allow ungrantable. Plugins load where the
+deployment grants them. The bot's forge adapter keeps its read side — the intake guards and the bookkeeping lookup —
+while nothing in the pipeline posts any more.
 
 ## The runtime package
 
@@ -237,17 +239,20 @@ delegated-pass settle test against the new serve on the build.
 
 The config the package ships is the neutral, product-owned floor: it keeps a global deny with the subagent delegation
 carve-out after it (a headless serve has nobody to answer a permission ask, so the floor denies instead of asking) and
-refuses integrations and plugins at the policy level — deliberately not `integration.use`, whose deny also covers
+refuses the integration channel at the policy level — deliberately not `integration.use`, whose deny also covers
 providers served from local config and would take out the deployment's own model route — and turns sharing and
 self-update off. The `mcp.use` refusal is gone (review 665): the deployment passes the forge MCP into the serve, the
 reviewer session posts its own review through it, and the deployment's config carries the reviewer's forge-tool rows,
-named for that server. The reviewer agent's own definition carries its working grants (reads, searches and globs, shell
-commands, web lookups, subagent delegation, and its skills): the file-defined agent's rules land after the floor and
-win, so the grants travel in the package and no deployment re-allows anything. The deployment-only wiring — the model
-route with the gateway's virtual-key attribution, the serve's address and password, the agent-definition directories it
-scans, the skills directory the review session's skills load from, and the forge MCP server the session posts through,
-with the reviewer's forge-tool rows named for it — is the deployment's layer; the package's `opencodeConfigPath`
-passthru names where the config lands inside it. The skills directory is the opencode assets package's per-client tree
+named for that server. The `plugin.use` refusal is gone too (PRJ-535): the earliest-loaded policy wins the serve's
+union, so a floor deny would have made every deployment-layer plugin allow ungrantable; plugins load where the
+deployment grants them, and a deployment that grants no plugin gets none. The reviewer agent's own definition carries
+its working grants (reads, searches and globs, shell commands, web lookups, subagent delegation, and its skills): the
+file-defined agent's rules land after the floor and win, so the grants travel in the package and no deployment re-allows
+anything. The deployment-only wiring — the model route with the gateway's virtual-key attribution, the serve's address
+and password, the agent-definition directories it scans, the skills directory the review session's skills load from, the
+forge MCP server the session posts through, with the reviewer's forge-tool rows named for it, and the plugin grants for
+the plugins that deployment wires — is the deployment's layer; the package's `opencodeConfigPath` passthru names where
+the config lands inside it. The skills directory is the opencode assets package's per-client tree
 (`share/skills.opencode`, built by the flake's assets packaging from the writs skills tree): the whole tree rides in,
 and the reviewer's skill grant covers all of it — the prompt names `review-pr`, whose flow carries `humanizer` (which
 carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
