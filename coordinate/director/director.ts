@@ -1464,7 +1464,7 @@ const readSchema = {
 // or leave text counts, copies the old persisting mechanism left in
 // stored history included, with no special-casing.
 const REMINDER = `<system-reminder>
-Director session: the lane is coordination. Slice the objective and hand each slice to a worker — dispatch (director_dispatch), steer (director_steer), verify the worker's claims yourself from the worktree and command output, ship under the standing grant, report. Edits in this session are for coordination bookkeeping only (manifests, worker-report reading, PR text); verification reads and gate runs are yours, implementation edits are not — put the work in a worker's hands.
+Director session: the lane is coordination. Slice the objective and hand each slice to a worker — dispatch (director_dispatch), steer (director_steer), verify the worker's claims yourself from the worktree and command output, ship under the standing grant, report. Edits in this session are for coordination bookkeeping only (manifests, worker-report reading, PR text); verification reads, gate runs, and the briefs you dispatch with are yours. Implementation edits are not, and neither is research — open-ended investigation to answer a question, design recon, archaeology — put the work in a worker's hands.
 </system-reminder>`;
 
 // The stale-reconcile's neutralizing line, plan.ts's leave as the model:
