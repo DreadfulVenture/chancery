@@ -31,6 +31,14 @@ export interface Clock {
  */
 export interface StageTracker {
   markStage(eventId: string, stage: string): void;
+  /**
+   * The pipeline recorded the reviewer session it just created for the
+   * event (PRJ-538): the live row carries the id so the status page can
+   * read the session's turn-by-turn log through the driver while the
+   * run runs. A no-op on a row the tracker does not hold, like
+   * markStage.
+   */
+  markSession(eventId: string, sessionId: string): void;
 }
 
 export interface Ctx {

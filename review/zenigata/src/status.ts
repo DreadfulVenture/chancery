@@ -81,6 +81,21 @@ export class LiveSessions implements StageTracker {
     }
   }
 
+  /**
+   * The pipeline created the run's reviewer session (PRJ-538): the row
+   * carries the id, and the status page reads the session's turn-by-turn
+   * log through the driver with it while the run runs. A retry policy
+   * re-run that creates a fresh session overwrites the id — the row is
+   * the live truth, and its newest session is what the log reads.
+   */
+  markSession(eventId: string, sessionId: string): void {
+    const row = this.rows.get(eventId);
+    if (row === undefined) {
+      return;
+    }
+    row.sessionId = sessionId;
+  }
+
   /** The run settled; the status db row is the run's truth now. */
   release(eventId: string): void {
     this.rows.delete(eventId);
@@ -91,17 +106,18 @@ export class LiveSessions implements StageTracker {
     return [...this.rows.values()].map((row) => this.viewOf(row));
   }
 
-  /**
-   * The live rows the human page renders: the machine contract's views
+  /** The live rows the human page renders: the machine contract's views
    * each extended with the row's started stamp — the page derives the
-   * running duration from it. Server-internal render data, passed to
-   * renderStatusPage and never serialized into /status (the
-   * SessionStartView extension).
+   * running duration from it — and the row's reviewer session id
+   * (PRJ-538), the key the page reads the live session log through.
+   * Server-internal render data, passed to renderStatusPage and never
+   * serialized into /status (the SessionStartView extension).
    */
   viewsWithStartedAt(): SessionStartView[] {
     return [...this.rows.values()].map((row) => ({
       ...this.viewOf(row),
       startedAtMs: row.startedAtMs,
+      sessionId: row.sessionId,
     }));
   }
 
@@ -134,6 +150,12 @@ interface LiveSessionRow {
    * Undefined while the row is parked.
    */
   startedAtMs: number | undefined;
+  /**
+   * The reviewer session the pipeline created for the run (PRJ-538).
+   * Undefined until the review stage creates it; the page reads the
+   * session's turn-by-turn log through it while the run runs.
+   */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -58,6 +58,26 @@ export interface SessionStartView extends SessionView {
    * row carries it by the ledger's own rule.
    */
   startedAtMs: number | undefined;
+  /**
+   * The reviewer session's id (PRJ-538), recorded by the pipeline the
+   * moment it created the session — the key the page reads the live
+   * session log through. Undefined while the run is parked and until
+   * the review stage creates its session; never serialized into
+   * /status (the SessionStartView extension).
+   */
+  sessionId?: string;
+}
+
+/**
+ * The page's live-session row, further extended with the live session
+ * log's view, read through the session driver at each render — the log
+ * changes while the run runs, so nothing here is cached. Server-internal
+ * render data — passed to renderStatusPage, never serialized into
+ * /status.
+ */
+export interface SessionLiveView extends SessionStartView {
+  /** The live session log's view; undefined while the run has no session yet. */
+  log?: TranscriptView;
 }
 
 export interface DroppedStartView {
@@ -139,17 +159,19 @@ export interface RunDraftsView extends RunWallView {
 
 /**
  * One run's reviewer-session transcript view (PRJ-461's transcript
- * scope), read live through the session driver for the human page:
- * `found` carries the session's turns composed for the pre block —
- * already redacted and byte-capped by the composition — while the
- * session stands; `swept` says the driver reported the session gone,
- * the retention sweep being the usual hand (the classification reads
- * any not-found answer the same, so the page's note names the fact
- * without attributing the sweeper); `unavailable` says the read failed
- * for any other reason. All three are page-only render data.
+ * scope, rendered as the session's turn-by-turn log since PRJ-538), read
+ * live through the session driver for the human page: `found` carries
+ * the session's activity composed for the pre block — already redacted
+ * and byte-capped by the composition — while the session stands, with
+ * `latest` holding the newest turn's first rendered line (the live
+ * row's glance); `swept` says the driver reported the session gone, the
+ * retention sweep being the usual hand (the classification reads any
+ * not-found answer the same, so the page's note names the fact without
+ * attributing the sweeper); `unavailable` says the read failed for any
+ * other reason. All three are page-only render data.
  */
 export type TranscriptView =
-  | { state: "found"; text: string; truncated: boolean }
+  | { state: "found"; text: string; truncated: boolean; latest?: string }
   | { state: "swept" }
   | { state: "unavailable" };
 
@@ -416,9 +438,9 @@ const transcriptReport = (run: RunDraftsView): string => {
     return `<div class="transcript-note muted small">the session stands, but recorded no turns</div>`;
   }
   const capped = transcript.truncated
-    ? `<div class="transcript-note muted small">the transcript is capped at the page's 64KiB; its oldest turns are cut</div>`
+    ? `<div class="transcript-note muted small">the log is capped at the page's 64KiB; its oldest turns are cut</div>`
     : "";
-  return `${capped}<details class="transcript"><summary class="muted small">reviewer session transcript</summary><pre class="transcript-body">${esc(
+  return `${capped}<details class="transcript"><summary class="muted small">reviewer session log</summary><pre class="transcript-body">${esc(
     transcript.text,
   )}</pre></details>`;
 };
@@ -440,6 +462,42 @@ const narrationTail = (lines: string[]): string =>
   lines.length === 0
     ? `<p class="empty">Nothing said yet this boot.</p>`
     : `<pre class="log-tail">${esc(lines.join("\n"))}</pre>`;
+
+// ---------------------------------------------------------------------------
+// The live session log
+// ---------------------------------------------------------------------------
+
+/**
+ * One running row's session log cell (PRJ-538): the newest activity as
+ * the glance, the full turn-by-turn log behind the collapsible pre
+ * block. The view arrives composed, redacted, and capped; every part
+ * routes through esc() once. A row whose run has not created its
+ * session yet renders the placeholder; a read that failed (or a session
+ * the driver reports gone — the sweeper cannot hold a live row, but the
+ * classification stays honest anyway) says so.
+ */
+const liveLogCell = (session: SessionLiveView): string => {
+  if (session.sessionId === undefined || session.log === undefined) {
+    return `<span class="muted small">no session yet</span>`;
+  }
+  const log = session.log;
+  if (log.state === "swept") {
+    return `<div class="transcript-note muted small">the session is gone — the log is not available</div>`;
+  }
+  if (log.state === "unavailable") {
+    return `<div class="transcript-note muted small">the log could not be read right now</div>`;
+  }
+  if (log.text === "") {
+    return `<div class="transcript-note muted small">the session stands, but has recorded nothing yet</div>`;
+  }
+  const glance =
+    log.latest === undefined
+      ? ""
+      : `<span class="muted small">${esc(log.latest)}</span><br>`;
+  return `${glance}<details class="transcript"><summary class="muted small">session log</summary><pre class="transcript-body">${esc(
+    log.text,
+  )}</pre></details>`;
+};
 
 // ---------------------------------------------------------------------------
 // One table renderer
@@ -514,7 +572,7 @@ const configList = (config: StatusConfig, forgeUrl: string): string => {
 export function renderStatusPage(
   status: StatusData,
   adapterReachable: boolean,
-  sessions: SessionStartView[],
+  sessions: SessionLiveView[],
   runs: RunDraftsView[],
   forgeUrl: string,
   logLines: string[] = [],
@@ -524,7 +582,7 @@ export function renderStatusPage(
   const renderedAt = new Date(now).toISOString();
   const { uptime, droppedStarts, config } = status;
 
-  const sessionColumns: Array<Column<SessionStartView>> = [
+  const sessionColumns: Array<Column<SessionLiveView>> = [
     {
       label: "pull request",
       // Live rows carry the re-request affordance with the PR link.
@@ -538,6 +596,7 @@ export function renderStatusPage(
       label: "last activity",
       cell: (session) => stamped(session.lastActivityAt, now),
     },
+    { label: "session log", cell: liveLogCell },
   ];
 
   const runColumns: Array<Column<RunWallView>> = [

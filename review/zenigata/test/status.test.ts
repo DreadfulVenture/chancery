@@ -30,6 +30,9 @@ import {
 import {
   composeTranscriptView,
   REVIEW_SLOTS,
+  SESSION_LOG_GLANCE_CAP,
+  TOOL_INPUT_CAP,
+  TOOL_OUTPUT_CAP,
   TRANSCRIPT_TURN_MARKER,
   TRANSCRIPT_VIEW_CAP,
 } from "../src/server.js";
@@ -319,6 +322,82 @@ describe("status surface", () => {
     });
     expect(inReview.stage).toBe("review");
     expect(inReview.lastActivityAt).not.toBe(inIntake.sessions[0]?.acceptedAt);
+
+    releasePrompt();
+    await h.handle.awaitSettled(event.eventId);
+  });
+
+  it("the running row carries its reviewer session's log once the pipeline created it (PRJ-538)", async () => {
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const h = await harness({
+      script: happyScript(),
+      wrapSessions: gated(promptGate),
+    });
+    const releaseGets = h.forge.parkGetPullRequests();
+
+    const event = makeReviewRequested({ repo: REPO, pr: PR });
+    await h.source.postToIntake(intakeUrl(h), EVENT_TOKEN, event);
+    await waitFor(() => h.forge.parkedGets === 1);
+
+    // Parked in the intake stage, before the session exists: the log
+    // cell names the fact.
+    const before = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(before).toContain("no session yet");
+    expect(before).not.toContain("session log</summary>");
+
+    releaseGets();
+    await waitFor(async () => {
+      const body = await fetchStatus(h);
+      return body.sessions.find((session) => session.stage === "review");
+    });
+
+    // The session exists now; its log is empty while the prompt is
+    // parked, and the cell says so instead of implying a log.
+    const during = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(during).toContain(
+      "the session stands, but has recorded nothing yet",
+    );
+
+    releasePrompt();
+    await h.handle.awaitSettled(event.eventId);
+    // Settled: the live row is gone, so the cell rides the runs table's
+    // failed-row transcript path instead — a posted run carries none.
+    const after = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(after).toContain("Nothing running right now.");
+  });
+
+  it("the live log cell renders the log through the failed rows' own bounded read", async () => {
+    // A run parked with its transcript recorded — the read hangs to the
+    // bound and the cell names it, without hanging the page.
+    let aborted = false;
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const h = await harness({
+      script: happyScript(),
+      wrapSessions: (inner) =>
+        hangingTranscript(() => {
+          aborted = true;
+        })(gated(promptGate)(inner)),
+    });
+    const releaseGets = h.forge.parkGetPullRequests();
+    const event = makeReviewRequested({ repo: REPO, pr: PR });
+    await h.source.postToIntake(intakeUrl(h), EVENT_TOKEN, event);
+    releaseGets();
+    await waitFor(async () => {
+      const body = await fetchStatus(h);
+      return body.sessions.find((session) => session.stage === "review");
+    });
+
+    const started = Date.now();
+    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(aborted).toBe(true);
+    expect(page).toContain("the log could not be read right now");
 
     releasePrompt();
     await h.handle.awaitSettled(event.eventId);
@@ -870,18 +949,18 @@ describe("the failed run's transcript view", () => {
   /** A scripted run that fails: the reply carries no status line. */
   const failingScript = () => ["not json"];
 
-  it("a retained failed run offers its reviewer session transcript while the session stands", async () => {
+  it("a retained failed run offers its reviewer session log while the session stands", async () => {
     const h = await harness({ script: failingScript() });
     await postReviewEvent(h);
 
     const page = await (await fetch(`${intakeUrl(h)}/`)).text();
     // The failure cell carries the collapsible transcript, oldest turn
     // first: the pipeline's own prompt, then the scripted reply.
-    expect(page).toContain("reviewer session transcript");
+    expect(page).toContain("reviewer session log");
     expect(page).toContain("user: ");
     expect(page).toContain("reviewer: not json");
     // The posted runs' cells stay exactly as they were.
-    expect((page.match(/reviewer session transcript/g) ?? []).length).toBe(1);
+    expect((page.match(/reviewer session log/g) ?? []).length).toBe(1);
   });
 
   it("a swept session degrades: the note names the fact without the sweeper", async () => {
@@ -898,7 +977,7 @@ describe("the failed run's transcript view", () => {
     // the second view would render the stale transcript instead of the
     // gone note.
     const before = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(before).toContain("reviewer session transcript");
+    expect(before).toContain("reviewer session log");
 
     await h.handle.sweep();
     expect(h.sessions.disposed).toHaveLength(1);
@@ -907,7 +986,7 @@ describe("the failed run's transcript view", () => {
     expect(page).toContain(
       "the session is gone — the transcript is not available",
     );
-    expect(page).not.toContain("reviewer session transcript");
+    expect(page).not.toContain("reviewer session log");
   });
 
   it("a window-0 run tears its session down at settle and offers no transcript", async () => {
@@ -921,7 +1000,7 @@ describe("the failed run's transcript view", () => {
     expect(h.sessions.disposed).toHaveLength(1);
 
     const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).not.toContain("reviewer session transcript");
+    expect(page).not.toContain("reviewer session log");
     expect(page).not.toContain("transcript was swept");
   });
 
@@ -1013,11 +1092,11 @@ describe("the failed run's transcript view", () => {
     await postReviewEvent(h);
 
     const first = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(first).toContain("reviewer session transcript");
+    expect(first).toContain("reviewer session log");
     expect(reads).toBe(1);
 
     const second = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(second).toContain("reviewer session transcript");
+    expect(second).toContain("reviewer session log");
     expect(reads).toBe(1);
   });
 
@@ -1049,7 +1128,7 @@ describe("the failed run's transcript view", () => {
 describe("the transcript view's cap math", () => {
   it("an oversized newest turn renders its capped line at the view cap exactly", () => {
     const view = composeTranscriptView([
-      { role: "assistant", text: "y".repeat(200_000) },
+      { role: "assistant", at: 0, text: "y".repeat(200_000) },
     ]);
     expect(view.state).toBe("found");
     expect(view.truncated).toBe(false);
@@ -1072,7 +1151,11 @@ describe("the transcript view's cap math", () => {
       Buffer.byteLength(TRANSCRIPT_TURN_MARKER, "utf8") -
       Buffer.byteLength("reviewer: ", "utf8");
     const view = composeTranscriptView([
-      { role: "assistant", text: `x${"日".repeat(Math.ceil((room - 1) / 3))}` },
+      {
+        role: "assistant",
+        at: 0,
+        text: `x${"日".repeat(Math.ceil((room - 1) / 3))}`,
+      },
     ]);
     expect(view.state).toBe("found");
     expect(view.truncated).toBe(false);
@@ -1090,8 +1173,8 @@ describe("the transcript view's cap math", () => {
 
   it("older turns drop whole once the newest capped line fills the cap", () => {
     const view = composeTranscriptView([
-      { role: "user", text: "the older prompt" },
-      { role: "assistant", text: "y".repeat(200_000) },
+      { role: "user", at: 0, text: "the older prompt" },
+      { role: "assistant", at: 0, text: "y".repeat(200_000) },
     ]);
     expect(view.truncated).toBe(true);
     expect(view.text).not.toContain("the older prompt");
@@ -1100,11 +1183,125 @@ describe("the transcript view's cap math", () => {
 
   it("a view under the cap keeps every turn and claims no truncation", () => {
     const view = composeTranscriptView([
-      { role: "user", text: "prompt" },
-      { role: "assistant", text: "reply" },
+      { role: "user", at: 0, text: "prompt" },
+      { role: "assistant", at: 0, text: "reply" },
     ]);
     expect(view.truncated).toBe(false);
     expect(view.text).toBe("user: prompt\n\nreviewer: reply");
+  });
+
+  it("an unstamped turn renders bare, and a stamped one carries its local time (PRJ-538)", () => {
+    const view = composeTranscriptView([
+      { role: "user", at: 0, text: "prompt" },
+      // A fixed epoch whose local rendering the assertion reads back
+      // off the page's own clock — the stamp is the server's local time.
+      { role: "assistant", at: 1_700_000_000_000, text: "reply" },
+    ]);
+    expect(view.text).toContain("user: prompt\n\n");
+    expect(view.text).toMatch(/\[\d{2}:\d{2}:\d{2}\] reviewer: reply$/);
+  });
+
+  it("a tool turn renders its block: status, input, output, error", () => {
+    const view = composeTranscriptView([
+      {
+        role: "tool",
+        at: 0,
+        name: "bash",
+        status: "completed",
+        input: '{"command":"git log -1"}',
+        output: "abc the head",
+      },
+      {
+        role: "tool",
+        at: 0,
+        name: "read",
+        status: "error",
+        input: '{"path":"src/x.ts"}',
+        output: "",
+        error: "file not found",
+      },
+    ]);
+    expect(view.text).toContain(
+      'tool bash — completed\n    input: {"command":"git log -1"}\n    output: abc the head',
+    );
+    expect(view.text).toContain(
+      'tool read — error\n    input: {"path":"src/x.ts"}\n    error: file not found',
+    );
+    // No output line on a tool without one, no error line on a success.
+    expect(view.text).not.toContain("    error: undefined");
+  });
+
+  it("a subagent report renders under its own prefix", () => {
+    const view = composeTranscriptView([
+      { role: "report", at: 0, text: "the blind pass found nothing" },
+    ]);
+    expect(view.text).toBe("report: the blind pass found nothing");
+  });
+
+  it("a tool output's credential is redacted before the cap cuts it", () => {
+    // The credentialed-URL rule holds per piece: the redaction runs on
+    // the full tool output first, so the capped head can only carry
+    // already-redacted text — no scheme://user fragment without its @.
+    const raw = `head https://user:secretpw@forge.invalid/x ${"y".repeat(TOOL_OUTPUT_CAP)}`;
+    const view = composeTranscriptView([
+      {
+        role: "tool",
+        at: 0,
+        name: "bash",
+        status: "completed",
+        input: "",
+        output: raw,
+      },
+    ]);
+    expect(view.text).not.toContain("https://user");
+    expect(view.text).not.toContain("secretpw");
+    expect(view.text).toContain("forge.invalid/x");
+  });
+
+  it("a huge tool piece is capped to its own budget, not the view's", () => {
+    const view = composeTranscriptView([
+      {
+        role: "tool",
+        at: 0,
+        name: "bash",
+        status: "completed",
+        input: '{"command":"' + "z".repeat(5000) + '"}',
+        output: "y".repeat(5000),
+      },
+    ]);
+    // Input line under TOOL_INPUT_CAP, output line under TOOL_OUTPUT_CAP:
+    // one tool cannot eat the view and strand every older turn.
+    const inputLine = /    input: .*/.exec(view.text)?.[0] ?? "";
+    const outputLine = /    output: .*/.exec(view.text)?.[0] ?? "";
+    expect(Buffer.byteLength(inputLine, "utf8")).toBeLessThanOrEqual(
+      TOOL_INPUT_CAP + 32,
+    );
+    expect(Buffer.byteLength(outputLine, "utf8")).toBeLessThanOrEqual(
+      TOOL_OUTPUT_CAP + 32,
+    );
+    expect(view.text).toContain("[cut at the page's cap]");
+  });
+
+  it("latest carries the newest turn's first line, capped for the glance", () => {
+    const view = composeTranscriptView([
+      { role: "user", at: 0, text: "prompt" },
+      {
+        role: "tool",
+        at: 0,
+        name: "bash",
+        status: "running",
+        input: '{"command":"long build"}',
+        output: "",
+      },
+    ]);
+    expect(view.latest).toBe("tool bash — running");
+    const view2 = composeTranscriptView([
+      { role: "assistant", at: 0, text: "y".repeat(500) },
+    ]);
+    // The glance stays short even when the newest line is huge.
+    expect(Buffer.byteLength(view2.latest ?? "", "utf8")).toBeLessThanOrEqual(
+      SESSION_LOG_GLANCE_CAP,
+    );
   });
 });
 
@@ -1195,6 +1392,42 @@ describe("the live session ledger", () => {
     expect(ledger.viewsWithStartedAt()[0]?.startedAtMs).toBeUndefined();
     ledger.release(event.eventId);
     expect(ledger.views()).toHaveLength(0);
+  });
+
+  it("markSession puts the reviewer session's id on the row — the page's log key, outside the machine contract (PRJ-538)", () => {
+    const clock = ledgerClock();
+    const ledger = new LiveSessions(clock);
+    const event = makeReviewRequested({ repo: REPO, pr: 9 });
+    ledger.accept(event, ledgerStart(event.eventId), clock.now());
+    // Before the session exists the row carries none.
+    expect(ledger.viewsWithStartedAt()[0]?.sessionId).toBeUndefined();
+    ledger.markStage(event.eventId, "review");
+    ledger.markSession(event.eventId, "ses-fake-1");
+    expect(ledger.viewsWithStartedAt()[0]?.sessionId).toBe("ses-fake-1");
+    // The machine contract's views stay pinned nine keys.
+    expect(Object.keys(ledger.views()[0] ?? {})).toEqual([
+      "eventId",
+      "repo",
+      "pr",
+      "eventKind",
+      "requester",
+      "commentId",
+      "stage",
+      "acceptedAt",
+      "lastActivityAt",
+    ]);
+    // A re-run's fresh session overwrites the id.
+    ledger.markSession(event.eventId, "ses-fake-2");
+    expect(ledger.viewsWithStartedAt()[0]?.sessionId).toBe("ses-fake-2");
+  });
+
+  it("a markSession for an unknown event id marks nothing", () => {
+    const clock = ledgerClock();
+    const ledger = new LiveSessions(clock);
+    const event = makeReviewRequested({ repo: REPO, pr: 9 });
+    ledger.accept(event, ledgerStart(event.eventId), clock.now());
+    ledger.markSession("evt-unknown", "ses-fake-1");
+    expect(ledger.viewsWithStartedAt()[0]?.sessionId).toBeUndefined();
   });
 });
 

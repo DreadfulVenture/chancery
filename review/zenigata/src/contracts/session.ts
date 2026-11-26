@@ -27,12 +27,13 @@ export interface SessionDriver {
     opts?: { signal?: AbortSignal },
   ): Promise<string>;
   /**
-   * The session's recorded turns, oldest first: the prompts the caller
-   * sent and the replies the runtime recorded. The read mirrors the
-   * runtime's own record — a session the runtime no longer holds (the
-   * retention sweep disposed it) fails the read with the runtime's
-   * session-not-found error, which is how the status page's transcript
-   * view knows to degrade.
+   * The session's recorded activity, oldest first: the prompts the caller
+   * sent, the replies the runtime recorded, the tool calls those replies
+   * ran, and the subagent reports the runtime delivered into the session.
+   * The read mirrors the runtime's own record — a session the runtime no
+   * longer holds (the retention sweep disposed it) fails the read with the
+   * runtime's session-not-found error, which is how the status page's
+   * transcript view knows to degrade.
    */
   transcript(
     sessionId: string,
@@ -42,8 +43,27 @@ export interface SessionDriver {
   dispose(sessionId: string): Promise<void>;
 }
 
-/** One turn of a session's transcript: who spoke and what they said. */
-export interface SessionTurn {
-  role: "user" | "assistant";
-  text: string;
-}
+/**
+ * One record of a session's activity (PRJ-538's turn-by-turn log), oldest
+ * first. `at` is the record's created moment in epoch milliseconds; 0
+ * means the driver holds no stamp for it (the test double's turns), and
+ * the page renders such a turn unstamped.
+ */
+export type SessionTurn =
+  | { role: "user"; at: number; text: string }
+  | { role: "assistant"; at: number; text: string }
+  | {
+      role: "tool";
+      at: number;
+      /** The tool's name as the runtime recorded it. */
+      name: string;
+      /** The tool state's status word as the runtime recorded it ("completed", "error", "running", "streaming"). */
+      status: string;
+      /** The tool's input, serialized as text; empty when the record carries none. */
+      input: string;
+      /** The tool's output text, its content parts joined; empty on a record without output. */
+      output: string;
+      /** The tool's error text on a failed call; undefined otherwise. */
+      error?: string;
+    }
+  | { role: "report"; at: number; text: string };

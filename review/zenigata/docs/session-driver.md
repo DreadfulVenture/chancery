@@ -12,7 +12,7 @@ driver author implements and the rationale behind the pin.
 | `createSession(directory, agent)` | Create a session working in `directory`, running the named agent; returns the session id. |
 | `prompt(sessionId, text)`         | Send one prompt and wait for the turn to finish.                                          |
 | `readOutput(sessionId)`           | Return the text of the session's last assistant message, after the most recent turn.      |
-| `transcript(sessionId)`           | Return the session's recorded turns, oldest first (`{role, text}` per turn).              |
+| `transcript(sessionId)`           | Return the session's recorded activity, oldest first (a `SessionTurn` per record).        |
 | `dispose(sessionId)`              | End the session.                                                                          |
 
 A review uses one session for its whole run: create, then one prompt/readOutput round — the session's own skill flow
@@ -25,22 +25,27 @@ corrective-retry path depends on this: a retry prompt that yields no answer read
 of silently re-validating the previous stage's output. The in-repo `SessionDouble` diverges here for convenience: it
 replays the scripted output on a repeat read instead of returning `""`.
 
-`transcript` reads the whole recorded session for the status page's transcript view (PRJ-461's transcript scope): the
-prompts the caller sent and the replies the runtime recorded, oldest first, text parts joined per message. The read
-mirrors the runtime's own record, so a session the runtime no longer holds — the retention sweep disposed it — fails the
-read with the runtime's session-not-found error; that failure is how the page's view knows to degrade to the swept note.
-The read is one bounded window over the message list (the newest 50 records), so its cost is fixed; a session with more
-turns than the window offers its newest ones.
+`transcript` reads the whole recorded session for the status page's session log (PRJ-461's transcript scope, composed
+into the turn-by-turn log PRJ-538 renders): the prompts the caller sent, the replies the runtime recorded, the tool
+calls those replies ran (one turn per tool part, its name, status, input, and output), and the subagent reports the
+runtime delivered — oldest first, each carrying the record's created moment. The read mirrors the runtime's own record,
+so a session the runtime no longer holds — the retention sweep disposed it — fails the read with the runtime's
+session-not-found error; that failure is how the page's view knows to degrade to the swept note. Nothing is captured
+bot-side: the log lives in the runtime's session record, and it is gone when the session is gone. The read is one
+bounded window over the message list (the newest 50 records), so its cost is fixed; a session with more records than the
+window offers its newest ones. Each piece is read structurally: a record shape the driver does not recognize degrades to
+a thinner line (a tool without a name renders "unknown tool"), never a failed read.
 
 ## The version pin
 
 Every `@opencode/client` import in the service lives in `src/adapters/opencode.ts`, and the client version is pinned in
-`package.json` to match the deployed opencode service exactly (2.2.5 at the time of writing). The opencode API is
+`package.json` to match the deployed opencode service exactly (2.3.0 at the time of writing). The opencode API is
 generated and moves fast, so the pin keeps the driver's method names in lockstep with the service they call — and
 confining the imports to one file means an upstream bump costs one file, not a hunt. Placements to re-verify first on
 any bump: the `idle` record the turn barrier keys on (type `SessionMessageIdle` upstream), the queued user item
-`session.prompt` returns, and the message-list shapes the poll reads — the driver's turn-state judgement rests only on
-these.
+`session.prompt` returns, and the message-list shapes the poll and the transcript read — the driver's turn-state
+judgement rests only on these, and the transcript read also leans on the User record's top-level prompt text, the
+assistant record's tool parts, and the synthetic report records.
 
 ## Authentication
 

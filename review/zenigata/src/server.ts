@@ -61,6 +61,8 @@ import { withTimeout } from "./with-timeout.js";
 import {
   renderStatusPage,
   type RunDraftsView,
+  type SessionLiveView,
+  type SessionStartView,
   type TranscriptView,
 } from "./ui.js";
 import type { Config } from "./config.js";
@@ -101,16 +103,87 @@ export const TRANSCRIPT_TURN_MARKER =
   "[turn truncated at the page's transcript cap]";
 
 /**
- * One turn's rendered line. Redaction runs FIRST, on the full turn
- * text: a cap cut through a credentialed URL before its "@" would
- * leave scheme://user:password stranded with nothing for either
- * pattern to match, and the fragment would ride the open page. Only
- * the redacted text is capped, and the cap budgets the line's own
- * prefix, so a capped line totals the view cap exactly once rendered.
+ * The tool block's own sub-caps (PRJ-538): one huge tool input or output
+ * must not consume the view's whole byte budget, or the composer would
+ * drop every older turn behind it. The caps bound each piece before the
+ * view cap's turn math runs.
+ */
+export const TOOL_INPUT_CAP = 512;
+export const TOOL_OUTPUT_CAP = 2048;
+export const TOOL_ERROR_CAP = 1024;
+const TOOL_PIECE_MARKER = "[cut at the page's cap]";
+
+/** The glance line's byte cap: the live row's newest-activity summary. */
+export const SESSION_LOG_GLANCE_CAP = 200;
+
+/**
+ * The stamp one rendered line starts with, the record's created moment
+ * in the server's local time — a turn-by-turn log reads as one when its
+ * lines carry when. An unstamped turn (the double's at 0, or a record
+ * whose stamp did not parse) renders bare.
+ */
+const stampPrefix = (at: number): string => {
+  if (!Number.isFinite(at) || at <= 0) {
+    return "";
+  }
+  const stamp = new Date(at);
+  if (Number.isNaN(stamp.getTime())) {
+    return "";
+  }
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `[${pad(stamp.getHours())}:${pad(stamp.getMinutes())}:${pad(stamp.getSeconds())}] `;
+};
+
+/**
+ * One piece's bounded text: redacted FIRST, then capped — the same
+ * credentialed-URL rule the turn text follows. A cap cut through a
+ * credential before its "@" would strand the fragment with nothing for
+ * the redaction patterns to match.
+ */
+const capPiece = (text: string, cap: number): string => {
+  const room = cap - Buffer.byteLength(TOOL_PIECE_MARKER, "utf8");
+  if (Buffer.byteLength(text, "utf8") <= room) {
+    return text;
+  }
+  return capUtf8(text, room) + TOOL_PIECE_MARKER;
+};
+
+/**
+ * One turn's rendered block. Prompts and replies render as their
+ * existing prefixed lines, stamps ahead; a tool call renders as a small
+ * block — the status line, the input summary, and the output head or
+ * error — and a subagent report renders like a reply under its own
+ * prefix. Every text piece routes through redactSecrets before its cap,
+ * and the prefix budget rides the cap's math.
  */
 const transcriptTurnText = (turn: SessionTurn): string => {
-  const prefix = turn.role === "user" ? "user: " : "reviewer: ";
-  return `${prefix}${capTurnText(redactSecrets(turn.text), prefix)}`;
+  const stamp = stampPrefix(turn.at);
+  if (turn.role === "tool") {
+    const lines = [`${stamp}tool ${turn.name} — ${turn.status}`];
+    if (turn.input !== "") {
+      lines.push(
+        `    input: ${capPiece(redactSecrets(turn.input), TOOL_INPUT_CAP)}`,
+      );
+    }
+    if (turn.output !== "") {
+      lines.push(
+        `    output: ${capPiece(redactSecrets(turn.output), TOOL_OUTPUT_CAP)}`,
+      );
+    }
+    if (turn.error !== undefined && turn.error !== "") {
+      lines.push(
+        `    error: ${capPiece(redactSecrets(turn.error), TOOL_ERROR_CAP)}`,
+      );
+    }
+    return lines.join("\n");
+  }
+  const prefix =
+    turn.role === "user"
+      ? "user: "
+      : turn.role === "report"
+        ? "report: "
+        : "reviewer: ";
+  return `${stamp}${prefix}${capTurnText(redactSecrets(turn.text), `${stamp}${prefix}`)}`;
 };
 
 const capTurnText = (text: string, prefix: string): string => {
@@ -132,10 +205,12 @@ const capTurnText = (text: string, prefix: string): string => {
 /**
  * Compose the found state: the turns rendered oldest first, the total
  * held under the byte cap by dropping the oldest whole turns (a
- * diagnosis reads the run's last turns first), each turn itself bounded
- * by capTurnText so even a diff-sized prompt fits. The truncated flag
- * says whole turns were cut at the old end. Exported for the tests —
- * the cap's boundary math is pinned at unit grain.
+ * diagnosis reads the run's last turns first), each turn bounded by its
+ * own cap pieces so even a diff-sized prompt or a huge tool output
+ * fits. The truncated flag says whole turns were cut at the old end,
+ * and `latest` carries the newest turn's first rendered line — the live
+ * row's glance, capped to its own budget. Exported for the tests — the
+ * cap's boundary math is pinned at unit grain.
  */
 export const composeTranscriptView = (turns: SessionTurn[]): TranscriptView => {
   const rendered = turns.map(transcriptTurnText);
@@ -152,10 +227,16 @@ export const composeTranscriptView = (turns: SessionTurn[]): TranscriptView => {
     bytes += lineBytes;
   }
   keptNewestFirst.reverse();
+  const newest = keptNewestFirst.at(-1);
+  const latest =
+    newest === undefined
+      ? undefined
+      : capUtf8(newest.split("\n")[0] ?? "", SESSION_LOG_GLANCE_CAP);
   return {
     state: "found",
     text: keptNewestFirst.join("\n\n"),
     truncated: keptNewestFirst.length < rendered.length,
+    latest,
   };
 };
 
@@ -250,6 +331,29 @@ const pageRunRows = async (
   }
   return rendered;
 };
+
+/**
+ * The live rows' session log views, read through the session driver at
+ * each render (PRJ-538). A running review's log changes between
+ * renders, so nothing here is cached — the failed rows' cache below
+ * exists precisely because their sessions are frozen, and a live row is
+ * the opposite. Each read is bounded by the same read-timeout as the
+ * failed rows' reads and runs in parallel with them; a row whose run
+ * has not created its session yet (parked, or still in the git stage)
+ * passes through unchanged.
+ */
+const pageLiveRows = async (
+  rows: SessionStartView[],
+  sessions: SessionDriver,
+): Promise<SessionLiveView[]> =>
+  Promise.all(
+    rows.map(async (row) => {
+      if (row.sessionId === undefined) {
+        return row;
+      }
+      return { ...row, log: await readTranscriptView(row.sessionId, sessions) };
+    }),
+  );
 
 /**
  * Whether the forge adapter answers at all: any HTTP response — even a
@@ -924,9 +1028,13 @@ export async function startServer(
               snapshot,
               adapterReachable,
               // The page's live rows, read from the ledger with each
-              // run's started stamp: the running duration renders from
-              // it, and /status's pinned shape gains nothing.
-              liveSessions.viewsWithStartedAt(),
+              // run's started stamp and its reviewer session's id,
+              // each carrying session's log read live through the
+              // driver (PRJ-538); /status's pinned shape gains nothing.
+              await pageLiveRows(
+                liveSessions.viewsWithStartedAt(),
+                deps.sessions,
+              ),
               // The page's run rows, read straight from the projection
               // with each settled run's wall time, and each failed run
               // carrying a retained session extended with its

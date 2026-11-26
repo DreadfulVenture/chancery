@@ -424,6 +424,10 @@ export async function runReview(
       state.sessionId = await sessions.createSession(dir, config.agent, {
         signal: controller.signal,
       });
+      // The live row carries the session id from here on (PRJ-538): the
+      // status page reads the session's turn-by-turn log through the
+      // driver with it while the run runs.
+      ctx.tracker.markSession(event.eventId, state.sessionId);
       // Recall is advisory: stored corrections improve the review, and a
       // memory outage must not fail it. Scope by cwd (the review's
       // worktree checkout) so read and write resolve the same workspace

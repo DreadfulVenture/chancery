@@ -22,7 +22,15 @@ type ListPage = {
   data: Array<{
     type: string;
     time: { created: number };
-    content?: Array<{ type: string; text: string }>;
+    content?: Array<{
+      type: string;
+      text: string;
+      name?: string;
+      state?: unknown;
+      time?: { created: number };
+    }>;
+    /** The real 2.3.0 User record's top-level prompt field. */
+    text?: string;
   }>;
 };
 /** One stage per poll: a page, or a status code to fail the read with. */
@@ -766,7 +774,7 @@ describe("turnOpen", () => {
 });
 
 describe("opencode transcript read", () => {
-  it("maps the session's user and assistant messages into oldest-first turns", async () => {
+  it("maps the session's records into oldest-first turns of the new shape", async () => {
     const fake = await fakeOpencode();
     fakes.push(fake);
     const { driver } = await harnessDriver(fake);
@@ -779,17 +787,184 @@ describe("opencode transcript read", () => {
             content: [{ type: "text", text: "the review says no" }],
           },
           {
+            // The real 2.3.0 User record: the prompt rides a top-level
+            // text field, not content parts.
             type: "user",
             time: { created: userMs },
-            content: [{ type: "text", text: "review this diff" }],
+            text: "review this diff",
           },
         ],
       }),
     ]);
     const sessionId = await driver.createSession("/work/tree", "reviewer");
     await expect(driver.transcript(sessionId)).resolves.toEqual([
-      { role: "user", text: "review this diff" },
-      { role: "assistant", text: "the review says no" },
+      { role: "user", at: 1_000_000, text: "review this diff" },
+      { role: "assistant", at: 1_006_000, text: "the review says no" },
+    ]);
+  });
+
+  it("the user record's prompt rides the top-level text field, content parts as the fallback", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [
+      (userMs) => ({
+        data: [
+          {
+            // An older wire shape, defensively read.
+            type: "user",
+            time: { created: userMs + 1000 },
+            content: [{ type: "text", text: "the fallback shape" }],
+          },
+          {
+            type: "user",
+            time: { created: userMs },
+            text: "the real shape",
+          },
+        ],
+      }),
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).resolves.toEqual([
+      { role: "user", at: 1_000_000, text: "the real shape" },
+      { role: "user", at: 1_001_000, text: "the fallback shape" },
+    ]);
+  });
+
+  it("an assistant record's tool parts render as tool turns after the reply text", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [
+      (userMs) => ({
+        data: [
+          {
+            type: "assistant",
+            time: { created: userMs + 6000 },
+            content: [
+              { type: "text", text: "checking the head" },
+              {
+                type: "tool",
+                name: "bash",
+                id: "tool-1",
+                state: {
+                  status: "completed",
+                  input: { command: "git log -1" },
+                  content: [{ type: "text", text: "abc the head" }],
+                },
+                time: { created: userMs + 6100 },
+              },
+              {
+                type: "tool",
+                name: "read",
+                id: "tool-2",
+                state: {
+                  status: "error",
+                  input: { path: "src/x.ts" },
+                  error: { message: "file not found" },
+                },
+                time: { created: userMs + 6200 },
+              },
+            ],
+          },
+          {
+            type: "user",
+            time: { created: userMs },
+            text: "review this diff",
+          },
+        ],
+      }),
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).resolves.toEqual([
+      { role: "user", at: 1_000_000, text: "review this diff" },
+      { role: "assistant", at: 1_006_000, text: "checking the head" },
+      {
+        role: "tool",
+        at: 1_006_100,
+        name: "bash",
+        status: "completed",
+        input: '{"command":"git log -1"}',
+        output: "abc the head",
+      },
+      {
+        role: "tool",
+        at: 1_006_200,
+        name: "read",
+        status: "error",
+        input: '{"path":"src/x.ts"}',
+        output: "",
+        error: "file not found",
+      },
+    ]);
+  });
+
+  it("a delivered subagent report renders as a report turn", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [
+      (userMs) => ({
+        data: [
+          {
+            type: "assistant",
+            time: { created: userMs + 9000 },
+            content: [{ type: "text", text: "posted the review" }],
+          },
+          {
+            type: "synthetic",
+            time: { created: userMs + 8000 },
+            text: "the blind pass found nothing",
+          },
+          {
+            type: "user",
+            time: { created: userMs },
+            text: "review this diff",
+          },
+        ],
+      }),
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).resolves.toEqual([
+      { role: "user", at: 1_000_000, text: "review this diff" },
+      { role: "report", at: 1_008_000, text: "the blind pass found nothing" },
+      { role: "assistant", at: 1_009_000, text: "posted the review" },
+    ]);
+  });
+
+  it("an assistant record with no text parts renders only its tool turns", async () => {
+    const fake = await fakeOpencode();
+    fakes.push(fake);
+    const { driver } = await harnessDriver(fake);
+    fake.setStages("ses-fake-1", [
+      (userMs) => ({
+        data: [
+          {
+            type: "assistant",
+            time: { created: userMs + 6000 },
+            content: [
+              {
+                type: "tool",
+                name: "grep",
+                id: "tool-1",
+                state: { status: "running", input: { pattern: "todo" } },
+                time: { created: userMs + 6100 },
+              },
+            ],
+          },
+        ],
+      }),
+    ]);
+    const sessionId = await driver.createSession("/work/tree", "reviewer");
+    await expect(driver.transcript(sessionId)).resolves.toEqual([
+      {
+        role: "tool",
+        at: 1_006_100,
+        name: "grep",
+        status: "running",
+        input: '{"pattern":"todo"}',
+        output: "",
+      },
     ]);
   });
 
@@ -813,15 +988,15 @@ describe("opencode transcript read", () => {
           {
             type: "user",
             time: { created: userMs },
-            content: [{ type: "text", text: "prompt" }],
+            text: "prompt",
           },
         ],
       }),
     ]);
     const sessionId = await driver.createSession("/work/tree", "reviewer");
     await expect(driver.transcript(sessionId)).resolves.toEqual([
-      { role: "user", text: "prompt" },
-      { role: "assistant", text: "part one\npart two" },
+      { role: "user", at: 1_000_000, text: "prompt" },
+      { role: "assistant", at: 1_006_000, text: "part one\npart two" },
     ]);
   });
 

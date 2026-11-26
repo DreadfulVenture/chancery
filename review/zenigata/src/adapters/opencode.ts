@@ -251,6 +251,64 @@ function unexpectedStatus(error: unknown): string | undefined {
   return match?.[1];
 }
 
+/**
+ * The transcript read's record-to-turn helpers (PRJ-538). Each reads its
+ * piece structurally and degrades to empty or a generic value when the
+ * wire shape moves — an unrecognized shape renders a thinner line, never
+ * a failed read.
+ */
+
+/** A user record's prompt: the top-level text field, content parts as the fallback. */
+const promptText = (record: {
+  text?: unknown;
+  content?: Array<{ type: string; text?: string }>;
+}): string => {
+  if (typeof record.text === "string") {
+    return record.text;
+  }
+  return partsText(record.content);
+};
+
+/** A tool state's input record, serialized compactly for the page. */
+const serializeToolInput = (input: unknown): string => {
+  if (input === undefined || input === null) {
+    return "";
+  }
+  if (typeof input !== "object") {
+    return String(input);
+  }
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return "";
+  }
+};
+
+/** A content array's text parts joined; non-text parts (file refs) stay out. */
+const partsText = (
+  content: Array<{ type: string; text?: string }> | undefined,
+): string =>
+  (content ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join("\n");
+
+/**
+ * A tool state's error as text: the wire carries a structured error whose
+ * message field is the readable part, and an older bare-string shape
+ * passes through as itself.
+ */
+const toolErrorText = (error: unknown): string | undefined => {
+  if (error === undefined || error === null) {
+    return undefined;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  const message = (error as { message?: unknown }).message;
+  return typeof message === "string" ? message : undefined;
+};
+
 class OpenCodeSessionDriver implements SessionDriver {
   private readonly client: ReturnType<typeof OpenCode.make>;
 
@@ -407,10 +465,11 @@ class OpenCodeSessionDriver implements SessionDriver {
     sessionId: string,
     opts?: { signal?: AbortSignal },
   ): Promise<SessionTurn[]> {
-    // One bounded list read, newest first, reversed to the turns' own
-    // order. The window keeps the read's cost fixed; a session with
-    // more recorded turns than the window offers its newest ones — the
-    // page's own byte cap trims the view further anyway.
+    // One bounded list read, newest first, walked oldest first so the
+    // turns leave in record order. The window keeps the read's cost
+    // fixed; a session with more recorded records than the window
+    // offers its newest ones — the page's own byte cap trims the view
+    // further anyway.
     const listed = await this.client.message.list(
       {
         sessionID: sessionId,
@@ -419,25 +478,76 @@ class OpenCodeSessionDriver implements SessionDriver {
       },
       { signal: opts?.signal },
     );
-    return (
-      listed.data as Array<{
-        type: string;
-        content?: Array<{ type: string; text: string }>;
-      }>
-    )
-      .filter((item) => item.type === "user" || item.type === "assistant")
-      .map((item) => ({
-        role: item.type as SessionTurn["role"],
-        text:
-          item.content
-            ?.filter(
-              (part): part is { type: "text"; text: string } =>
-                part.type === "text",
-            )
-            .map((part) => part.text)
-            .join("\n") ?? "",
-      }))
-      .reverse();
+    const turns: SessionTurn[] = [];
+    for (const item of [...listed.data].reverse()) {
+      // The records the page's log renders (PRJ-538): prompts, replies,
+      // tool calls, delivered subagent reports. Everything else — idle
+      // markers, bookkeeping, shell records — is runtime plumbing the
+      // view stays out of.
+      if (item.type === "user") {
+        const record = item as {
+          text?: unknown;
+          content?: Array<{ type: string; text?: string }>;
+        };
+        turns.push({
+          role: "user",
+          at: item.time.created,
+          // The 2.3.0 User record carries the prompt as a top-level
+          // text field; the content-parts read stays as the fallback
+          // so an older wire shape still renders.
+          text: promptText(record),
+        });
+      } else if (item.type === "assistant") {
+        const record = item as {
+          content?: Array<{
+            type: string;
+            text?: string;
+            name?: string;
+            state?: {
+              status?: string;
+              input?: unknown;
+              content?: Array<{ type: string; text?: string }>;
+              error?: { message?: string } | string;
+            };
+          }>;
+        };
+        const text = (record.content ?? [])
+          .filter((part) => part.type === "text")
+          .map((part) => part.text ?? "")
+          .join("\n");
+        if (text !== "") {
+          turns.push({ role: "assistant", at: item.time.created, text });
+        }
+        for (const part of record.content ?? []) {
+          if (part.type !== "tool") {
+            continue;
+          }
+          const timed = part as { time?: { created?: number } };
+          const at =
+            typeof timed.time?.created === "number" &&
+            Number.isFinite(timed.time.created)
+              ? timed.time.created
+              : item.time.created;
+          turns.push({
+            role: "tool",
+            at,
+            name: part.name ?? "unknown tool",
+            status: part.state?.status ?? "unknown",
+            input: serializeToolInput(part.state?.input),
+            output: partsText(part.state?.content),
+            error: toolErrorText(part.state?.error),
+          });
+        }
+      } else if (item.type === "synthetic") {
+        const record = item as { text?: unknown };
+        turns.push({
+          role: "report",
+          at: item.time.created,
+          text: typeof record.text === "string" ? record.text : "",
+        });
+      }
+    }
+    return turns;
   }
 
   /**

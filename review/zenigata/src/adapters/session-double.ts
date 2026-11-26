@@ -83,15 +83,17 @@ export class SessionDouble implements SessionDriver {
     if (this.disposed.includes(sessionId)) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    // The double holds no stamps: its turns carry at 0, and the page's
+    // composition renders unstamped lines for them.
     const turns: SessionTurn[] = [];
     for (const prompt of this.prompts) {
       if (prompt.sessionId !== sessionId) {
         continue;
       }
-      turns.push({ role: "user", text: prompt.text });
+      turns.push({ role: "user", at: 0, text: prompt.text });
       const output = this.turnOutputs.get(`${sessionId}:${prompt.index}`);
       if (output !== undefined) {
-        turns.push({ role: "assistant", text: output });
+        turns.push({ role: "assistant", at: 0, text: output });
       }
     }
     return turns;

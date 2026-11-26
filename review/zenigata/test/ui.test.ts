@@ -11,7 +11,13 @@
 import { describe, expect, it } from "vitest";
 import { forgePullUrl, renderStatusPage } from "../src/ui.js";
 import { diffFinishes, finishPayload, runId } from "../src/status-notify.js";
-import type { FailedDraftView, RunDraftsView, StatusData } from "../src/ui.js";
+import type {
+  FailedDraftView,
+  RunDraftsView,
+  SessionLiveView,
+  StatusData,
+  TranscriptView,
+} from "../src/ui.js";
 
 const FORGE_URL = "https://forge.invalid";
 
@@ -223,6 +229,70 @@ describe("the NOW panel's started render", () => {
   });
 });
 
+describe("the NOW panel's session log cell", () => {
+  /** A live row: the session id and the log view the server read. */
+  const liveRow = (
+    log: TranscriptView | undefined,
+    sessionId: string | undefined = "ses-1",
+  ): SessionLiveView => ({
+    ...session,
+    startedAtMs: Date.now() - 500,
+    sessionId,
+    log,
+  });
+
+  it("a row whose run has not created its session names the fact", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [liveRow(undefined, undefined)],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toContain("no session yet");
+  });
+
+  it("the glance rides the cell and the full log stays behind the collapsible block, escaped", () => {
+    const page = renderStatusPage(
+      status(),
+      true,
+      [
+        liveRow({
+          state: "found",
+          text: 'tool bash — completed\n    output: git & "log"',
+          truncated: false,
+          latest: "tool bash — completed",
+        }),
+      ],
+      [],
+      FORGE_URL,
+    );
+    expect(page).toContain("tool bash — completed");
+    expect(page).toContain("session log</summary>");
+    expect(page).toContain("git &amp; &quot;log&quot;");
+    expect(page).not.toContain('git & "log"');
+  });
+
+  it("an unreadable read and an empty log say so plainly", () => {
+    const unreadable = renderStatusPage(
+      status(),
+      true,
+      [liveRow({ state: "unavailable" })],
+      [],
+      FORGE_URL,
+    );
+    expect(unreadable).toContain("the log could not be read right now");
+    const empty = renderStatusPage(
+      status(),
+      true,
+      [liveRow({ state: "found", text: "", truncated: false })],
+      [],
+      FORGE_URL,
+    );
+    expect(empty).toContain("the session stands, but has recorded nothing yet");
+  });
+});
+
 describe("the failed report's transcript view", () => {
   const transcriptRun = (over: Partial<RunDraftsView> = {}): RunDraftsView => ({
     ...run,
@@ -249,7 +319,7 @@ describe("the failed report's transcript view", () => {
       ],
       FORGE_URL,
     );
-    expect(page).toContain("reviewer session transcript");
+    expect(page).toContain("reviewer session log");
     expect(page).toContain("user: review &lt;diff&gt;");
     expect(page).toContain("reviewer: says &amp; &quot;no&quot;");
     expect(page).not.toContain("review <diff>");
@@ -272,7 +342,7 @@ describe("the failed report's transcript view", () => {
       ],
       FORGE_URL,
     );
-    expect(page).toContain("the transcript is capped at the page's 64KiB");
+    expect(page).toContain("the log is capped at the page's 64KiB");
     expect(page).toContain("the last turn before the cut");
   });
 
@@ -287,7 +357,7 @@ describe("the failed report's transcript view", () => {
     expect(page).toContain(
       "the session is gone — the transcript is not available",
     );
-    expect(page).not.toContain("reviewer session transcript");
+    expect(page).not.toContain("reviewer session log");
   });
 
   it("distinguishes an unreadable transcript from a swept one", () => {
@@ -318,7 +388,7 @@ describe("the failed report's transcript view", () => {
     // The style block always carries the classes; the markup must not.
     expect(bare).not.toContain('class="transcript"');
     expect(bare).not.toContain('class="transcript-note');
-    expect(bare).not.toContain("reviewer session transcript");
+    expect(bare).not.toContain("reviewer session log");
   });
 });
 
