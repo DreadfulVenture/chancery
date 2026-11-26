@@ -10,9 +10,10 @@
  * through the page's own control in the footer — browsers require a user
  * gesture for the prompt — and a declined grant changes nothing: the
  * page keeps working, silently. The seen-state lives in the browser's
- * localStorage with a boot-scoped in-memory twin that advances whether
- * or not the storage accepts the write — each finish notifies at most
- * once per tab life — and re-merges the storage on every poll, so a
+ * localStorage with a boot-scoped in-memory twin that advances with
+ * every delivered finish whether or not the storage accepts the write —
+ * a delivered finish notifies at most once per tab life — and re-merges
+ * the storage on every poll, so a
  * second open tab dedupes against the first tab's writes even where the
  * Notification tag does not (WebKit parses the tag but does not
  * coalesce by it); the tag stays as belt-and-braces. The run's identity
@@ -21,18 +22,34 @@
  * changes the outcome notifies — the 2am failure gets its follow-up
  * when the retry posts.
  *
- * Delivery is best-effort per finish: a constructor that throws is
- * caught and the finish is consumed — the delivery path being dead is a
- * page-level condition, not a per-run retry — so a broken browser never
- * loops while the control reads its granted state. A cold start — an
- * empty seen-state at the first successful poll — has no last check to
- * diff against: the current window seeds silently and notifications
- * begin with the next finish, the same shape the declined path gives a
- * later grant. The branch latches on the first successful poll and is
- * never recomputed, so a boot window without finishes arms the state
- * instead of letting the first finish observed later die as a seed. The
- * choice is deliberate; an operator who wants the page's opening window
- * read aloud can flip the cold branch to notify.
+ * Consumption is delivered-only: the seen-state advances per
+ * successfully constructed Notification, not before delivery. A
+ * constructor that throws leaves its finish unseen, and the next poll
+ * diffs it again and retries — one try per finish per poll, quiet and
+ * cheap — so a browser that refuses construction eats nothing and the
+ * finish still lands when the browser recovers. Permission that is not
+ * granted is different silence, and deliberate: with no delivery path a
+ * retry could use, the window is consumed unread, so a later grant
+ * starts with the next finish instead of a flood of everything the
+ * grant did not cover.
+ *
+ * There is no cold seed: a first poll with an empty seen-state diffs the
+ * current window and says it, at most the ten rows the runs window
+ * carries — the operator's ruling, 2026-11-25, that an open or refresh
+ * of a granted tab says what finished since the last seen state, so a
+ * browser whose localStorage does not persist (private mode, cleared
+ * storage) is not silent forever while the control reads "notifications
+ * on". The arm/latch pair dissolved with the cold branch: the latch's
+ * only job was keeping a first poll from consuming the window as a
+ * silent seed, and a first poll that speaks leaves nothing for it to
+ * guard — an empty boot window diffs to nothing on its own, and a
+ * delivery-dead one re-diffs and retries every poll until the
+ * constructor recovers. The storage write-back that bounds the
+ * seen-state by the runs window stores the window's finishes the twin
+ * holds — delivered this poll, consumed unread for lack of a delivery
+ * path, or already recorded by the storage — so a delivered finish
+ * whose write the storage refused persists on a later poll, and a poll
+ * that delivers nothing erases nothing.
  *
  * Delivery is tab-open only, by ruling: the browser's own Notification
  * API, no service worker, no Web Push, no push subscription. Closing the
@@ -126,9 +143,8 @@ export function finishPayload(
 /**
  * The finishes the seen-state does not hold yet, in the order /status
  * serves them (newest first). Pure: the caller owns the seen-state —
- * read it, diff it, and store back the union of the current window's
- * finish ids and the fresh ones, which keeps the set bounded by the
- * runs window.
+ * read it, diff it, and store back the current window's finishes the
+ * seen-state holds, which keeps the set bounded by the runs window.
  */
 export function diffFinishes(
   runs: NotifyRun[],
@@ -172,14 +188,11 @@ ${diffFinishes}
   var POLL_MS = ${POLL_MS};
   var SEEN_KEY = ${JSON.stringify(SEEN_KEY)};
 
-  // The tab's own seen-state, boot-scoped: it advances whether or not
-  // the storage accepts the write, so each finish notifies at most once
-  // per tab life even when localStorage refuses.
+  // The tab's own seen-state, boot-scoped: delivered finishes advance
+  // it whether or not the storage accepts the write, so each delivered
+  // finish notifies at most once per tab life even when localStorage
+  // refuses.
   var seen = null;
-  // The cold branch's one-shot latch: flipped on the first successful
-  // poll, never recomputed — a boot window without finishes arms the
-  // state instead of letting the first observed finish die as a seed.
-  var armed = false;
 
   function readSeen() {
     if (seen === null) {
@@ -249,23 +262,32 @@ ${diffFinishes}
   }
   renderControl();
 
+  // Delivers each fresh finish and returns the ids whose Notification
+  // constructor succeeded — or null when there is no delivery path at
+  // all (no permission, or the API is absent), where the caller
+  // consumes the window silently: a declined grant is intentional
+  // silence, not a failed delivery.
   function notify(fresh) {
     if (!supported || Notification.permission !== "granted") {
       // No permission, no call: the page renders unchanged.
-      return;
+      return null;
     }
+    var delivered = [];
     for (var i = 0; i < fresh.length; i++) {
       try {
         new Notification(fresh[i].title, {
           body: fresh[i].body,
           tag: fresh[i].id,
         });
+        delivered.push(fresh[i].id);
       } catch (error) {
-        // The delivery path being dead is a page-level condition, not a
-        // per-run retry: the finish is consumed, and no later poll
-        // re-raises it.
+        // The constructor failed, so the finish is not consumed: the
+        // next poll diffs it again and retries — one try per finish per
+        // poll, quiet and cheap — and the finish still lands when the
+        // browser recovers.
       }
     }
+    return delivered;
   }
 
   function poll() {
@@ -282,31 +304,47 @@ ${diffFinishes}
         }
         var state = readSeen();
         var known = Object.keys(state);
-        // The cold branch latches on the first successful poll and is
-        // never recomputed: a boot window with finishes seeds silently,
-        // and a boot window without finishes arms the state instead, so
-        // the first finish observed afterwards speaks rather than being
-        // consumed as a seed that never was.
-        var cold = !armed && known.length === 0;
-        var fresh = cold ? [] : diffFinishes(data.runs, known);
-        var current = [];
-        for (var i = 0; i < data.runs.length; i++) {
-          if (finishPayload(data.runs[i]) !== undefined) {
-            var id = runId(data.runs[i]);
-            current.push(id);
-            // The seen-state advances before the delivery: a finish is
-            // consumed whether or not its notification lands.
-            state[id] = true;
+        // Every successful poll diffs the window against the seen-state
+        // and speaks what is missing — the first poll included. There is
+        // no cold seed and no arm latch: the old branch existed to keep
+        // a first poll from consuming the window as a silent seed, and
+        // a first poll that speaks leaves nothing for a latch to guard.
+        var fresh = diffFinishes(data.runs, known);
+        var delivered = notify(fresh);
+        var granted = delivered !== null;
+        var deliveredNow = {};
+        if (delivered !== null) {
+          for (var i = 0; i < delivered.length; i++) {
+            deliveredNow[delivered[i]] = true;
           }
         }
-        if (!cold) {
-          notify(fresh);
+        var writeBack = [];
+        for (var j = 0; j < data.runs.length; j++) {
+          var payload = finishPayload(data.runs[j]);
+          if (payload === undefined) {
+            continue;
+          }
+          var id = runId(data.runs[j]);
+          // A finish is consumed when its notification delivered — or
+          // when there is no delivery path a retry could use (no
+          // permission): a constructor failure is neither, and leaves
+          // the finish unseen for the next poll to retry.
+          var consumed = !granted || deliveredNow[id] === true;
+          if (consumed) {
+            state[id] = true;
+          }
+          // Bounded by the runs window, and never a record of an
+          // undelivered finish: everything the twin holds is either a
+          // record the storage wrote (re-merged on every read) or a
+          // finish this tab consumed — delivered, or consumed unread for
+          // lack of a delivery path. A delivered finish whose write the
+          // storage refused therefore persists on a later poll, and a
+          // poll that delivers nothing erases nothing.
+          if (state[id] === true) {
+            writeBack.push(id);
+          }
         }
-        // Every fresh id is already a current-window id: the write-back
-        // stores the window's finish identities, which keeps the
-        // seen-state bounded by the runs window.
-        writeSeen(current);
-        armed = true;
+        writeSeen(writeBack);
       })
       .catch(function () {
         // A failed poll leaves the page as it is; the next one retries.

@@ -451,9 +451,11 @@
                       }
                     }
                     const store = new Map();
-                    // The storage holds a last check, so the boot poll is
-                    // not a cold start: an empty storage would seed
-                    // silently and the phases below would say nothing.
+                    // The storage holds a last check for the boot poll
+                    // to diff against: an empty storage would make the
+                    // boot poll a cold open that speaks the window
+                    // whole, and the phases below would say more than
+                    // their assertions count.
                     store.set(
                       SEEN_KEY,
                       JSON.stringify(['acme/widget#9@2026-11-01T00:00:00.000Z@posted']),

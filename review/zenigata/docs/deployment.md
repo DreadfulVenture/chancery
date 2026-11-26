@@ -52,17 +52,22 @@ quiet control in the footer, because browsers require a user gesture for the pro
 "enable notifications" button, granted shows a muted "notifications on", and a declined grant takes the control off the
 page — the page keeps working, silently, and the seen-state still advances, so a later grant starts with the next finish
 rather than replaying old ones. A cold start — the browser holding no seen-state at all — has no last check to diff
-against: the first poll marks the current window silently and notifications begin with the next finish, the same shape
-the declined path gives a later grant; the choice is deliberate, and an operator who wants the page's opening window
-read aloud can flip it. A boot window with no finishes in it arms the state instead — the cold branch latches on the
-first successful poll — so the first finish observed afterwards speaks rather than being consumed as a seed. The
-seen-state lives in the browser's localStorage under one key, pruned to the current runs window, with a boot-scoped
-in-memory twin beside it — a storage that refuses writes still holds each finish to one notification per tab life, and a
-delivery the browser refuses is consumed, so a broken notification path never loops the window. And on a non-secure
-context — plain HTTP from a non-localhost host, the shape a reverse proxy in front of the loopback bind produces —
-Notification is undefined: the footer shows no control and no hint, and the page works exactly as before. Delivery is
-tab-open only by ruling: the browser's own Notification API, no service worker, no Web Push — closing the tab stops the
-notifications, which is the accepted shape, not a defect.
+against, and the first poll speaks the window it opens to anyway, at most the ten rows the runs window carries: an open
+or refresh of a granted tab says what finished since the last seen state (the operator's ruling, 2026-11-25), so a
+browser whose localStorage does not persist — private mode, cleared storage — is not silent forever while the control
+reads "notifications on". There is no branch to flip and no latch to arm: a boot window with no finishes in it has
+nothing to say, and the first finish observed afterwards speaks on its own poll. Consumption follows delivery: a
+successfully constructed notification marks the finish seen, and a construction the browser refuses leaves the finish
+unseen for the next poll to retry — one try per finish per poll, quiet and cheap — so a broken notification path eats
+nothing and still lands its finishes when the browser recovers; permission that is not granted is the different,
+deliberate silence, because with no delivery path a retry could use the window is consumed unread. The seen-state lives
+in the browser's localStorage under one key, pruned to the current runs window, with a boot-scoped in-memory twin beside
+it — a storage that refuses writes still holds each delivered finish to one notification per tab life, and the twin's
+delivered records are re-persisted on a later poll once the storage accepts writes again. And on a non-secure context —
+plain HTTP from a non-localhost host, the shape a reverse proxy in front of the loopback bind produces — Notification is
+undefined: the footer shows no control and no hint, and the page works exactly as before. Delivery is tab-open only by
+ruling: the browser's own Notification API, no service worker, no Web Push — closing the tab stops the notifications,
+which is the accepted shape, not a defect.
 
 The surface has no write endpoints of its own and carries no secret — /metrics exposes durations and counters, and the
 status surface redacts at every projection (below); the endpoint is open like `/metrics` and `/healthz`.

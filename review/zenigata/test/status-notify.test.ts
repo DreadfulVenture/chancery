@@ -171,9 +171,9 @@ const serveScript = (opts: {
   /** When set, every write throws — the page keeps working anyway. */
   brokenStorage?: boolean;
   /**
-   * Seen ids the storage already holds — the last check the cold-start
-   * rule diffs against. Absent: the storage starts empty and the boot
-   * poll seeds it.
+   * Seen ids the storage already holds — the last check the diff starts
+   * from. Absent: the storage starts empty and the boot poll is a cold
+   * open that speaks the window whole.
    */
   seedSeen?: string[];
   /** When set, every Notification constructor call throws. */
@@ -212,10 +212,11 @@ const serveScript = (opts: {
       },
     }),
   };
+  let storageBroken = opts.brokenStorage === true;
   const storage = {
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
-      if (opts.brokenStorage === true) {
+      if (storageBroken) {
         throw new Error("storage refused");
       }
       store.set(key, value);
@@ -240,26 +241,21 @@ const serveScript = (opts: {
             permission = state;
             return state;
           });
+  // The delivery path can be broken live: when broken, every
+  // constructor call throws, but the attempt is still counted so the
+  // loop's behavior stays observable — including the recovery.
+  let deliveryBroken = opts.throwingDelivery === true;
   class Notification {
     readonly title: string;
     readonly options: { body?: string; tag?: string };
     constructor(title: string, options: { body?: string; tag?: string } = {}) {
       attempts.push(title);
+      if (deliveryBroken) {
+        throw new Error("the delivery path is dead");
+      }
       this.title = title;
       this.options = options;
       constructed.push({ title, ...options });
-    }
-    static get permission() {
-      return permission;
-    }
-    static requestPermission = requestPermission;
-  }
-  // The delivery path is dead: every constructor call throws, but the
-  // attempt is still counted so the loop's behavior stays observable.
-  class ThrowingNotification {
-    constructor(title: string) {
-      attempts.push(title);
-      throw new Error("the delivery path is dead");
     }
     static get permission() {
       return permission;
@@ -281,11 +277,7 @@ const serveScript = (opts: {
   boot(
     documentStub,
     storage,
-    opts.permission === "unsupported"
-      ? undefined
-      : opts.throwingDelivery === true
-        ? ThrowingNotification
-        : Notification,
+    opts.permission === "unsupported" ? undefined : Notification,
     () =>
       Promise.resolve({
         ok: true,
@@ -307,6 +299,14 @@ const serveScript = (opts: {
     setRuns: (next: NotifyRun[]) => {
       served = next;
     },
+    /** Break or restore the Notification constructor between polls. */
+    setDeliveryBroken: (broken: boolean) => {
+      deliveryBroken = broken;
+    },
+    /** Break or restore the storage's writes between polls. */
+    setStorageBroken: (broken: boolean) => {
+      storageBroken = broken;
+    },
     /** The control button's click, with the fetch chain settled after. */
     clickControl: async () => {
       clickHandler?.();
@@ -321,10 +321,10 @@ const serveScript = (opts: {
 };
 
 describe("the served script", () => {
-  // The seen-state these tests pre-seed is the last check the cold-start
-  // rule diffs against; a test wanting notification on the boot poll
-  // needs one, because an empty storage is a cold start that seeds
-  // silently.
+  // The seen-state these tests pre-seed is the last check the diff
+  // starts from. No seed means the boot poll is a cold open: with the
+  // seen-state empty, the window it opens to is spoken whole — a test
+  // wanting a quiet boot poll needs a seed.
   const lastCheck = "acme/widget#9@2026-11-01T00:00:00.000Z@posted";
 
   it("with permission granted, one new finish raises exactly one notification", async () => {
@@ -379,33 +379,38 @@ describe("the served script", () => {
     expect(page.constructed).toEqual([]);
   });
 
-  it("a cold seen-state seeds the window silently and the next finish speaks", async () => {
-    // Empty storage: no last check exists, so the boot poll marks the
-    // current window without notifying — the same shape the declined
-    // path gives a later grant.
+  it("a cold open says the window it opens to, and the next finish speaks once", async () => {
+    // Empty storage: no last check exists, and the boot poll says the
+    // window anyway — the operator's ruling, 2026-11-25: an open or
+    // refresh says what finished since the last seen state, so a
+    // browser whose storage does not persist is not silent forever.
     const first = posted();
     const page = serveScript({ permission: "granted", runs: [first] });
     await page.settle();
-    expect(page.constructed).toEqual([]);
-    expect(page.seen()).toEqual(JSON.stringify([runId(first)]));
+    expect(page.constructed).toHaveLength(1);
+    expect(page.constructed[0]).toEqual({
+      title: "acme/widget#2",
+      body: "APPROVE",
+      tag: runId(first),
+    });
 
     // The next finish — a new identity — speaks once.
     const second = posted({ pr: 4 });
     page.setRuns([second]);
     await page.tick();
-    expect(page.constructed).toHaveLength(1);
-    expect(page.constructed[0]).toEqual({
+    expect(page.constructed).toHaveLength(2);
+    expect(page.constructed[1]).toEqual({
       title: "acme/widget#4",
       body: "APPROVE",
       tag: runId(second),
     });
   });
 
-  it("a boot on a finish-free window arms the state: the first finish observed later is notified", async () => {
+  it("a boot on a finish-free window has nothing to say: the first finish observed later is notified", async () => {
     // The fresh deployment's "No runs yet." page: the boot window holds
-    // no finishes, so there is nothing to seed — the cold branch
-    // latches on this first successful poll, and the first finish
-    // observed afterwards speaks instead of being consumed as a seed.
+    // no finishes, so the cold open has nothing to say — and the first
+    // finish observed afterwards speaks on its own poll, no seed to be
+    // consumed by.
     const page = serveScript({ permission: "granted", runs: [] });
     await page.settle();
     expect(page.constructed).toEqual([]);
@@ -417,7 +422,7 @@ describe("the served script", () => {
     expect(page.constructed[0]?.tag).toBe(runId(first));
   });
 
-  it("a boot on a window of only skipped rows arms the state the same way", async () => {
+  it("a boot on a window of only skipped rows stays quiet: the first finish observed later is notified", async () => {
     const page = serveScript({
       permission: "granted",
       runs: [posted({ outcome: "skipped", verdict: null })],
@@ -457,7 +462,7 @@ describe("the served script", () => {
     expect(page.control.textContent).toBe("notifications on");
   });
 
-  it("a delivery throw consumes the finish and the loop never starves", async () => {
+  it("a delivery throw leaves the finish unseen and the next poll retries it", async () => {
     const page = serveScript({
       permission: "granted",
       runs: [posted(), posted({ pr: 3 })],
@@ -465,16 +470,82 @@ describe("the served script", () => {
       throwingDelivery: true,
     });
     await page.settle();
-    // One attempt per finish, both consumed; no throw escapes the poll.
+    // One attempt per finish, nothing delivered, nothing consumed.
     expect(page.attempts).toHaveLength(2);
     expect(page.constructed).toEqual([]);
-    // The seen-state advanced anyway: the next poll of the same window
-    // attempts nothing new.
+    // The next poll diffs the same finishes again: one try per finish
+    // per poll, and the retries are quiet — no throw escapes the poll.
     await page.tick();
-    expect(page.attempts).toHaveLength(2);
+    expect(page.attempts).toHaveLength(4);
+    expect(page.constructed).toEqual([]);
+    // When the browser recovers, the finishes land.
+    page.setDeliveryBroken(false);
+    await page.tick();
+    expect(page.attempts).toHaveLength(6);
+    expect(page.constructed).toHaveLength(2);
+    expect(page.constructed[0]?.tag).toBe(
+      "acme/widget#2@2026-11-25T12:00:00.000Z@posted",
+    );
+    expect(page.constructed[1]?.tag).toBe(
+      "acme/widget#3@2026-11-25T12:00:00.000Z@posted",
+    );
+    // Delivered now: the seen-state holds them and the loop goes quiet.
+    await page.tick();
+    expect(page.attempts).toHaveLength(6);
+    expect(page.constructed).toHaveLength(2);
     // The control still reads its granted state — the page swears it is
-    // listening, and the loop lives on for the finishes to come.
+    // listening, and the loop lived through the dead delivery path.
     expect(page.control.textContent).toBe("notifications on");
+  });
+
+  it("a poll that delivers nothing leaves the storage's window records alone", async () => {
+    const run = posted();
+    const page = serveScript({
+      permission: "granted",
+      runs: [run],
+      seedSeen: [runId(run)],
+    });
+    await page.settle();
+    // Nothing fresh, nothing delivered: the write-back must not erase
+    // the window record the storage already holds — a second open tab
+    // diffs against it.
+    expect(page.seen()).toEqual(JSON.stringify([runId(run)]));
+    await page.tick();
+    expect(page.seen()).toEqual(JSON.stringify([runId(run)]));
+  });
+
+  it("a thrown finish is not recorded as seen", async () => {
+    const page = serveScript({
+      permission: "granted",
+      runs: [posted()],
+      seedSeen: [lastCheck],
+      throwingDelivery: true,
+    });
+    await page.settle();
+    expect(page.attempts).toHaveLength(1);
+    expect(page.seen()).not.toContain(runId(posted()));
+  });
+
+  it("a finish delivered while the storage refused is persisted once the storage recovers", async () => {
+    const page = serveScript({
+      permission: "granted",
+      runs: [posted()],
+      seedSeen: [lastCheck],
+      brokenStorage: true,
+    });
+    await page.settle();
+    expect(page.constructed).toHaveLength(1);
+    // The write landed nowhere: the storage still holds only the seed,
+    // while the twin holds the delivered record.
+    expect(page.seen()).toEqual(JSON.stringify([lastCheck]));
+
+    // The storage recovers: the next poll persists the twin's delivered
+    // record, though the finish diffs nothing fresh anymore — the
+    // record never rides on a fresh diff to be written.
+    page.setStorageBroken(false);
+    await page.tick();
+    expect(page.seen()).toEqual(JSON.stringify([runId(posted())]));
+    expect(page.constructed).toHaveLength(1);
   });
 
   it("unwritable storage notifies once per finish and the recurrence stops", async () => {
@@ -537,9 +608,9 @@ describe("the seen-state across polls", () => {
     const second = posted({ pr: 2 });
     const page = serveScript({ permission: "granted", runs: [first] });
     await page.settle();
-    // The cold boot seeds [A] without notifying.
-    expect(page.constructed).toEqual([]);
-    expect(page.seen()).toEqual(JSON.stringify([runId(first)]));
+    // The cold open says the window: [A] speaks, then is consumed.
+    expect(page.constructed).toHaveLength(1);
+    expect(page.constructed[0]?.tag).toBe(runId(first));
 
     // The first run leaves the served window (the projection's window
     // is the ten newest rows), the second arrives: the stored seen-state
@@ -547,8 +618,8 @@ describe("the seen-state across polls", () => {
     // finish speaks.
     page.setRuns([second]);
     await page.tick();
-    expect(page.constructed).toHaveLength(1);
-    expect(page.constructed[0]?.tag).toBe(runId(second));
+    expect(page.constructed).toHaveLength(2);
+    expect(page.constructed[1]?.tag).toBe(runId(second));
     expect(page.seen()).toEqual(JSON.stringify([runId(second)]));
   });
 
