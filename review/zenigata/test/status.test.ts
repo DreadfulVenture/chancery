@@ -200,7 +200,7 @@ describe("status surface", () => {
       retryPolicy: "never",
       reviewTimeoutSeconds: 1800,
       turnPollSeconds: 3,
-      turnBudgetSeconds: 900,
+      turnBudgetSeconds: 1800,
       agent: "zenigata-reviewer",
     });
 
@@ -209,16 +209,14 @@ describe("status surface", () => {
       repo: REPO,
       pr: PR,
       outcome: "posted",
-      verdict: "REQUEST_CHANGES",
+      verdict: null,
     });
     expect(body.runs[0]?.failure).toBeUndefined();
     expect(body.runs[0]?.phases.map((phase) => phase.phase)).toEqual([
       "intake",
       "git",
-      "blind",
-      "context",
-      "humanize",
-      "post",
+      "review",
+      "bookkeeping",
     ]);
     for (const phase of body.runs[0]?.phases ?? []) {
       expect(phase.durationMs).toBeGreaterThanOrEqual(0);
@@ -285,7 +283,7 @@ describe("status surface", () => {
       repo: REPO,
       pr: PR,
       outcome: "posted",
-      verdict: "REQUEST_CHANGES",
+      verdict: null,
     });
   });
 
@@ -314,13 +312,13 @@ describe("status surface", () => {
 
     releaseGets();
     // The run leaves the intake stage, crosses the git stage, and parks
-    // in its first prompt; the surface's stage moves with it.
-    const inBlind = await waitFor(async () => {
+    // in its one prompt; the surface's stage moves with it.
+    const inReview = await waitFor(async () => {
       const body = await fetchStatus(h);
-      return body.sessions.find((session) => session.stage === "blind");
+      return body.sessions.find((session) => session.stage === "review");
     });
-    expect(inBlind.stage).toBe("blind");
-    expect(inBlind.lastActivityAt).not.toBe(inIntake.sessions[0]?.acceptedAt);
+    expect(inReview.stage).toBe("review");
+    expect(inReview.lastActivityAt).not.toBe(inIntake.sessions[0]?.acceptedAt);
 
     releasePrompt();
     await h.handle.awaitSettled(event.eventId);
@@ -632,10 +630,10 @@ describe("status surface", () => {
 
     releaseGets();
     await h.handle.awaitSettled(event.eventId);
-    // After the run settles, the runs table carries the verdict.
+    // After the run settles, the runs table renders the outcome.
     const done = await fetch(`${intakeUrl(h)}/`);
     const rendered = await done.text();
-    expect(rendered).toContain("REQUEST_CHANGES");
+    expect(rendered).toContain("posted");
   });
 
   it("the health line answers the adapter's reachability, checked at render", async () => {
@@ -869,8 +867,8 @@ describe("the page's narration tail", () => {
 // ---------------------------------------------------------------------------
 
 describe("the failed run's transcript view", () => {
-  /** A scripted run that fails at the blind stage's validation. */
-  const failingScript = () => ["blind noise", "not json", "still not json"];
+  /** A scripted run that fails: the reply carries no status line. */
+  const failingScript = () => ["not json"];
 
   it("a retained failed run offers its reviewer session transcript while the session stands", async () => {
     const h = await harness({ script: failingScript() });
@@ -942,8 +940,6 @@ describe("the failed run's transcript view", () => {
     // scheme and user the cut keeps whole, the "@" just past it.
     const h = await harness({
       script: [
-        "blind noise",
-        "not json",
         `${"y".repeat(room - 14)} https://user:secretpw@forge.invalid/x failed`,
       ],
     });
@@ -981,11 +977,7 @@ describe("the failed run's transcript view", () => {
       Buffer.byteLength(TRANSCRIPT_TURN_MARKER, "utf8") -
       Buffer.byteLength("reviewer: ", "utf8");
     const h = await harness({
-      script: [
-        "blind noise",
-        "not json",
-        `x${"日".repeat(Math.ceil((room - 1) / 3))}`,
-      ],
+      script: [`x${"日".repeat(Math.ceil((room - 1) / 3))}`],
     });
     await postReviewEvent(h);
 
@@ -2291,7 +2283,7 @@ describe("status surface reads the projection", () => {
       repo: REPO,
       pr: PR,
       outcome: "posted",
-      verdict: "REQUEST_CHANGES",
+      verdict: null,
     });
     expect(countRows(statusDbPath(stateDir))).toBe(4);
   });

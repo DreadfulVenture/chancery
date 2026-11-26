@@ -135,6 +135,7 @@ describe("run keeps its work (PRJ-382)", () => {
 describe("the reply session's retention", () => {
   it("the answer keeps its session past settle and the sweep disposes both runs' sessions", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";

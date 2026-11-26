@@ -24,12 +24,6 @@ import {
   makeReviewRequested,
 } from "../src/adapters/forge-double.js";
 import { worktreeDirName } from "../src/review.js";
-import {
-  REVIEW_TRIGGER_FOOTER,
-  annotateDroppedComments,
-  humanizeShrinkDrops,
-  withReviewTriggerFooter,
-} from "../src/review.js";
 import { MAX_BODY_BYTES, REVIEW_SLOTS } from "../src/server.js";
 import type { SessionDriver } from "../src/contracts/session.js";
 import type { ForgeAdapter, ForgeEvent } from "../src/contracts/forge.js";
@@ -41,18 +35,17 @@ import {
   ensureCanonicalClone,
 } from "../src/canonical-clone.js";
 import {
-  BLIND_FINDINGS,
-  blockingComment,
   EVENT_TOKEN,
+  FAILED_REPLY,
+  POSTED_REPLY,
+  SEEDED_POSTED_BODY,
   happyScript,
-  humanizedOutput,
   PR,
   REPO,
   expectGone,
   intakeUrl,
   postReviewEvent,
   startHarness,
-  validDraft,
   waitFor,
   type Harness,
 } from "./helpers.js";
@@ -114,22 +107,36 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe("review flow", () => {
-  it("1. posts a seeded @review: verdict, format, expected head, timed phases", async () => {
+  it("1. dispatches one prompt and records the posted outcome the session reported", async () => {
     const h = await harness({ script: happyScript() });
+
+    // The session posts its own review through the deployment's forge
+    // tools; the double is seeded with what such a post leaves on the
+    // forge, so the bookkeeping lookup has something to find.
+    await h.forge.postReview({
+      repo: REPO,
+      pr: PR,
+      expectedHeadSha: h.fixture.headSha,
+      verdict: "REQUEST_CHANGES",
+      body: "The case: two lines land and neither one says what it adds.",
+      comments: [
+        {
+          path: "notes.md",
+          line: 3,
+          body: "Agent-generated:\n\nissue (blocking): 'added one' names nothing.",
+        },
+      ],
+    });
 
     await postReviewEvent(h);
 
+    // The pipeline dispatches one prompt and posts nothing itself; the
+    // double's one posted review is the test's seed.
+    expect(h.sessions.prompts).toHaveLength(1);
+    const prompt = h.sessions.prompts[0]?.text ?? "";
+    expect(prompt).toContain("Review pull request acme/widget#1");
+    expect(prompt).toContain("review-status: posted");
     expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.expectedHeadSha).toBe(h.fixture.headSha);
-    expect(posted?.verdict).toBe("REQUEST_CHANGES");
-    expect(posted?.body).toBe(
-      humanizedOutput().payload.body + `\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-    expect(posted?.comments).toHaveLength(1);
-    expect(posted?.comments[0]?.body).toMatch(
-      /^Agent-generated:\n\n(issue|suggestion|question|nitpick|todo|chore|note|thought) \((blocking|non-blocking)\): /,
-    );
 
     const records = await runRecords(h);
     expect(records).toHaveLength(1);
@@ -142,11 +149,10 @@ describe("review flow", () => {
       verdict: "REQUEST_CHANGES",
       inlineComments: 1,
       outcome: "posted",
-      humanizer: {
-        assessment: "tightened the prose, kept the verdict",
-        changed: true,
-      },
     });
+    // The humanize stage is the session's own flow now; the record
+    // carries no pipeline-side humanizer accounting.
+    expect(records[0]).not.toHaveProperty("humanizer");
     const phases = records[0]?.phases as Array<{
       phase: string;
       durationMs: number;
@@ -154,10 +160,8 @@ describe("review flow", () => {
     expect(phases.map((p) => p.phase)).toEqual([
       "intake",
       "git",
-      "blind",
-      "context",
-      "humanize",
-      "post",
+      "review",
+      "bookkeeping",
     ]);
     for (const phase of phases) {
       expect(phase.durationMs).toBeGreaterThanOrEqual(0);
@@ -217,38 +221,7 @@ describe("review flow", () => {
     expect(records[0]).toMatchObject({ outcome: "skipped" });
   });
 
-  it("3. aborts when the head moves between start and post: no post, nothing left on the PR", async () => {
-    const movedSha = "f".repeat(40);
-    const h = await harness({
-      script: (_sessionId, index) => {
-        if (index === 1) {
-          // Move the head from inside the context pass.
-          h.forge.setHead(REPO, PR, movedSha);
-        }
-        return happyScript()[index] ?? "";
-      },
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(0);
-    expect(h.forge.postedFailures).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "aborted" });
-    const metrics = await fetchMetrics(h);
-    expect(metrics).toContain(
-      `zenigata_reviews_total{repo="${REPO}",status="aborted"} 1`,
-    );
-    // PRJ-382: an aborted finish keeps its work too; the record hands the
-    // session and worktree to the sweep.
-    expect(h.sessions.disposed).toHaveLength(0);
-    await expect(stat(worktreeDir(h))).resolves.toBeDefined();
-    const aborted = records[0] as Record<string, unknown>;
-    expect(aborted.sessionId).toBe(h.sessions.createdSessions[0]?.sessionId);
-    expect(aborted.worktreeDir).toBe(worktreeDir(h));
-  });
-
-  it("4. journals a mid-pipeline failure with the failing stage, and posts nothing", async () => {
+  it("4. journals a mid-pipeline failure with the failing stage", async () => {
     const h = await harness({
       script: () => {
         throw new Error("agent runtime exploded");
@@ -257,13 +230,10 @@ describe("review flow", () => {
 
     await postReviewEvent(h);
 
-    expect(h.forge.postedReviews).toHaveLength(0);
-    // Failures stay off the PR: the journal is the failure surface.
-    expect(h.forge.postedFailures).toHaveLength(0);
     const records = await runRecords(h);
     expect(records[0]).toMatchObject({
       outcome: "failed",
-      failure: { stage: "blind", message: "agent runtime exploded" },
+      failure: { stage: "review", message: "agent runtime exploded" },
     });
     const metrics = await fetchMetrics(h);
     expect(metrics).toContain(
@@ -271,16 +241,16 @@ describe("review flow", () => {
     );
   });
 
-  it("13. posts nothing on a timed-out run and never a late review", async () => {
+  it("13. settles a timed-out run as failed and records the failure", async () => {
     const h = await harness({
       script: happyScript(),
-      // 3s rather than 1s: reaching the post stage races real git clone
-      // latency, and a loaded runner must not flake the deadline. The
-      // assertions' meaning is unchanged: the deadline fires while the
-      // post is parked.
+      // 3s rather than 1s: reaching the bookkeeping stage races real git
+      // clone latency, and a loaded runner must not flake the deadline.
+      // The assertions' meaning is unchanged: the deadline fires while
+      // the bookkeeping lookup is parked.
       env: { ZENIGATA_REVIEW_TIMEOUT_SECONDS: "3" },
     });
-    const releaseGate = h.forge.parkPostReviews();
+    const releaseGate = h.forge.parkGetPostedReviews();
 
     const event = makeReviewRequested({ repo: REPO, pr: PR });
     const response = await h.source.postToIntake(
@@ -290,33 +260,29 @@ describe("review flow", () => {
     );
     expect(response.status).toBe(202);
 
-    // The body reaches the post stage and parks there; the deadline then
-    // fires while the post is still in flight. The run resolves failed
-    // and posts nothing: the journal carries the failure.
-    await waitFor(() => h.forge.parkedPosts === 1);
+    // The session's one prompt completes with the status line, and the
+    // bookkeeping lookup parks there; the deadline then fires while the
+    // lookup is still in flight. The run resolves failed and journals
+    // the failure.
+    await waitFor(() => h.forge.parkedLookups === 1);
     await h.handle.awaitSettled(event.eventId);
 
-    expect(h.forge.postedReviews).toHaveLength(0);
-    expect(h.forge.postedFailures).toHaveLength(0);
     const records = await runRecords(h);
     expect(records[0]).toMatchObject({
       outcome: "failed",
-      failure: { stage: "post" },
+      failure: { stage: "bookkeeping" },
     });
     const metrics = await fetchMetrics(h);
     expect(metrics).toContain(
       `zenigata_reviews_total{repo="${REPO}",status="failed"} 1`,
     );
 
-    // Release the parked post: the abandoned body resumes into an
-    // already-aborted signal, the double refuses the post, and no review
-    // lands behind the run.
+    // Release the parked lookup: the abandoned body resumes into an
+    // already-aborted signal, and the record count stays at one.
     releaseGate();
-    await waitFor(() => h.forge.parkedPosts === 0);
+    await waitFor(() => h.forge.parkedLookups === 0);
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(h.forge.postedReviews).toHaveLength(0);
-    expect(h.forge.postedFailures).toHaveLength(0);
     expect(await runRecords(h)).toHaveLength(1);
   });
 
@@ -335,7 +301,6 @@ describe("review flow", () => {
 
     await postReviewEvent(h);
 
-    expect(h.forge.postedReviews).toHaveLength(1);
     const records = await runRecords(h);
     expect(records[0]).toMatchObject({ outcome: "posted" });
   });
@@ -434,7 +399,6 @@ describe("review flow", () => {
     // deregister retry never fired. PRJ-382: the run keeps its fresh
     // worktree registered alongside the clone, so the sweep is what will
     // deregister and remove it.
-    expect(h.forge.postedReviews).toHaveLength(1);
     const records = await runRecords(h);
     expect(records[0]).toMatchObject({ outcome: "posted" });
     expect(
@@ -491,7 +455,6 @@ describe("review flow", () => {
     await postReviewEvent(h);
 
     // The run settled with its pre-journal outcome; the process survived.
-    expect(h.forge.postedReviews).toHaveLength(1);
     const metrics = await fetchMetrics(h);
     expect(metrics).toContain(
       `zenigata_reviews_total{repo="${REPO}",status="posted"} 1`,
@@ -499,70 +462,70 @@ describe("review flow", () => {
     await expect(h.journal()).rejects.toMatchObject({ code: "EISDIR" });
   });
 
-  it("7. survives one invalid JSON draft via a corrective retry prompt", async () => {
+  it("7. records failed with the reply's head when the final reply carries no status line", async () => {
     const h = await harness({
       script: [
-        BLIND_FINDINGS,
-        "I thought about the change a lot. Here is my opinion.",
-        JSON.stringify(validDraft()),
-        JSON.stringify(humanizedOutput()),
+        "I thought about the change a lot. Here is my opinion, but nothing posted.",
       ],
     });
 
     await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    // Prompts: blind, context (no JSON), corrective retry, humanize.
-    expect(h.sessions.prompts).toHaveLength(4);
-    const retry = h.sessions.prompts[2]?.text ?? "";
-    expect(retry).toContain("failed validation");
-    // PRJ-381: a reply with no JSON span at all says so plainly, and the
-    // zod undefined-ghost never reaches a retry prompt.
-    expect(retry).toContain("no JSON found");
-    expect(retry).not.toContain("received undefined");
-    expect(retry).toContain("Here is my opinion");
-    expect(retry).toContain("corrected JSON object");
-    expect(h.sessions.prompts[1]?.text).not.toContain("failed validation");
-  });
-
-  it("8. corrects a blocking comment paired with an APPROVE verdict", async () => {
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify({ ...validDraft(), verdict: "APPROVE" }),
-        JSON.stringify(validDraft()),
-        JSON.stringify(humanizedOutput()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    expect(h.forge.postedReviews[0]?.payload.verdict).toBe("REQUEST_CHANGES");
-    const retry = h.sessions.prompts[2]?.text ?? "";
-    expect(retry).toContain("(blocking)");
-    expect(retry).toContain("REQUEST_CHANGES");
-  });
-
-  it("9. posts the humanized body and logs the assessment, never onto the PR", async () => {
-    const h = await harness({ script: happyScript() });
-
-    await postReviewEvent(h);
-
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.body).not.toBe(validDraft().body);
-    expect(posted?.body).toBe(
-      humanizedOutput().payload.body + `\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-    expect(posted?.comments).toEqual(validDraft().comments);
 
     const records = await runRecords(h);
     expect(records[0]).toMatchObject({
-      humanizer: {
-        changed: true,
-        assessment: "tightened the prose, kept the verdict",
+      outcome: "failed",
+      failure: {
+        stage: "bookkeeping",
+        message: expect.stringContaining("no review-status line"),
       },
     });
+    const message = (records[0]?.failure as { message?: string }).message ?? "";
+    expect(message).toContain("Here is my opinion");
+    // One prompt: a re-prompt would re-run the whole review, so none
+    // is sent.
+    expect(h.sessions.prompts).toHaveLength(1);
+  });
+
+  it("8. records failed when the session reports the review failed", async () => {
+    const h = await harness({ script: [FAILED_REPLY] });
+
+    await postReviewEvent(h);
+
+    const records = await runRecords(h);
+    expect(records[0]).toMatchObject({
+      outcome: "failed",
+      failure: {
+        stage: "bookkeeping",
+        message: "the session reported the review failed",
+      },
+    });
+    const metrics = await fetchMetrics(h);
+    expect(metrics).toContain(
+      `zenigata_reviews_total{repo="${REPO}",status="failed"} 1`,
+    );
+  });
+
+  it("9. stages the material the harness holds in the one prompt", async () => {
+    const h = await harness({
+      script: happyScript(),
+      memory: {
+        recall: async () => [
+          { content: "this repo's fixtures carry the token", source: "fact" },
+        ],
+        write: async () => {
+          throw new Error("unused");
+        },
+      },
+    });
+
+    await postReviewEvent(h);
+
+    const prompt = h.sessions.prompts[0]?.text ?? "";
+    expect(prompt).toContain("Head feature @ ");
+    expect(prompt).toContain("base main");
+    expect(prompt).toContain("Title: add two lines");
+    expect(prompt).toContain("a fixture pull request");
+    expect(prompt).toContain("[fact] this repo's fixtures carry the token");
   });
 
   it("10. injects the persona from the override file, or the packaged default", async () => {
@@ -590,46 +553,10 @@ describe("review flow", () => {
   });
 });
 
-describe("review flow operator speech", () => {
-  it("renders the operator-speech sentence from the configured humans list", async () => {
-    const h = await harness({
-      script: happyScript(),
-      env: {
-        ZENIGATA_HUMANS: "example-user, example-two",
-      },
-    });
-    await postReviewEvent(h);
-    expect(h.forge.postedReviews).toHaveLength(1);
-
-    const start = h.sessions.prompts[0]?.text ?? "";
-    // The one instruction sentence, rendered only from the humans list.
-    expect(start).toContain(
-      "Operator speech: the forge names an author on every comment; " +
-        "prose authored by example-user and example-two is the operator's own words",
-    );
-    expect(start).toContain(
-      "weight it as ground truth for veracity and corrections",
-    );
-    // The sentence sits between the persona and the pass instructions.
-    const personaEnd = start.indexOf("# The inspector's report");
-    const sentenceStart = start.indexOf("Operator speech:");
-    const passStart = start.indexOf("You are running the blind first pass");
-    expect(personaEnd).toBeGreaterThanOrEqual(0);
-    expect(sentenceStart).toBeGreaterThan(personaEnd);
-    expect(passStart).toBeGreaterThan(sentenceStart);
-  });
-
-  it("leaves a default deployment's start prompt free of the sentence", async () => {
-    const h = await harness({ script: happyScript() });
-    await postReviewEvent(h);
-    expect(h.sessions.prompts[0]?.text).not.toContain("Operator speech:");
-    expect(h.forge.postedReviews).toHaveLength(1);
-  });
-});
-
 describe("reply flow operator speech", () => {
   it("renders the operator-speech sentence and names the reply's author", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         // First session: the review. Second session: the answer.
         if (sessionId.endsWith("-1")) {
@@ -675,6 +602,7 @@ describe("reply flow operator speech", () => {
 
   it("names the author and renders no sentence without a humans list", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -714,6 +642,7 @@ describe("reply flow operator speech", () => {
 describe("reply flow", () => {
   it("2. answers a reply in thread and stores the learning observation", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         // First session: the review. Second session: the reply.
         if (sessionId.endsWith("-1")) {
@@ -757,7 +686,7 @@ describe("reply flow", () => {
     const replyPrompt = h.sessions.prompts.find((p) =>
       p.sessionId.endsWith("-2"),
     );
-    expect(replyPrompt?.text).toContain(humanizedOutput().payload.body);
+    expect(replyPrompt?.text).toContain(SEEDED_POSTED_BODY);
     expect(replyPrompt?.text).toContain("why is this blocking");
 
     expect((h.memory as MemoryFake).writes).toEqual([
@@ -821,6 +750,7 @@ describe("reply flow", () => {
 
   it("keeps going when the memory gateway fails on write", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -858,6 +788,7 @@ describe("reply flow", () => {
 
   it("16. answers a non-allowed author but stores nothing", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -895,6 +826,7 @@ describe("reply flow", () => {
     let h: Harness;
     const calls: string[] = [];
     h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -931,6 +863,7 @@ describe("reply flow", () => {
     });
 
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -965,7 +898,7 @@ describe("reply flow", () => {
     expect(records[1]).toMatchObject({ type: "reply", outcome: "failed" });
 
     releaseGate?.();
-    await waitFor(() => h.sessions.prompts.length >= 4);
+    await waitFor(() => h.sessions.prompts.length >= 2);
     await new Promise((resolve) => setTimeout(resolve, 50));
     // The abandoned answer run landed nothing extra.
     expect(h.forge.postedReplies).toHaveLength(1);
@@ -974,6 +907,7 @@ describe("reply flow", () => {
   it("19. caps an oversized reply text in the prompt", async () => {
     const longText = "x".repeat(4500) + "THE-TAIL-MARKER";
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1018,9 +952,7 @@ describe("reply flow", () => {
     expect(h.forge.postedReplies).toHaveLength(1);
     expect(h.forge.postedReplies[0]).toMatchObject({ repo: REPO, pr: 2 });
     expect(h.forge.postedReplies[0]?.body).toContain("no record");
-    expect(h.forge.postedReplies[0]?.body).not.toContain(
-      humanizedOutput().payload.body,
-    );
+    expect(h.forge.postedReplies[0]?.body).not.toContain(SEEDED_POSTED_BODY);
   });
 
   it("skips a reply to a repository outside allowedRepos", async () => {
@@ -1064,6 +996,7 @@ describe("reply flow", () => {
     let parkedReplies = 0;
 
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1175,6 +1108,7 @@ describe("reply flow", () => {
 
   it("indexes the bot's answer so a reply to it resolves in a two-turn thread", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1235,6 +1169,7 @@ describe("reply flow", () => {
 
   it("instructs the model to state the learning plainly without a repo prefix", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1258,6 +1193,7 @@ describe("reply flow", () => {
   it("truncates an oversized answer before posting", async () => {
     const longAnswer = "a".repeat(9000) + "THE-TAIL-MARKER";
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1281,26 +1217,11 @@ describe("reply flow", () => {
   });
 });
 
-describe("json repair in the stage loops (PRJ-381)", () => {
-  /**
-   * The intended context draft: its body carries literal braces and an
-   * American-style phrase close, so JSON.stringify emits the valid `,\"`
-   * bytes at the phrase close exactly where the review model was
-   * observed to transpose the escape (the backslash before the comma).
-   */
-  const intendedDraft = () => ({
-    verdict: "REQUEST_CHANGES",
-    body: 'the map call: {"k": v} — "the close," note',
-    comments: [blockingComment()],
-  });
-
+describe("json repair in the answer loop (PRJ-381)", () => {
   /** Transpose the valid `,\"` into the observed backslash-comma-quote form. */
   const transpose = (jsonText: string): string =>
     jsonText.replace(',\\"', '\\,"');
 
-  /** Malformed but not one of the two observed transposition forms. */
-  const UNREPAIRABLE = '{ "verdict": REQUEST_CHANGES, "comments": [] }';
-  const UNREPAIRABLE_OTHER = '{ "verdict": REQUEST_CHANGES }';
   const UNREPAIRABLE_ANSWER = '{ "answer": STANDING-NOTE }';
 
   const intendedAnswer = () => ({
@@ -1335,197 +1256,12 @@ describe("json repair in the stage loops (PRJ-381)", () => {
   const replyPrompts = (h: Harness, suffix: string) =>
     h.sessions.prompts.filter((p) => p.sessionId.endsWith(suffix));
 
-  it("1. repairs the transposed escape in place; the context stage completes on attempt 0 with no retry prompt", async () => {
-    const intended = JSON.stringify(intendedDraft());
-    const broken = transpose(intended);
-    expect(broken).not.toBe(intended);
-    expect(() => JSON.parse(broken)).toThrow(/Bad escaped character/);
-    const h = await harness({
-      script: [BLIND_FINDINGS, broken, JSON.stringify(humanizedOutput())],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    // Exactly the stage prompts: blind, context, humanize. The repaired
-    // reply ended the stage on attempt 0 — zero additional model traffic.
-    expect(h.sessions.prompts).toHaveLength(3);
-    for (const prompt of h.sessions.prompts) {
-      expect(prompt.text).not.toContain("failed validation");
-    }
-    // Attempt 0 validated: no failed draft persisted for the run.
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    expect(
-      (records[0] as Record<string, unknown>).failedDrafts,
-    ).toBeUndefined();
-  });
-
-  it("2. repairs a transposed humanize output in place at attempt 0", async () => {
-    const intendedHumanized = () => ({
-      payload: {
-        ...validDraft(),
-        body: 'the map call: {"k": v} — "the close," note, kept',
-      },
-      assessment: "kept the anchors, humanized the phrase",
-    });
-    const brokenHumanize = transpose(JSON.stringify(intendedHumanized()));
-    expect(brokenHumanize).not.toBe(JSON.stringify(intendedHumanized()));
-    const h = await harness({
-      script: [BLIND_FINDINGS, JSON.stringify(validDraft()), brokenHumanize],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    // blind, context, humanize: the repaired output needed no retry.
-    expect(h.sessions.prompts).toHaveLength(3);
-    for (const prompt of h.sessions.prompts) {
-      expect(prompt.text).not.toContain("failed validation");
-    }
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({
-      outcome: "posted",
-      humanizer: { assessment: "kept the anchors, humanized the phrase" },
-    });
-    expect(
-      (records[0] as Record<string, unknown>).failedDrafts,
-    ).toBeUndefined();
-  });
-
-  it("2b. triggers one corrective retry for an unrepairable humanize output, naming the parse error and the head", async () => {
-    const intendedHumanized = () => ({
-      payload: {
-        ...validDraft(),
-        body: "kept, repaired prose",
-      },
-      assessment: "kept the anchors, humanized the phrase",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(validDraft()),
-        UNREPAIRABLE,
-        JSON.stringify(intendedHumanized()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    // blind, context, humanize (unrepairable), corrective retry.
-    expect(h.sessions.prompts).toHaveLength(4);
-    const retry = h.sessions.prompts[3]?.text ?? "";
-    expect(retry).toContain("failed validation");
-    expect(retry).toContain("not valid JSON");
-    expect(retry).toContain(UNREPAIRABLE);
-    expect(retry).not.toContain("received undefined");
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    const drafts = failedDrafts(records[0] as Record<string, unknown>);
-    expect(drafts).toHaveLength(1);
-    expect(drafts[0]).toMatchObject({
-      stage: "humanize",
-      attempt: 0,
-      reply: UNREPAIRABLE,
-    });
-    expect(drafts[0]?.parseError).toContain("not valid JSON");
-  });
-
-  it("3. triggers exactly one model retry for an unrepairable context reply, carrying the real parse error and the reply head", async () => {
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        UNREPAIRABLE,
-        JSON.stringify(validDraft()),
-        JSON.stringify(humanizedOutput()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    // blind, context (unrepairable), corrective retry, humanize.
-    expect(h.sessions.prompts).toHaveLength(4);
-    const retry = h.sessions.prompts[2]?.text ?? "";
-    expect(retry).toContain("failed validation");
-    // The real JSON.parse message and the text the model actually sent.
-    expect(retry).toContain("not valid JSON");
-    expect(retry).toContain(UNREPAIRABLE);
-    // The zod ghost for an unparseable reply is gone.
-    expect(retry).not.toContain("received undefined");
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    const drafts = failedDrafts(records[0] as Record<string, unknown>);
-    expect(drafts).toHaveLength(1);
-    expect(drafts[0]).toMatchObject({
-      stage: "context",
-      attempt: 0,
-      reply: UNREPAIRABLE,
-    });
-    expect(drafts[0]?.parseError).toContain("not valid JSON");
-  });
-
-  it("4. fails the run naming the actual parse error when both context attempts stay unparseable, journaling both raw drafts", async () => {
-    const h = await harness({
-      script: [BLIND_FINDINGS, UNREPAIRABLE, UNREPAIRABLE_OTHER],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "failed" });
-    const message = (records[0]?.failure as { message?: string })?.message;
-    expect(message).toContain("context draft failed validation twice");
-    // The thrown text names the parse error, never "received undefined".
-    expect(message).toContain("not valid JSON");
-    expect(message).not.toContain("received undefined");
-    const drafts = failedDrafts(records[0] as Record<string, unknown>);
-    expect(drafts).toHaveLength(2);
-    expect(drafts[0]).toMatchObject({
-      stage: "context",
-      attempt: 0,
-      reply: UNREPAIRABLE,
-    });
-    expect(drafts[1]).toMatchObject({
-      stage: "context",
-      attempt: 1,
-      reply: UNREPAIRABLE_OTHER,
-    });
-    for (const draft of drafts) {
-      expect(draft.parseError).toContain("not valid JSON");
-    }
-  });
-
-  it("5. caps a runaway failed draft at 64KiB with the truncation marker", async () => {
-    const runaway = `{ "verdict": REQUEST_CHANGES, "filler": "${"x".repeat(70_000)}" }`;
-    const h = await harness({
-      script: [BLIND_FINDINGS, runaway, runaway],
-    });
-
-    await postReviewEvent(h);
-
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "failed" });
-    const drafts = failedDrafts(records[0] as Record<string, unknown>);
-    expect(drafts).toHaveLength(2);
-    for (const draft of drafts) {
-      expect(draft.reply).not.toHaveLength(runaway.length);
-      expect(typeof draft.parseError).toBe("string");
-    }
-    expect(drafts[0]?.reply?.startsWith('{ "verdict": REQUEST_CHANGES')).toBe(
-      true,
-    );
-    // The cap and the marker are shared with the reply flow (journal).
-    expect(drafts[0]?.reply?.includes("truncated")).toBe(true);
-  });
-
   it("6. repairs a transposed answer output on attempt 0; the learning survives", async () => {
     const intended = JSON.stringify(intendedAnswer());
     const broken = transpose(intended);
     expect(() => JSON.parse(broken)).toThrow(/Bad escaped character/);
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1559,6 +1295,7 @@ describe("json repair in the stage loops (PRJ-381)", () => {
 
   it("7. re-prompts once for an unrepairable answer output, naming the parse error and the output head", async () => {
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1598,6 +1335,7 @@ describe("json repair in the stage loops (PRJ-381)", () => {
   it("8. posts the static failure reply on double answer failure and journals the raw outputs with the parse error", async () => {
     const errorLines: string[] = [];
     const h = await harness({
+      seedPostedReview: true,
       script: (sessionId, index) => {
         if (sessionId.endsWith("-1")) {
           return happyScript()[index] ?? "";
@@ -1835,7 +1573,6 @@ describe("settled map pruning", () => {
 
     releaseGate?.();
     await h.handle.awaitSettled(first.eventId);
-    expect(h.forge.postedReviews).toHaveLength(1);
   }, 60_000);
 
   it("keeps pending entries past the cap until they settle", async () => {
@@ -1940,7 +1677,6 @@ describe("duplicate in-flight reviews", () => {
     releaseGate?.();
     await h.handle.awaitSettled(first.eventId);
 
-    expect(h.forge.postedReviews).toHaveLength(1);
     expect(h.sessions.createdSessions).toHaveLength(1);
     const records = await runRecords(h);
     expect(records).toHaveLength(1);
@@ -1981,7 +1717,11 @@ describe("review concurrency cap", () => {
     await Promise.all(
       events.map((event) => h.handle.awaitSettled(event.eventId)),
     );
-    expect(h.forge.postedReviews).toHaveLength(events.length);
+    const records = await runRecords(h);
+    expect(records).toHaveLength(events.length);
+    for (const record of records) {
+      expect((record as { outcome?: string }).outcome).toBe("posted");
+    }
   });
 });
 
@@ -2019,156 +1759,6 @@ describe("cancelled-run invariants and reconciliation", () => {
     await expectGone(worktreeDir(h));
   });
 
-  it("22. reconciles a review the adapter completed behind the abort", async () => {
-    const h = await harness({
-      script: happyScript(),
-      env: { ZENIGATA_REVIEW_TIMEOUT_SECONDS: "1" },
-    });
-    const releaseGate = h.forge.parkPostReviews();
-    // The contract lets an adapter that received the request complete it
-    // after the client gave up; the double models that side here.
-    h.forge.completeAbortedPosts = true;
-
-    const event = makeReviewRequested({ repo: REPO, pr: PR });
-    const response = await h.source.postToIntake(
-      intakeUrl(h),
-      EVENT_TOKEN,
-      event,
-    );
-    expect(response.status).toBe(202);
-    await waitFor(() => h.forge.parkedPosts === 1);
-    await h.handle.awaitSettled(event.eventId);
-
-    // The deadline fired while the post was parked; the abort completed
-    // it in the double, the reconciliation found the landed review, and
-    // the run journaled posted — no failure record contradicting it.
-    expect(h.forge.postedReviews).toHaveLength(1);
-    expect(h.forge.postedFailures).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({
-      outcome: "posted",
-      reconciled: true,
-      verdict: "REQUEST_CHANGES",
-      inlineComments: 1,
-    });
-    const metrics = await fetchMetrics(h);
-    expect(metrics).toContain(
-      `zenigata_reviews_total{repo="${REPO}",status="posted"} 1`,
-    );
-
-    releaseGate();
-    await waitFor(() => h.forge.parkedPosts === 0);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(h.forge.postedReviews).toHaveLength(1);
-    expect(h.forge.postedFailures).toHaveLength(0);
-  });
-
-  it("23. reconciles when the post's response is lost but the review landed", async () => {
-    const h = await harness({
-      script: happyScript(),
-      wrapForge: (inner): ForgeAdapter => ({
-        getPullRequest: (repo, pr, opts) =>
-          inner.getPullRequest(repo, pr, opts),
-        getDiff: (repo, pr) => inner.getDiff(repo, pr),
-        getPostedReview: (repo, pr, head, opts) =>
-          inner.getPostedReview(repo, pr, head, opts),
-        postReview: async (review, opts) => {
-          // The adapter processed the post; the response never made it
-          // back to the client.
-          await inner.postReview(review, opts);
-          throw new Error("forge double: the response was lost");
-        },
-        postReply: (input) => inner.postReply(input),
-        postFailureComment: (input) => inner.postFailureComment(input),
-      }),
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    expect(h.forge.postedFailures).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({
-      outcome: "posted",
-      reconciled: true,
-      verdict: "REQUEST_CHANGES",
-    });
-    const metrics = await fetchMetrics(h);
-    expect(metrics).toContain(
-      `zenigata_reviews_total{repo="${REPO}",status="posted"} 1`,
-    );
-  });
-
-  it("24. journals the failure and posts nothing when the reconciliation finds nothing", async () => {
-    const h = await harness({
-      script: happyScript(),
-      wrapForge: (inner): ForgeAdapter => ({
-        getPullRequest: (repo, pr, opts) =>
-          inner.getPullRequest(repo, pr, opts),
-        getDiff: (repo, pr) => inner.getDiff(repo, pr),
-        getPostedReview: (repo, pr, head, opts) =>
-          inner.getPostedReview(repo, pr, head, opts),
-        postReview: async () => {
-          throw new Error("forge double: the adapter refused the post");
-        },
-        postReply: (input) => inner.postReply(input),
-        postFailureComment: (input) => inner.postFailureComment(input),
-      }),
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(0);
-    expect(h.forge.postedFailures).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({
-      outcome: "failed",
-      failure: { stage: "post" },
-    });
-    expect(records[0]?.reconciled).toBeUndefined();
-    const metrics = await fetchMetrics(h);
-    expect(metrics).toContain(
-      `zenigata_reviews_total{repo="${REPO}",status="failed"} 1`,
-    );
-  });
-
-  it("names the post failure when the post-refetch itself throws", async () => {
-    let postThrew = false;
-    const h = await harness({
-      script: happyScript(),
-      wrapForge: (inner): ForgeAdapter => ({
-        getPullRequest: (repo, pr, opts) =>
-          postThrew
-            ? Promise.reject(new Error("refetch exploded"))
-            : inner.getPullRequest(repo, pr, opts),
-        getDiff: (repo, pr) => inner.getDiff(repo, pr),
-        getPostedReview: (repo, pr, head, opts) =>
-          inner.getPostedReview(repo, pr, head, opts),
-        postReview: async () => {
-          postThrew = true;
-          throw new Error("the adapter refused the post");
-        },
-        postReply: (input) => inner.postReply(input),
-        postFailureComment: (input) => inner.postFailureComment(input),
-      }),
-    });
-
-    await postReviewEvent(h);
-
-    // The re-fetch's error must not mask the original post error, and the
-    // journal names the post, not the GET.
-    expect(h.forge.postedFailures).toHaveLength(0);
-    const records = await runRecords(h);
-    const postedMessage = (records[0]?.failure as { message?: string })
-      ?.message;
-    expect(postedMessage).toContain("the adapter refused the post");
-    expect(postedMessage).not.toContain("refetch exploded");
-    expect(records[0]).toMatchObject({
-      outcome: "failed",
-      failure: { stage: "post" },
-    });
-  });
-
   it("25. abandons a hung session dispose at its bound during the sweep", async () => {
     // PRJ-382 moved teardown off the run and onto the sweep; the
     // bounded-abandonment contract moved with it. A dispose that never
@@ -2203,32 +1793,8 @@ describe("cancelled-run invariants and reconciliation", () => {
 });
 
 describe("reliability: transport failure, wedge discipline, retry policy", () => {
-  const FAILING_FINDINGS = [
-    "notes.md line 3: 'added one' names nothing; say what was added.",
-  ].join("\n");
-
-  const blockingComment = () => ({
-    path: "notes.md",
-    line: 3,
-    body: "Agent-generated:\n\nissue (blocking): 'added one' names nothing; say what was added or drop the line.",
-  });
-
-  const validDraft = () => ({
-    verdict: "REQUEST_CHANGES",
-    body: "The change adds two lines but neither says what was added.",
-    comments: [blockingComment()],
-  });
-
-  const humanizedOutput = () => ({
-    payload: {
-      ...validDraft(),
-      body: "The case: two lines land and neither one says what it adds.",
-    },
-    assessment: "tightened the prose, kept the verdict",
-  });
-
   /**
-   * The happy three-prompt script, served from the first prompt of every
+   * The happy one-prompt script, served from the first prompt of every
    * session except the first: session 1's opening prompt dies in
    * transport (the forced failure), while every later session — a fresh
    * run reviews from the top — proceeds normally.
@@ -2240,13 +1806,7 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
           "fetch failed: ECONNRESET (forced transport failure, loopback)",
         );
       }
-      return (
-        [
-          FAILING_FINDINGS,
-          JSON.stringify(validDraft()),
-          JSON.stringify(humanizedOutput()),
-        ][index] ?? ""
-      );
+      return happyScript()[index] ?? "";
     };
   };
 
@@ -2277,7 +1837,7 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
     expect(records[0]).toMatchObject({
       outcome: "failed",
       commentId: first.commentId,
-      failure: { stage: "blind" },
+      failure: { stage: "review" },
     });
     // PRJ-382: the dead run leaves its work standing — the failed class
     // is exactly the one whose transcript must survive — and the record
@@ -2298,7 +1858,6 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
       outcome: "posted",
       commentId: second.commentId,
     });
-    expect(h.forge.postedReviews).toHaveLength(1);
     expect(h.forge.postedFailures).toHaveLength(0);
   });
 
@@ -2312,7 +1871,7 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
     expect(records[0]).toMatchObject({
       outcome: "failed",
       commentId: first.commentId,
-      failure: { stage: "blind" },
+      failure: { stage: "review" },
     });
 
     // The same delivery replayed (same event identity) is the spend gate:
@@ -2346,7 +1905,6 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
       outcome: "posted",
       commentId: reRequest.commentId,
     });
-    expect(h.forge.postedReviews).toHaveLength(1);
   });
 
   it("3. allows one automatic retry of a failed event under the explicit once policy", async () => {
@@ -2368,7 +1926,6 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
       outcome: "posted",
       commentId: replay.commentId,
     });
-    expect(h.forge.postedReviews).toHaveLength(1);
 
     // A further replay of the same delivery: the spend is exhausted, so
     // it refuses for free.
@@ -2379,7 +1936,6 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
     records = await runRecords(h);
     expect(records).toHaveLength(3);
     expect(records[2]).toMatchObject({ outcome: "skipped" });
-    expect(h.forge.postedReviews).toHaveLength(1);
 
     // A fresh delivery is a fresh identity: it runs even after the same
     // comment's other deliveries are all spent.
@@ -2393,40 +1949,6 @@ describe("reliability: transport failure, wedge discipline, retry policy", () =>
       outcome: "posted",
       commentId: replay.commentId,
     });
-    expect(h.forge.postedReviews).toHaveLength(2);
-  });
-
-  it("4. carries the diff's changed-line windows in the corrective retry prompt", async () => {
-    const notInDiff = JSON.stringify({
-      verdict: "APPROVE",
-      body: "fine",
-      comments: [
-        {
-          path: "src/not-in-diff.ts",
-          line: 2,
-          body: "Agent-generated:\n\nissue (blocking): no.",
-        },
-      ],
-    });
-    const h = await harness({
-      script: [
-        FAILING_FINDINGS,
-        notInDiff,
-        JSON.stringify(validDraft()),
-        JSON.stringify(humanizedOutput()),
-      ],
-    });
-
-    await postEvent(h);
-
-    // The context stage's retry prompt (the third prompt sent) names the
-    // diff's paths with their changed-line windows and never resends
-    // the whole diff.
-    const retryPromptText = h.sessions.prompts[2]?.text ?? "";
-    expect(retryPromptText).toContain("changed line");
-    expect(retryPromptText).toMatch(/- notes\.md: \d+(?:-\d+)?/);
-    expect(retryPromptText).toContain("src/not-in-diff.ts does not appear");
-    expect(retryPromptText).not.toContain("```diff");
   });
 });
 
@@ -2763,690 +2285,5 @@ describe("accepted-start records and the rejected-run surface", () => {
     } finally {
       await hB.handle.close();
     }
-  });
-});
-
-describe("posted review trigger footer", () => {
-  it("rides the posted body exactly once, and both drafting prompts carry the register rule", async () => {
-    const h = await harness({ script: happyScript() });
-
-    await postReviewEvent(h);
-
-    // The footer sits once, after the review prose, and nowhere else.
-    const body = h.forge.postedReviews[0]?.payload.body ?? "";
-    expect(body.split(REVIEW_TRIGGER_FOOTER)).toHaveLength(2);
-    expect(body).toBe(
-      humanizedOutput().payload.body + `\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-
-    // The drafting prompts are guidance only: the footer is what makes
-    // the contract hold. Each pass carries the rule with the verbatim
-    // footer as the sole permitted statement of future behavior.
-    expect(h.sessions.prompts).toHaveLength(3);
-    for (const index of [1, 2]) {
-      expect(h.sessions.prompts[index]?.text).toContain(
-        "Never promise future reviews",
-      );
-      expect(h.sessions.prompts[index]?.text).toContain(REVIEW_TRIGGER_FOOTER);
-    }
-  });
-
-  it("never doubles the footer: footer-bearing lines strip before the append", () => {
-    const body = "The case: two lines land and neither says what it adds.";
-    const once = withReviewTriggerFooter(body);
-    expect(once).toBe(`${body}\n\n${REVIEW_TRIGGER_FOOTER}`);
-
-    // A body already ending with the footer rebuilds to itself: the
-    // strip takes the line the append just put there, so re-applying
-    // composes to the identity.
-    expect(withReviewTriggerFooter(once)).toBe(once);
-
-    // A verbatim echo spliced mid-body leaves no second copy: the
-    // footer line and one adjacent blank seam go, the prose stays.
-    const echoed = `preface\n\n${REVIEW_TRIGGER_FOOTER}\n\npostscript`;
-    expect(withReviewTriggerFooter(echoed)).toBe(
-      `preface\n\npostscript\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-
-    // The sentence past posted reviews carry strips the same way, so a
-    // draft reproducing it from repo history gains only the canonical
-    // line.
-    const carried = `The verdict holds.\n\nRe-reviews fire on triggers only: a comment mention on this PR or a review re-request. A bare push triggers nothing.`;
-    expect(withReviewTriggerFooter(carried)).toBe(
-      `The verdict holds.\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-  });
-
-  it("strips a paraphrased footer too, so only the canonical wording posts", () => {
-    // Recognition is by stem: same opening words, reworded tail, so the
-    // paraphrase cannot post beside the canonical footer.
-    const paraphrased =
-      "A fresh `@zenigata @review` comment launches the review again, and a review re-request does as well; bare pushes change nothing.";
-    const body = `The findings stand on their own.\n\n${paraphrased}`;
-    expect(withReviewTriggerFooter(body)).toBe(
-      `The findings stand on their own.\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// PRJ-428: a mis-anchored comment must not kill the review run
-// ---------------------------------------------------------------------------
-
-describe("unanchorable comments drop instead of killing the run (PRJ-428)", () => {
-  /**
-   * The fixture's one hunk covers new-side lines 1..7 of notes.md, so
-   * line 99 is the anchor no post the forge would accept can carry.
-   */
-  const badAnchorComment = () => ({
-    path: "notes.md",
-    line: 99,
-    body: "Agent-generated:\n\nissue (blocking): this line does not exist in the diff.",
-  });
-
-  /** A valid non-blocking comment on an added line. */
-  const anchoredNonBlocking = () => ({
-    path: "notes.md",
-    line: 2,
-    body: "Agent-generated:\n\nsuggestion (non-blocking): the added line could name its purpose.",
-  });
-
-  /** The dropped-comment entries a run record carries. */
-  const droppedComments = (
-    record: Record<string, unknown>,
-  ): Array<{ path?: string; line?: number; reason?: string; body?: string }> =>
-    record.droppedComments as Array<{
-      path?: string;
-      line?: number;
-      reason?: string;
-      body?: string;
-    }>;
-
-  /** The failed-attempt entries a run record carries (PRJ-381 shape). */
-  const failedDrafts = (
-    record: Record<string, unknown>,
-  ): Array<{ stage?: string; attempt?: number }> =>
-    record.failedDrafts as Array<{ stage?: string; attempt?: number }>;
-
-  it("1. drops the unanchorable comment after the retry and posts the anchored one", async () => {
-    const halfAnchored = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "One comment anchors, one does not.",
-      comments: [blockingComment(), badAnchorComment()],
-    });
-    const humanized = () => ({
-      payload: {
-        ...halfAnchored(),
-        comments: [blockingComment()],
-        body: "Humanized: the anchored finding stands.",
-      },
-      assessment: "tightened the prose",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(halfAnchored()),
-        JSON.stringify(halfAnchored()),
-        JSON.stringify(humanized()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    // The review posted with the comment that anchored; the bad one is
-    // gone from the payload, not fatal to the run.
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.verdict).toBe("REQUEST_CHANGES");
-    expect(posted?.comments).toHaveLength(1);
-    expect(posted?.comments[0]?.line).toBe(3);
-    // blind, context attempt 0, corrective retry, humanize.
-    expect(h.sessions.prompts).toHaveLength(4);
-    const retry = h.sessions.prompts[2]?.text ?? "";
-    // The retry named the refusal and the real changed-line windows.
-    expect(retry).toContain(
-      "comment on notes.md line 99 is outside the diff's changed lines",
-    );
-    expect(retry).toContain("notes.md: 1-7");
-    // The posted body names the comment the rescue dropped (review 333).
-    expect(posted?.body).toContain("could not anchor on this diff");
-    expect(posted?.body).toContain(
-      "comment on notes.md line 99 is outside the diff's changed lines",
-    );
-    expect(posted?.body).toContain(
-      "kept in the review run's record, truncated at the 64KiB journal cap if oversize",
-    );
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    const drops = droppedComments(records[0] as Record<string, unknown>);
-    expect(drops).toHaveLength(1);
-    expect(drops[0]).toEqual({
-      source: "context",
-      path: "notes.md",
-      line: 99,
-      reason: "comment on notes.md line 99 is outside the diff's changed lines",
-      body: "Agent-generated:\n\nissue (blocking): this line does not exist in the diff.",
-    });
-    expect(
-      (records[0] as Record<string, unknown>).verdictReconciled,
-    ).toBeUndefined();
-    // Both refused drafts are journaled, as PRJ-381 established.
-    const drafts = failedDrafts(records[0] as Record<string, unknown>);
-    expect(drafts).toHaveLength(2);
-  });
-
-  it("2. fails the run rather than post a verdict the drops would mint", async () => {
-    const draft = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "The only blocking comment does not anchor.",
-      comments: [badAnchorComment(), anchoredNonBlocking()],
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(draft()),
-        JSON.stringify(draft()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    // Nothing posts: dropping the only blocking comment would leave the
-    // draft's REQUEST_CHANGES verdict with nothing blocking behind it,
-    // and the rescue refuses to mint the APPROVE the draft never
-    // issued.
-    expect(h.forge.postedReviews).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "failed" });
-    const message = (records[0]?.failure as { message?: string })?.message;
-    expect(message).toContain("context draft failed validation twice");
-    expect(message).toContain(
-      "verdict is REQUEST_CHANGES but no comment is marked (blocking)",
-    );
-    // The honest accounting rides the failed record: what dropped, and
-    // the verdict move the drops would have forced.
-    expect(droppedComments(records[0] as Record<string, unknown>)).toEqual([
-      {
-        source: "context",
-        path: "notes.md",
-        line: 99,
-        reason:
-          "comment on notes.md line 99 is outside the diff's changed lines",
-        body: "Agent-generated:\n\nissue (blocking): this line does not exist in the diff.",
-      },
-    ]);
-    expect(records[0]).toMatchObject({
-      verdictReconciled: {
-        from: "REQUEST_CHANGES",
-        to: "APPROVE",
-        because:
-          "every blocking comment dropped: comment on notes.md line 99 is outside the diff's changed lines",
-      },
-    });
-  });
-
-  it("3. posts everything when the corrective retry fixes the anchor", async () => {
-    const misAnchored = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "The finding is real; the anchor was not.",
-      comments: [badAnchorComment()],
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(misAnchored()),
-        JSON.stringify(validDraft()),
-        JSON.stringify(humanizedOutput()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.verdict).toBe("REQUEST_CHANGES");
-    expect(posted?.comments).toHaveLength(1);
-    expect(posted?.comments[0]?.line).toBe(3);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    expect(
-      (records[0] as Record<string, unknown>).droppedComments,
-    ).toBeUndefined();
-    // The attempt-0 refusal is journaled; nothing was dropped.
-    expect(failedDrafts(records[0] as Record<string, unknown>)).toHaveLength(1);
-  });
-
-  it("4. still fails the run when the retry's surviving failure is not an anchor failure", async () => {
-    const misAnchored = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "The finding is real; the anchor was not.",
-      comments: [badAnchorComment()],
-    });
-    const formatBroken = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "The header rule is broken this time.",
-      comments: [
-        { path: "notes.md", line: 3, body: "no Agent-generated header" },
-      ],
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(misAnchored()),
-        JSON.stringify(formatBroken()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "failed" });
-    const message = (records[0]?.failure as { message?: string })?.message;
-    expect(message).toContain("context draft failed validation twice");
-    expect(message).toContain("does not start with");
-  });
-
-  it("5. fails the run when every comment is unanchorable: there is no review to post", async () => {
-    const allUnanchorable = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "Nothing anchors.",
-      comments: [badAnchorComment(), { ...badAnchorComment(), line: 100 }],
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(allUnanchorable()),
-        JSON.stringify(allUnanchorable()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(0);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "failed" });
-    const message = (records[0]?.failure as { message?: string })?.message;
-    expect(message).toContain("context draft failed validation twice");
-    expect(message).toContain("outside the diff's changed lines");
-    expect(message).toContain(
-      "every comment dropped; there is no review left to post",
-    );
-    // Both drops are named; no verdict move is, since nothing would
-    // have posted under any verdict.
-    expect(droppedComments(records[0] as Record<string, unknown>)).toHaveLength(
-      2,
-    );
-    expect(
-      (records[0] as Record<string, unknown>).verdictReconciled,
-    ).toBeUndefined();
-  });
-
-  it("6. re-anchors the humanizer's payload before it posts: a moved anchor posts the pre-humanizer draft", async () => {
-    const misAnchoredHumanize = () => ({
-      payload: {
-        ...validDraft(),
-        comments: [{ ...blockingComment(), line: 99 }],
-        body: "Humanized prose over an anchor the humanizer moved.",
-      },
-      assessment: "moved the anchor",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(validDraft()),
-        JSON.stringify(misAnchoredHumanize()),
-        JSON.stringify(misAnchoredHumanize()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    // The humanize stage validates its output against the diff before
-    // anything can post: the moved anchor refuses both attempts and the
-    // stage falls back to the pre-humanizer draft, whose anchors the
-    // context stage already validated.
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.comments).toHaveLength(1);
-    expect(posted?.comments[0]?.line).toBe(3);
-    expect(posted?.body).toBe(
-      validDraft().body + `\n\n${REVIEW_TRIGGER_FOOTER}`,
-    );
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({
-      outcome: "posted",
-      humanizer: {
-        assessment: "humanizer failed validation; posted unhumanized",
-        changed: false,
-      },
-    });
-    // blind, context, humanize attempt 0, humanize corrective retry.
-    expect(h.sessions.prompts).toHaveLength(4);
-  });
-
-  it("7. posts the annotated unhumanized body when the humanize attempts both fail after a drop", async () => {
-    const halfAnchored = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "One comment anchors, one does not.",
-      comments: [
-        blockingComment(),
-        {
-          ...badAnchorComment(),
-          // Oversize so the record's copy caps with the failed drafts'
-          // mechanics instead of riding the journal uncapped.
-          body:
-            "Agent-generated:\n\nissue (blocking): " +
-            "x".repeat(FAILED_DRAFT_CAP),
-        },
-      ],
-    });
-    const misAnchoredHumanize = () => ({
-      payload: {
-        ...halfAnchored(),
-        comments: [{ ...blockingComment(), line: 99 }],
-        body: "Humanized prose over an anchor the humanizer moved.",
-      },
-      assessment: "moved the anchor",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(halfAnchored()),
-        JSON.stringify(halfAnchored()),
-        JSON.stringify(misAnchoredHumanize()),
-        JSON.stringify(misAnchoredHumanize()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    // The humanize fallback posts the context draft's body verbatim —
-    // annotated at the post site, so the summary names the comment the
-    // rescue dropped instead of describing evidence the forge never
-    // received.
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.verdict).toBe("REQUEST_CHANGES");
-    expect(posted?.comments).toHaveLength(1);
-    expect(posted?.comments[0]?.line).toBe(3);
-    expect(posted?.body).toContain("One comment anchors, one does not.");
-    expect(posted?.body).toContain("could not anchor on this diff");
-    expect(posted?.body).toContain(
-      "comment on notes.md line 99 is outside the diff's changed lines",
-    );
-    expect(posted?.body).toContain(
-      "kept in the review run's record, truncated at the 64KiB journal cap if oversize",
-    );
-    expect(posted?.body).toContain(REVIEW_TRIGGER_FOOTER);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    // The dropped body caps with the failed drafts' mechanics: the same
-    // text already rides the record inside the capped failedDrafts, and
-    // an uncapped copy would double it. The marker is the drop's own
-    // (PRJ-439): a dropped comment is not a draft attempt.
-    const drops = droppedComments(records[0] as Record<string, unknown>);
-    expect(drops).toHaveLength(1);
-    expect(drops[0]?.body?.endsWith(DROPPED_COMMENT_TRUNCATION_MARKER)).toBe(
-      true,
-    );
-    expect(drops[0]?.body?.length).toBeLessThanOrEqual(
-      FAILED_DRAFT_CAP + DROPPED_COMMENT_TRUNCATION_MARKER.length,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// PRJ-440: the humanize stage cannot silently shrink the comment set
-// ---------------------------------------------------------------------------
-
-describe("the humanize stage's shrink is recorded and annotated (PRJ-440)", () => {
-  /** The run-record helper the PRJ-428 describe scopes to itself. */
-  const shrinkDrops = (
-    record: Record<string, unknown>,
-  ): Array<{
-    source?: string;
-    path?: string;
-    line?: number;
-    reason?: string;
-    body?: string;
-  }> =>
-    record.droppedComments as Array<{
-      source?: string;
-      path?: string;
-      line?: number;
-      reason?: string;
-      body?: string;
-    }>;
-
-  it("names the comment the humanize stage dropped from the rescue's kept set, on the body and in the record", async () => {
-    // The context stage's rescue keeps two anchored comments and drops
-    // the unanchorable one; the humanize stage's reply then returns a
-    // payload with only one of the two.
-    const keptTwo = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "Two comments anchor; a third does not.",
-      comments: [
-        blockingComment(),
-        {
-          path: "notes.md",
-          line: 5,
-          body: "Agent-generated:\n\nsuggestion (non-blocking): say what this line adds too.",
-        },
-        {
-          path: "notes.md",
-          line: 99,
-          body: "Agent-generated:\n\nissue (blocking): this line does not exist in the diff.",
-        },
-      ],
-    });
-    const shrunk = () => ({
-      payload: {
-        verdict: "REQUEST_CHANGES",
-        body: "Humanized: the blocking finding stands alone.",
-        comments: [blockingComment()],
-      },
-      assessment: "dropped the non-blocking comment",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(keptTwo()),
-        JSON.stringify(keptTwo()),
-        JSON.stringify(shrunk()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    // The review posts with the humanized payload's single comment,
-    // under the verdict the draft issued: the shrink never touches it.
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.verdict).toBe("REQUEST_CHANGES");
-    expect(posted?.comments).toHaveLength(1);
-    expect(posted?.comments[0]?.line).toBe(3);
-    // The body names both losses: the context rescue's anchor refusal
-    // and the humanize stage's omission from the kept set.
-    expect(posted?.body).toContain("could not anchor on this diff");
-    expect(posted?.body).toContain(
-      "comment on notes.md line 99 is outside the diff's changed lines",
-    );
-    expect(posted?.body).toContain(
-      "The humanize stage dropped comment(s) the context stage kept; they are not posted inline:",
-    );
-    expect(posted?.body).toContain(
-      "comment on notes.md line 5 anchored in the kept set, but the humanize stage's reply omitted it",
-    );
-    expect(posted?.body).toContain(
-      "kept in the review run's record, truncated at the 64KiB journal cap if oversize",
-    );
-    expect(posted?.body).toContain(REVIEW_TRIGGER_FOOTER);
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    expect(shrinkDrops(records[0] as Record<string, unknown>)).toEqual([
-      {
-        source: "context",
-        path: "notes.md",
-        line: 99,
-        reason:
-          "comment on notes.md line 99 is outside the diff's changed lines",
-        body: "Agent-generated:\n\nissue (blocking): this line does not exist in the diff.",
-      },
-      {
-        source: "humanize",
-        path: "notes.md",
-        line: 5,
-        reason:
-          "comment on notes.md line 5 anchored in the kept set, but the humanize stage's reply omitted it",
-        body: "Agent-generated:\n\nsuggestion (non-blocking): say what this line adds too.",
-      },
-    ]);
-  });
-
-  it("names the loss when the humanize stage shrinks a draft that needed no rescue", async () => {
-    const keptTwoClean = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "Two anchored findings.",
-      comments: [
-        blockingComment(),
-        {
-          path: "notes.md",
-          line: 5,
-          body: "Agent-generated:\n\nsuggestion (non-blocking): say what this line adds too.",
-        },
-      ],
-    });
-    const shrunk = () => ({
-      payload: {
-        verdict: "REQUEST_CHANGES",
-        body: "Humanized: the blocking finding stands alone.",
-        comments: [blockingComment()],
-      },
-      assessment: "dropped the non-blocking comment",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(keptTwoClean()),
-        JSON.stringify(shrunk()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.verdict).toBe("REQUEST_CHANGES");
-    expect(posted?.comments).toHaveLength(1);
-    // No context refusal exists here: only the humanize stage's group
-    // annotates the body.
-    expect(posted?.body).not.toContain("could not anchor on this diff");
-    expect(posted?.body).toContain(
-      "The humanize stage dropped comment(s) the context stage kept; they are not posted inline:",
-    );
-    expect(posted?.body).toContain(
-      "comment on notes.md line 5 anchored in the kept set, but the humanize stage's reply omitted it",
-    );
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    expect(shrinkDrops(records[0] as Record<string, unknown>)).toEqual([
-      {
-        source: "humanize",
-        path: "notes.md",
-        line: 5,
-        reason:
-          "comment on notes.md line 5 anchored in the kept set, but the humanize stage's reply omitted it",
-        body: "Agent-generated:\n\nsuggestion (non-blocking): say what this line adds too.",
-      },
-    ]);
-  });
-
-  it("a missing kept set fails the shrink check loud instead of a silent no-check pass (PRJ-442)", () => {
-    // The invariant (the context stage resolves only with a draft, and
-    // both the stage and the capture throw without one) is unreachable
-    // through the wired flow, so the loud edge is pinned at the check
-    // itself: a broken invariant must fail the run here, never degrade
-    // into a check that reads an emptied set and passes.
-    expect(() => humanizeShrinkDrops(undefined, [blockingComment()])).toThrow(
-      "the context stage left no kept-comment set; the shrink check refuses to run as a silent no-check pass",
-    );
-  });
-
-  it("two kept comments on one anchor keep together: both post and no drop is recorded (PRJ-442)", async () => {
-    // The forge takes two kept comments on one anchor — the adapter's
-    // payload schema puts no uniqueness on {path, line} — so the
-    // guard's anchor-set identity must not read the pair's presence as
-    // a loss. (Its limit, also pinned in the reconcile's comment: a
-    // reply that omits exactly one of the pair is unrecorded, because
-    // the comparison sees anchors, not counts.)
-    const keptPairOnOneAnchor = () => ({
-      verdict: "REQUEST_CHANGES",
-      body: "Two findings share a line.",
-      comments: [
-        blockingComment(),
-        {
-          path: "notes.md",
-          line: 5,
-          body: "Agent-generated:\n\nsuggestion (non-blocking): say what this line adds too.",
-        },
-        {
-          path: "notes.md",
-          line: 5,
-          body: "Agent-generated:\n\nnitpick (non-blocking): the wording here repeats the summary.",
-        },
-      ],
-    });
-    const humanized = () => ({
-      payload: {
-        verdict: "REQUEST_CHANGES",
-        body: "Humanized: two findings share a line.",
-        comments: keptPairOnOneAnchor().comments,
-      },
-      assessment: "tightened the prose, kept the verdict",
-    });
-    const h = await harness({
-      script: [
-        BLIND_FINDINGS,
-        JSON.stringify(keptPairOnOneAnchor()),
-        JSON.stringify(humanized()),
-      ],
-    });
-
-    await postReviewEvent(h);
-
-    expect(h.forge.postedReviews).toHaveLength(1);
-    const posted = h.forge.postedReviews[0]?.payload;
-    expect(posted?.comments).toHaveLength(3);
-    expect(posted?.body).not.toContain("not posted inline");
-    const records = await runRecords(h);
-    expect(records[0]).toMatchObject({ outcome: "posted" });
-    expect(
-      (records[0] as Record<string, unknown>).droppedComments,
-    ).toBeUndefined();
-  });
-
-  it("a drop with an unrecognized source still renders under the fallback group (PRJ-442)", () => {
-    const drop = {
-      // A source neither recording stage wrote: the shape an older or
-      // newer build could carry, outside the DroppedSource union.
-      source: "unknown-stage" as DroppedSource,
-      path: "notes.md",
-      line: 5,
-      reason: "comment on notes.md line 5 dropped by an unrecognized stage",
-      body: "Agent-generated:\n\nnote (non-blocking): gone.",
-    };
-    const annotated = annotateDroppedComments("The body.", [drop]);
-    expect(annotated).toContain(
-      "Comment(s) an unrecognized stage dropped are not posted inline:",
-    );
-    expect(annotated).toContain(
-      "- comment on notes.md line 5 dropped by an unrecognized stage",
-    );
-    expect(annotated).toContain(
-      "kept in the review run's record, truncated at the 64KiB journal cap if oversize",
-    );
-    expect(annotated).not.toContain("could not anchor on this diff");
-    expect(annotated).not.toContain("The humanize stage dropped");
   });
 });

@@ -15,9 +15,9 @@ driver author implements and the rationale behind the pin.
 | `transcript(sessionId)`           | Return the session's recorded turns, oldest first (`{role, text}` per turn).              |
 | `dispose(sessionId)`              | End the session.                                                                          |
 
-A review uses one session for all of its passes: create, then up to five prompt/readOutput rounds (blind, context,
-humanize — and each JSON stage carries one corrective retry), then dispose. The reply flow creates its own short-lived
-session the same way.
+A review uses one session for its whole run: create, then one prompt/readOutput round — the session's own skill flow
+does the review, its humanize, and the forge post, and the reply's final line is the run's status — then dispose. The
+reply flow creates its own short-lived session the same way.
 
 `readOutput` returns the text of the newest assistant message only. When the newest assistant message is the one already
 returned — a turn that produced no assistant output — it returns `""` rather than the stale text. The pipeline's

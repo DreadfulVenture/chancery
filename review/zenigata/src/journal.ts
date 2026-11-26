@@ -153,7 +153,12 @@ export interface ReviewRecord {
   phases: PhaseTiming[];
   verdict?: Verdict;
   inlineComments: number;
-  humanizer: { assessment?: string; changed: boolean };
+  /**
+   * Optional since review 665: the pipeline no longer runs a humanize
+   * stage, so new records never write it. Older rows carry it; nothing
+   * re-reads a stored row's field.
+   */
+  humanizer?: { assessment?: string; changed: boolean };
   outcome: ReviewOutcome;
   failure?: { stage: string; message: string };
   /** The review body exactly as posted (posted outcome only). */

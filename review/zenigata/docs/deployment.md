@@ -194,22 +194,27 @@ decides which directories it scans, and the module stays out of that wiring.
 
 The definition carries its own policy: the `permissions` block in its frontmatter grants the reviewer's working tools —
 reading, globbing, grepping, running shell commands, and looking up reference material on the network, plus the subagent
-delegation the passes use. A file-defined agent's rules land after the runtime's config floor and win, so the definition
-is the operative grant map and every deployment carries it without re-allowing anything. The authoring actions (`edit`,
-`write`, `patch`) stay denied as tool mounts, and one misuse rides behind them as a denial: a trailing `shell` row
-refuses `git push*` commands. That denial matches the command text the shell tool checks as its permission resource —
-the raw command string, per command segment (verified against the 2.3.0 source) — so it catches commands spelled
-`git push …` and not a push that starts differently; the no-push invariant does not rest on the row alone.
+delegation the flow uses. It grants the skill action over the wildcard, so the session reaches every skill the
+deployment ships — `review-pr`, which the driving prompt names, and `humanizer`, which the session's own flow runs,
+among them — while every non-skill action stays behind the deny-all floor an agent ruleset carries. The forge MCP's
+review-posting tools are the deliberate carve-out that does NOT ship: the deployment's own config carries those rows,
+named for the MCP server that deployment runs (`<server>_<tool>`, the action format the v2.3.0 source composes for MCP
+tools). A deployment that pins no rows gets a reviewer that cannot post — the correct default, since the shipped
+definition must stay free of any one deployment's server naming. A file-defined agent's rules land after the runtime's
+config floor and win, so the definition is the operative grant map and every deployment carries it without re-allowing
+anything. The authoring actions (`edit`, `write`, `patch`) stay denied as tool mounts, and one misuse rides behind them
+as a denial: a trailing `shell` row refuses `git push*` commands. That denial matches the command text the shell tool
+checks as its permission resource — the raw command string, per command segment (verified against the 2.3.0 source) — so
+it catches commands spelled `git push …` and not a push that starts differently; the no-push invariant does not rest on
+the row alone.
 
 The grants do not make the reviewer harmless. `shell` on `*` subsumes every authoring tool — redirection, `git apply`,
-`rm` — so a build writing through the shell is the grant working, and "the review reports, it does not rewrite the tree"
-is the definition's prompt-level instruction, not policy. The forge exclusion has the same two layers: no session tool
-is forge-wired and the integrations/MCP/plugin channels stay denied at the policy level, while the bot's forge adapter
-stays the only forge surface the pipeline has — and the closure holds on an environmental precondition the deployment
-carries: the serve environment stays credential-free, with no forge credential in reach and no push access anywhere, and
-the per-PR review worktree is disposable. Pass 1's fence on the pull request's own commit messages and refs is
-instruction-level too: the permission system gates tools, not arguments, so the grants run git freely and the
-definition's discipline is what withholds the author's claims from the blind pass.
+`rm` — so a build writing through the shell is the grant working. The forge surface changed shape with review 665: the
+session holds the forge capability the deployment's MCP carries, scoped by the ruleset to the review-posting tools, and
+every other MCP server's tools stay behind the deny-all. The integrations and plugin channels stay denied at the policy
+level, the runtime floor no longer refuses `mcp.use` (the deployment's MCP catalog is how the session reaches the
+forge), and the bot's forge adapter keeps its read side — the intake guards and the bookkeeping lookup — while nothing
+in the pipeline posts any more.
 
 ## The runtime package
 
@@ -227,13 +232,20 @@ delegated-pass settle test against the new serve on the build.
 
 The config the package ships is the neutral, product-owned floor: it keeps a global deny with the subagent delegation
 carve-out after it (a headless serve has nobody to answer a permission ask, so the floor denies instead of asking) and
-refuses integrations, MCP servers, and plugins at the policy level — deliberately not `integration.use`, whose deny also
-covers providers served from local config and would take out the deployment's own model route — and turns sharing and
-self-update off. The reviewer agent's own definition carries its working grants (reads, searches and globs, shell
-commands, web lookups, subagent delegation): the file-defined agent's rules land after the floor and win, so the grants
-travel in the package and no deployment re-allows anything. The deployment-only wiring — the model route with the
-gateway's virtual-key attribution, the serve's address and password, the agent-definition directories it scans — is the
-deployment's layer; the package's `opencodeConfigPath` passthru names where the config lands inside it.
+refuses integrations and plugins at the policy level — deliberately not `integration.use`, whose deny also covers
+providers served from local config and would take out the deployment's own model route — and turns sharing and
+self-update off. The `mcp.use` refusal is gone (review 665): the deployment passes the forge MCP into the serve, the
+reviewer session posts its own review through it, and the deployment's config carries the reviewer's forge-tool rows,
+named for that server. The reviewer agent's own definition carries its working grants (reads, searches and globs, shell
+commands, web lookups, subagent delegation, and its skills): the file-defined agent's rules land after the floor and
+win, so the grants travel in the package and no deployment re-allows anything. The deployment-only wiring — the model
+route with the gateway's virtual-key attribution, the serve's address and password, the agent-definition directories it
+scans, the skills directory the review session's skills load from, and the forge MCP server the session posts through,
+with the reviewer's forge-tool rows named for it — is the deployment's layer; the package's `opencodeConfigPath`
+passthru names where the config lands inside it. The skills directory is the opencode assets package's per-client tree
+(`share/skills.opencode`, built by the flake's assets packaging from the writs skills tree): the whole tree rides in,
+and the reviewer's skill grant covers all of it — the prompt names `review-pr`, whose flow carries `humanizer` (which
+carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
 
 The bin also carries a `--check-config` mode beside the server boot: given a rendered unit environment (JSON), the
 unit's environment file, and the identity list that deployment carries (JSON), it composes the environment files the way
@@ -244,12 +256,12 @@ a deployed boot composes them and validates the composition through the same boo
 
 `/metrics` renders Prometheus text. Four families, with these labels:
 
-| Series                               | Labels           | Label values                                            |
-| ------------------------------------ | ---------------- | ------------------------------------------------------- |
-| `zenigata_reviews_total`             | `repo`, `status` | `status` is `posted`, `aborted`, `failed`, or `skipped` |
-| `zenigata_replies_total`             | `repo`           | —                                                       |
-| `zenigata_memory_observations_total` | `source`         | `source` is `fact`, `insight`, `decision`, or `task`    |
-| `zenigata_review_phase_seconds`      | `phase`          | `intake`, `git`, `blind`, `context`, `humanize`, `post` |
+| Series                               | Labels           | Label values                                         |
+| ------------------------------------ | ---------------- | ---------------------------------------------------- |
+| `zenigata_reviews_total`             | `repo`, `status` | `status` is `posted`, `failed`, or `skipped`         |
+| `zenigata_replies_total`             | `repo`           | —                                                    |
+| `zenigata_memory_observations_total` | `source`         | `source` is `fact`, `insight`, `decision`, or `task` |
+| `zenigata_review_phase_seconds`      | `phase`          | `intake`, `git`, `review`, `bookkeeping`             |
 
 `zenigata_review_phase_seconds` is a histogram with buckets 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800 (seconds).
 
@@ -258,27 +270,30 @@ a deployed boot composes them and validates the composition through the same boo
 The state dir holds `reviews.jsonl`, one JSON record per line. A review record carries: `ts`, `type` (`"review"`),
 `reviewId`, `repo`, `pr`, `headSha` (absent whenever the run settled before the pull request was fetched: a fork skip, a
 repository skip, or a failed fetch all leave it absent), `requester`, `phases` (list of `{phase, durationMs}`),
-`verdict` (absent without one), `inlineComments`, `humanizer` (`{assessment, changed}`), `outcome` (`posted`, `aborted`,
-`failed`, or `skipped`), `failure` (`{stage, message}`, absent unless failed), and, on a posted run, `body`, `comments`,
-and `posted` (`{reviewCommentId, commentRefs}` — the forge's ids, exactly as returned). A posted run whose review came
-from the reconciliation — the forge already had the review from an in-flight post the client abandoned — also carries
-`reconciled: true`. A reply record carries: `ts`, `type` (`"reply"`), `repo`, `pr`, `author`, `inReplyTo`, `outcome`
-(`posted`, `failed`, or `skipped`), `learning` (the observation source, when the reply stored one) and, on a posted
-reply, `postedCommentId` (the posted answer's forge id) and `body` (the answer exactly as posted). The process rebuilds
-its reply index from this file at boot: posted reviews, and posted replies through their `postedCommentId`, so a reply
-to the bot's own answer still resolves after a restart; a torn trailing line from an unclean shutdown is skipped. A
-reply record with `outcome` `skipped` marks a reply that never ran — a repository outside `allowedRepos`, or a reply
-that arrived past the reply queue's bound — with no session and no post behind it. The status db (see "The status
-surface") holds this history as rows: the same records write projection rows at these lifecycle points, and one
-boot-time walk syncs a projection that starts empty.
+`verdict` (absent without one), `inlineComments`, `outcome` (`posted`, `failed`, or `skipped`), `failure`
+(`{stage, message}`, absent unless failed), and, on a posted run whose bookkeeping lookup found the landed review,
+`body`, `comments`, and `posted` (`{reviewCommentId, commentRefs}` — the forge's ids, exactly as returned). Since review
+665 the session posts the review itself, and the record's landed shape comes from the bookkeeping lookup; a lookup that
+finds nothing leaves those fields absent while `outcome` stays `posted`. Older rows carry `humanizer`, `reconciled`,
+`failedDrafts`, `droppedComments`, and `verdictReconciled` from the pipeline-assembled era; nothing re-reads a stored
+row's field. A reply record carries: `ts`, `type` (`"reply"`), `repo`, `pr`, `author`, `inReplyTo`, `outcome` (`posted`,
+`failed`, or `skipped`), `learning` (the observation source, when the reply stored one) and, on a posted reply,
+`postedCommentId` (the posted answer's forge id) and `body` (the answer exactly as posted). The process rebuilds its
+reply index from this file at boot: posted reviews, and posted replies through their `postedCommentId`, so a reply to
+the bot's own answer still resolves after a restart; a torn trailing line from an unclean shutdown is skipped. A reply
+record with `outcome` `skipped` marks a reply that never ran — a repository outside `allowedRepos`, or a reply that
+arrived past the reply queue's bound — with no session and no post behind it. The status db (see "The status surface")
+holds this history as rows: the same records write projection rows at these lifecycle points, and one boot-time walk
+syncs a projection that starts empty.
 
 ## Model routing
 
 The review session runs the `zenigata-reviewer` agent, and that agent rides the deployment's review route. The route
 carries the LLM gateway's virtual-key attribution, so every token the reviewer spends lands on the bot's key. The
-subagent passes (blind, humanize) must not run on the flash tier; the route configuration enforces it, and the agent
-definition states the requirement so a session observed on the wrong route is visibly off-contract. A deployment that
-routes the agent outside the review route breaks attribution and the tier contract at once.
+subagent passes must not run on the flash tier — the humanize pass is the candidate, since the blind pass reads the
+prompt-carried diff in the session itself — and the route configuration enforces it, while the agent definition states
+the requirement so a session observed on the wrong route is visibly off-contract. A deployment that routes the agent
+outside the review route breaks attribution and the tier contract at once.
 
 ## The identity configuration
 
@@ -335,14 +350,13 @@ commenter still gets an answer; it just stores nothing.
 The removed `@zenigata @review` comment command leaves a surface behind that says nothing back: a human who posts the
 old summon now gets the adapter's `202 ignored` — the webhook arrived, the comment became no event, and nothing is
 delivered to the bot's intake. That silence is accepted deliberately (PRJ-493 review decision 17954); there is no
-dead-command reply surface, and the bot posts no instruction teaching the old command's fate. The contract the footer on
-every posted review states — reviews fire on a forge review re-request — is the answer humans eventually read, and it
-travels with every review the bot posts.
+dead-command reply surface, and the bot posts no instruction teaching the old command's fate. Reviews still fire on a
+forge review re-request — the trigger surface the intake serves — and that is the answer humans eventually read.
 
 ## The adapter's expected-head duty
 
 The adapter MUST refuse `POST /review` when the pull request's head no longer matches the payload's `expectedHeadSha`.
-The bot re-checks the head before posting, and on an adapter refusal it re-fetches the head: when the head actually
-moved it treats the refusal as the abort it already handles, and when it did not the run reconciles: a review that
-landed despite the refusal is journaled as posted, and otherwise the failure comment posts. The adapter's check is the
-one closest to the forge and it is not optional. The full contract is in `docs/forge-adapter.md`.
+Since review 665 the reviewer session posts its own review with the deployment's forge tools, so this duty names what
+any post path the bot's identity carries must enforce — it is the one check closest to the forge, and it is not
+optional. The pipeline's own post stage is gone: the adapter's `POST /review` stays part of the forge-adapter contract
+(read `docs/forge-adapter.md`), and the bookkeeping lookup reads what landed for `(repo, pr, head)`.

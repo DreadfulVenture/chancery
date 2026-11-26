@@ -87,6 +87,23 @@ export class ForgeDouble implements ForgeAdapter {
     return release;
   }
 
+  private lookupGate?: Promise<void>;
+  /** Test hook counter: getPostedReview calls currently parked on the gate. */
+  parkedLookups = 0;
+
+  /**
+   * Park every getPostedReview at a gate until the returned release is
+   * called (test hook for deadline-during-bookkeeping scenarios). While
+   * parked, calls count in parkedLookups.
+   */
+  parkGetPostedReviews(): () => void {
+    let release!: () => void;
+    this.lookupGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  }
+
   async getPullRequest(
     repo: string,
     pr: number,
@@ -160,6 +177,11 @@ export class ForgeDouble implements ForgeAdapter {
     headSha: string,
     _opts?: { signal?: AbortSignal },
   ): Promise<PostedReviewLookup | null> {
+    if (this.lookupGate !== undefined) {
+      this.parkedLookups += 1;
+      await this.lookupGate;
+      this.parkedLookups -= 1;
+    }
     const found = this.postedByKey.get(`${key(repo, pr)}@${headSha}`);
     if (found === undefined) {
       return null;

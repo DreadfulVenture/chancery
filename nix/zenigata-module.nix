@@ -167,12 +167,14 @@ in
 
     turnBudgetSeconds = mkOption {
       type = types.ints.positive;
-      default = 900;
+      default = 1800;
       description = ''
         Seconds one prompt's turn may run before the session driver calls
         it stuck: the driver interrupts the turn and the prompt fails,
         which ends the run through its existing cleanup path. The
-        whole-run deadline backstops it.
+        whole-run deadline backstops it. The default covers the review
+        run's single prompt (review 665): the session's whole skill flow
+        — the review, its humanizer, and the forge post — is one turn.
       '';
     };
 
@@ -300,7 +302,7 @@ in
       // lib.optionalAttrs (cfg.turnPollSeconds != 3) {
         ZENIGATA_TURN_POLL_SECONDS = toString cfg.turnPollSeconds;
       }
-      // lib.optionalAttrs (cfg.turnBudgetSeconds != 900) {
+      // lib.optionalAttrs (cfg.turnBudgetSeconds != 1800) {
         ZENIGATA_TURN_BUDGET_SECONDS = toString cfg.turnBudgetSeconds;
       }
       // lib.optionalAttrs (cfg.retryPolicy != "never") {

@@ -42,38 +42,10 @@ const STATE_DIR_ENTRIES = [
   "worktrees",
 ];
 
-// The proven happy-path script (same fixtures as flow.test.ts): blind
-// findings, a valid draft, a humanized payload.
+// The proven happy-path script (same fixture as flow.test.ts): the one
+// prompt, answered with the status contract's line.
 const happyScript = () => [
-  [
-    "notes.md line 3: 'added one' names nothing; say what was added.",
-    "notes.md line 4: same vagueness.",
-  ].join("\n"),
-  JSON.stringify({
-    verdict: "REQUEST_CHANGES",
-    body: "The change adds two lines but neither says what was added.",
-    comments: [
-      {
-        path: "notes.md",
-        line: 3,
-        body: "Agent-generated:\n\nissue (blocking): 'added one' names nothing; say what was added or drop the line.",
-      },
-    ],
-  }),
-  JSON.stringify({
-    payload: {
-      verdict: "REQUEST_CHANGES",
-      body: "The case: two lines land and neither one says what it adds.",
-      comments: [
-        {
-          path: "notes.md",
-          line: 3,
-          body: "Agent-generated:\n\nissue (blocking): 'added one' names nothing; say what was added or drop the line.",
-        },
-      ],
-    },
-    assessment: "tightened the prose, kept the verdict",
-  }),
+  "The review is on the pull request.\n\nreview-status: posted",
 ];
 
 afterEach(async () => {

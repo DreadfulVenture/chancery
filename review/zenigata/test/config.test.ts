@@ -56,10 +56,12 @@ describe("loadConfig forge URL", () => {
 });
 
 describe("loadConfig turn and retry keys", () => {
-  it("defaults to a few-second poll, a generous turn budget, and no retry", () => {
+  it("defaults to a few-second poll, a whole-review turn budget, and no retry", () => {
     const config = loadConfig(baseEnv);
     expect(config.turnPollSeconds).toBe(3);
-    expect(config.turnBudgetSeconds).toBe(900);
+    // The review run's single prompt carries the whole skill flow now
+    // (review 665), so the budget covers a full review turn.
+    expect(config.turnBudgetSeconds).toBe(1800);
     expect(config.retryPolicy).toBe("never");
   });
 

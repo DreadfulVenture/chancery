@@ -5,10 +5,10 @@ a reviewer session over it, and the review lands on the pull request as comments
 Replies to its comments get answers in thread, and what those exchanges surface about the repository is stored for the
 next review. The bot never merges, never labels, and never publishes anything beyond its own comments.
 
-A review runs in three passes — a blind pass over the diff, a context pass that reconciles it with the pull request's
-description and with what the memory store holds about the repository, and a humanize pass that strips the machine tells
-from the prose. The verdict follows from the findings alone: nothing blocking approves, anything blocking requests
-changes.
+A review is the reviewer session's own work: the pipeline dispatches one prompt with the pull request's material, and
+the session runs its shipped skill flow — `review-pr` for the two passes over the diff, `humanizer` for the prose — and
+posts the review itself with the forge tools the deployment passes it. The pipeline records what the session reports:
+the reply's final line is the run's outcome for the journal, the runs table, and the notifications.
 
 ## Architecture
 
@@ -16,8 +16,8 @@ The bot core consumes two contracts and nothing concrete: a `ForgeAdapter`, whic
 deployment runs, and a `SessionDriver`, which isolates it from the agent runtime. The concrete adapters — HTTP for the
 forge side, the opencode background service for the sessions, the memory daemon's MCP endpoint for observations — live
 in `src/adapters/`, so a deployment can swap either side without touching the pipeline. The intake server accepts
-adapter events, the review pipeline drives the three passes, validation and one corrective retry per JSON stage guard
-the payloads, and everything the bot does lands in an append-only journal and a set of metrics.
+adapter events, the review pipeline dispatches and records — the worktree build, the one prompt, the status bookkeeping
+— and everything the bot does lands in an append-only journal and a set of metrics.
 
 ## Layout
 

@@ -54,38 +54,29 @@ export const ADAPTER_TOKEN = "adapter-secret";
 // Scripted review outputs
 // ---------------------------------------------------------------------------
 
-/** The blind pass's findings a scripted session answers with. */
-export const BLIND_FINDINGS = [
-  "notes.md line 3: 'added one' names nothing; say what was added.",
-  "notes.md line 4: same vagueness.",
+/**
+ * The final reply a scripted session answers with: the status contract's
+ * one line. The session posts its own review in a real run; the pipeline
+ * never sees the payload, only this line.
+ */
+export const POSTED_REPLY = [
+  "The review is on the pull request.",
+  "",
+  "review-status: posted",
 ].join("\n");
 
-export const blockingComment = () => ({
-  path: "notes.md",
-  line: 3,
-  body: "Agent-generated:\n\nissue (blocking): 'added one' names nothing; say what was added or drop the line.",
-});
+export const FAILED_REPLY = [
+  "The review did not make it to the pull request.",
+  "",
+  "review-status: failed",
+].join("\n");
 
-export const validDraft = () => ({
-  verdict: "REQUEST_CHANGES",
-  body: "The change adds two lines but neither says what was added. Requesting changes on the naming alone.",
-  comments: [blockingComment()],
-});
+/** The one-prompt script: the session replies with the status line. */
+export const happyScript = () => [POSTED_REPLY];
 
-export const humanizedOutput = () => ({
-  payload: {
-    ...validDraft(),
-    body: "The case: two lines land and neither one says what it adds. The verdict stands on the naming alone.",
-  },
-  assessment: "tightened the prose, kept the verdict",
-});
-
-/** The standard three-prompt script: blind, valid draft, humanized draft. */
-export const happyScript = () => [
-  BLIND_FINDINGS,
-  JSON.stringify(validDraft()),
-  JSON.stringify(humanizedOutput()),
-];
+/** The review body the harness's seeded posted review carries. */
+export const SEEDED_POSTED_BODY =
+  "The case: two lines land and neither one says what it adds.";
 
 /**
  * Poll a probe until it returns a value present — anything but undefined,
@@ -250,6 +241,14 @@ export interface HarnessOptions {
   extraPrs?: Array<{ repo: string; pr: number }>;
   memory?: MemoryGateway;
   env?: Record<string, string | undefined>;
+  /**
+   * Seed the double with the review the session "posted" through its
+   * forge tools (review 665): the pipeline never posts, so a test that
+   * exercises the reply index, the record's landed shape, or any reply
+   * to the review's comments seeds what such a post leaves on the forge.
+   * The bookkeeping lookup then fills the index and the record.
+   */
+  seedPostedReview?: boolean;
   /** Wrap the SessionDouble before injection (test gates, hooks). */
   wrapSessions?: (inner: SessionDriver) => SessionDriver;
   /** Wrap the ForgeDouble before injection (test hooks on the forge side). */
@@ -285,6 +284,22 @@ export async function startHarness(options: HarnessOptions): Promise<Harness> {
     options.forgeOverrides,
     options.extraPrs,
   );
+  if (options.seedPostedReview === true) {
+    await forge.postReview({
+      repo: REPO,
+      pr: PR,
+      expectedHeadSha: fixture.headSha,
+      verdict: "REQUEST_CHANGES",
+      body: SEEDED_POSTED_BODY,
+      comments: [
+        {
+          path: "notes.md",
+          line: 3,
+          body: "Agent-generated:\n\nissue (blocking): 'added one' names nothing.",
+        },
+      ],
+    });
+  }
   const sessions = new SessionDouble(options.script);
   const memory = options.memory ?? new MemoryFake();
 

@@ -325,7 +325,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       env,
       "ZENIGATA_TURN_BUDGET_SECONDS",
       secondsSchema,
-      900,
+      1800,
     ),
     retentionWindowSeconds: int(
       env,

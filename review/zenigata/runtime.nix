@@ -93,9 +93,14 @@ let
     ];
     # Platform-level refusals for the connections the review runtime must
     # never make: the reviewer's grants allow its working tools, and these
-    # deny the channels (integrations, MCP servers, plugins) no tool grant
-    # reaches — the forge stays the bot's adapter's surface because no
-    # session tool carries forge capability and no channel opens one.
+    # deny the channels no tool grant reaches. The forge MCP is the
+    # deliberate exception (review 665): the deployment passes it into the
+    # serve, the reviewer session posts its own review through it, and the
+    # deployment's own config carries that reviewer's forge-tool rows,
+    # named for the MCP server that deployment runs. A deployment that
+    # pins no rows gets a reviewer that cannot post — the correct default:
+    # the shipped definition stays free of any one deployment's server
+    # naming.
     # Deliberately NOT `integration.use`: that action also
     # covers providers and models supplied from local config rather than
     # an account, so its deny takes out the deployment's own model route
@@ -103,11 +108,6 @@ let
     policies = [
       {
         action = "integration.connect";
-        resource = "*";
-        effect = "deny";
-      }
-      {
-        action = "mcp.use";
         resource = "*";
         effect = "deny";
       }
