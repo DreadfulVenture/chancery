@@ -47,7 +47,13 @@ restart it.
    immediately and the worker's turn result arrives as delivered chat mail into this director session, so supervising
    means reading delivered mail and verifying the worktree before acting on it. The worker's first turn is plan-only:
    review and approve or steer the plan before execution proceeds, including whether the worker treated the ticket as a
-   proposal, judged the design, and surfaced any judgment conflicts (or recorded why none applied).
+   proposal, judged the design, and surfaced any judgment conflicts (or recorded why none applied). The same step arms
+   the lane's CI wait: register the slice's watch with the mail-watcher's watcher_register — a `branch` watch on the
+   worktree branch while the pull request does not exist yet, then a `pr` watch in its place once it opens (forget the
+   branch watch, so the lane carries one watch per branch). The watcher mails this session when a run of the watched
+   head reaches a terminal state — the outcome, the job states, and the failing job's log tail — so the event arrives as
+   mail and this session never waits on CI in a shell. A `pr` watch dissolves itself when the pull request closes; a
+   `branch` watch is forgotten when the slice closes.
 5. **Steer** with steer-worker: probe, unblock, or close out. When a slice closes (merged, abandoned, or superseded),
    verify the work and dispose its worktree as steer-worker describes; keep a worktree with an open PR until merge. If
    the slice’s ticket is closed by hand, add a closing comment stating the outcome, what delivered or superseded it, and
