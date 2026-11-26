@@ -24,6 +24,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -104,6 +105,21 @@ function freePort(): Promise<number> {
     });
     server.on("error", rejectPort);
   });
+}
+
+/** Coreutils only, resolved from the host: a profile `bin` can carry more
+ * than coreutils (the build host's own node or git among it), so `ls` is
+ * resolved to its real store path and the session shell's base PATH stays
+ * free of the toolchain the wrapper's suffix must alone supply. */
+function coreutilsPath(): string {
+  const which = spawnSync("which", ["ls"], { encoding: "utf8" });
+  const dir = which.status === 0 ? dirname(which.stdout.trim()) : "/usr/bin";
+  const real = spawnSync("readlink", ["-f", join(dir, "ls")], {
+    encoding: "utf8",
+  });
+  const resolved = real.status === 0 ? real.stdout.trim() : "";
+  if (resolved.startsWith("/nix/store/")) return dirname(resolved);
+  return dir;
 }
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -209,6 +225,7 @@ try {
       composeScript,
       join(runtime, "share/zenigata/opencode/config.json"),
       join(runtime, "share/zenigata/agent/reviewer.md"),
+      join(runtime, "share/skills.opencode"),
       `http://127.0.0.1:${bound}/v1`,
       dirs.config,
     ],
@@ -219,12 +236,33 @@ try {
   }
 
   const servePort = await freePort();
+  // The spawned shell replica: the deployed failure mode (PRJ-539) is a
+  // service account whose login shell is nologin — systemd delivers that
+  // shell as $SHELL, and the serve's shell-select resolves the session
+  // shell from process.env.SHELL alone. The stub prints nologin's message
+  // and exits 1 for any command, so a session shell the config's `shell`
+  // key does not override dies exactly the deployed way. With it in $SHELL,
+  // the runtime config's shell key is the session shell's only working
+  // source — a regression there lands the shell probes red.
+  const stubShell = join(workspace, "nologin-shell");
+  writeFileSync(
+    stubShell,
+    "#!/bin/sh\necho 'This account is currently not available.'\nexit 1\n",
+  );
+  chmodSync(stubShell, 0o755);
+
   serve = spawn(
     join(runtime, "bin/opencode"),
     ["serve", "--port", String(servePort), "--hostname", "127.0.0.1"],
     {
       env: {
         ...process.env,
+        // Coreutils only: the wrapper's --suffix PATH must be the session
+        // shell's only source of node and git, so the base PATH here may
+        // carry neither — the toolchain probe is otherwise green with the
+        // wrapper deleted and guards nothing.
+        PATH: coreutilsPath(),
+        SHELL: stubShell,
         HOME: dirs.home,
         XDG_CONFIG_HOME: dirs.config,
         XDG_DATA_HOME: dirs.data,

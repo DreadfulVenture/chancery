@@ -32,9 +32,13 @@
 {
   lib,
   symlinkJoin,
+  makeBinaryWrapper,
   writeText,
   opencodeServe,
   zenigata,
+  nodejs_24,
+  git,
+  opencodeAssets,
 }:
 
 let
@@ -120,6 +124,17 @@ let
         effect = "deny";
       }
     ];
+    # The session shell the shell tool runs through (PRJ-539): the serve
+    # inherits the service account's login shell as $SHELL — systemd
+    # delivers it for User= units — and the v2.3.0 shell-select resolves the
+    # session shell from process.env.SHELL alone, so a deployment whose
+    # service account's shell is nologin (the deployed zenigata-runtime
+    # account) dies at spawn, below PATH, on every shell call. The config's
+    # shell key names the shell instead (config/plugin/shell.ts, the
+    # v2.3.0 source, feeds Config.latest into the shell-select); the
+    # deployment's own config shell key overrides it. /bin/sh is bash on
+    # the NixOS hosts this runtime deploys to.
+    shell = "/bin/sh";
   };
 
   runtimeConfigJson = writeText "zenigata-opencode-config.json" (builtins.toJSON runtimeConfig);
@@ -135,9 +150,35 @@ symlinkJoin {
     zenigata
   ];
 
+  nativeBuildInputs = [ makeBinaryWrapper ];
+
   postBuild = ''
     mkdir -p $out/share/zenigata/opencode
     cp ${runtimeConfigJson} $out/share/zenigata/opencode/config.json
+
+    # The review session loads the review-pr skill — and the humanizer its
+    # flow runs beside it — from the skills tree the deployment wires into
+    # the serve's config home (PRJ-539): the package ships that tree, the
+    # opencode assets package's per-client composition, at
+    # share/skills.opencode, and deployment.md names the wiring step.
+    ln -s ${opencodeAssets}/share/skills.opencode $out/share/skills.opencode
+
+    # The review session's shell PATH carries the runtime's own node and
+    # git, appended after whatever PATH the deployment's unit sets (PRJ-539):
+    # the review flow runs the tests and builds the change calls for, and
+    # those are node and git programs a minimal unit PATH leaves dead. The
+    # deployment can still add to the PATH the unit carries; the suffix only
+    # guarantees these two. The spawn layer itself — which shell runs at
+    # all — is the config's `shell` key above, not this suffix.
+    localReal=$out/bin/.opencode-unwrapped
+    mv $out/bin/opencode $localReal
+    makeBinaryWrapper $localReal $out/bin/opencode \
+      --suffix PATH : ${
+        lib.makeBinPath [
+          nodejs_24
+          git
+        ]
+      }
   '';
 
   # What a deployment's module consumes without reaching into the tree:

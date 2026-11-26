@@ -307,6 +307,7 @@
               # comment records).
               zenigata = pkgs.callPackage ./review/zenigata/package.nix { };
               opencodeServe = inputs.opencode-nixpkgs.legacyPackages.${pkgs.system}.opencode;
+              opencodeAssets = pkgs.callPackage ./nix/opencode-assets.nix { };
             };
             forgejo-adapter = pkgs.callPackage ./review/forgejo-adapter/package.nix { };
             mail-watcher = pkgs.callPackage ./watch/mail-watcher/package.nix { };

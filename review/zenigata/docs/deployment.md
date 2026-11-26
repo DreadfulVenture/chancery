@@ -252,10 +252,19 @@ anything. The deployment-only wiring — the model route with the gateway's virt
 and password, the agent-definition directories it scans, the skills directory the review session's skills load from, the
 forge MCP server the session posts through, with the reviewer's forge-tool rows named for it, and the plugin grants for
 the plugins that deployment wires — is the deployment's layer; the package's `opencodeConfigPath` passthru names where
-the config lands inside it. The skills directory is the opencode assets package's per-client tree
-(`share/skills.opencode`, built by the flake's assets packaging from the writs skills tree): the whole tree rides in,
-and the reviewer's skill grant covers all of it — the prompt names `review-pr`, whose flow carries `humanizer` (which
-carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
+the config lands inside it. The packaged serve is wrapped: the shell PATH a review session runs under carries the
+runtime's own node and git, appended after whatever PATH the deployment's unit sets (PRJ-539) — the review flow runs the
+tests and builds the change calls for, and those are node and git programs a minimal unit PATH leaves dead. The spawn
+layer itself — which shell the session's shell tool runs through at all — is the neutral config's `shell` key
+(`/bin/sh`): the serve inherits the service account's login shell as `$SHELL`, and a deployment whose service account's
+shell is nologin dies at spawn, below PATH, on every shell call; the config names the shell instead, and the
+deployment's own config `shell` key overrides it. The runtime package also ships the skills tree, at
+`share/skills.opencode` — the opencode assets package's per-client composition, built by the flake's assets packaging
+from the writs skills tree — and wiring it into the serve's config home is the deployment's step: link the tree into the
+config home as the `skills` directory, or list its path under the config's `skills` key. The serve's skill discovery
+scans `<config entry>/skill` and `<config entry>/skills` and the config's `skills` list (the v2.3.0 source's contract),
+and the reviewer's skill grant covers everything it finds — the prompt names `review-pr`, whose flow carries `humanizer`
+(which carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
 
 The bin also carries a `--check-config` mode beside the server boot: given a rendered unit environment (JSON), the
 unit's environment file, and the identity list that deployment carries (JSON), it composes the environment files the way

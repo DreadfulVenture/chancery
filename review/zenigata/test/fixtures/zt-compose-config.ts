@@ -8,20 +8,31 @@
  * STATE, CACHE, CONFIG, HOME) into its own work tree, so the serve touches
  * nothing of the invoking user's opencode state.
  *
- * Usage: node zt-compose-config.ts <packaged-config> <agent-md> <mock-base-url> <out-dir>
+ * Usage: node zt-compose-config.ts <packaged-config> <agent-md> <skills-tree> <mock-base-url> <out-dir>
  *
  * Writes <out-dir>/opencode/opencode.json and the agent definitions at
  * <out-dir>/opencode/agent/zenigata-reviewer.md (the parent) and
- * <out-dir>/opencode/agent/zt-worker.md (the file-defined tool-using child).
+ * <out-dir>/opencode/agent/zt-worker.md (the file-defined tool-using child),
+ * and links the packaged skills tree at <out-dir>/opencode/skills — the
+ * serve's v2.3.0 skill discovery scans <config entry>/skill and
+ * <config entry>/skills, so the symlink is the deployment's wiring step the
+ * runtime package's shipped tree rides through (PRJ-539).
  */
 
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
-const [packagedConfig, agentMd, mockBaseUrl, outDir] = process.argv.slice(2);
-if (!packagedConfig || !agentMd || !mockBaseUrl || !outDir) {
+const [packagedConfig, agentMd, skillsTree, mockBaseUrl, outDir] =
+  process.argv.slice(2);
+if (!packagedConfig || !agentMd || !skillsTree || !mockBaseUrl || !outDir) {
   console.error(
-    "usage: node zt-compose-config.ts <packaged-config> <agent-md> <mock-base-url> <out-dir>",
+    "usage: node zt-compose-config.ts <packaged-config> <agent-md> <skills-tree> <mock-base-url> <out-dir>",
   );
   process.exit(1);
 }
@@ -82,6 +93,7 @@ writeFileSync(
   JSON.stringify(composed, null, 2),
 );
 copyFileSync(agentMd, join(agentDir, "zenigata-reviewer.md"));
+symlinkSync(skillsTree, join(configDir, "skills"));
 
 // The child as a file-defined agent, its own tool grants in frontmatter:
 // the config plugin pushes the config floor onto every agent's ruleset

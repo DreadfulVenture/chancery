@@ -191,5 +191,60 @@ assert.ok(
   "the webfetch tool call did not return the docs fake's page: the web-lookup grant did not win over the config floor",
 );
 
+// --- The shipped skills tree reaches the reviewer session (PRJ-539) -------
+//
+// The runtime package ships the opencode assets tree at
+// share/skills.opencode, the harness composes it into the config home the
+// way the deployment documentation names, and the reviewer session's skill
+// guidance must list the skill — the delivery the deployed runtime lacked.
+
+const skillListed = (await (await fetch(mockEvents)).json()).filter(
+  (event: { kind: string; skillListed?: boolean }) =>
+    event.kind === "chat" && event.skillListed === true,
+);
+assert.ok(
+  skillListed.length > 0,
+  "no reviewer request carried the skills list naming review-pr: the skills tree the runtime package ships never reached the session through the composed config home",
+);
+
+// --- The packaged serve's shell and PATH (PRJ-539) ------------------------
+//
+// Two layers, both load-bearing under the runner's stripped spawn env (the
+// runner sets a coreutils-only PATH and points $SHELL at a stub that
+// refuses like the deployed account's nologin): the config's `shell` key
+// is what the session shell runs through at all — without it the serve
+// inherits the account's login shell and dies at spawn, below PATH — and
+// the wrapper's PATH suffix is where node and git come from. The probe
+// runs the two version checks through the same shell grant the shell
+// probe used, and the mock's toolchain row records what came back.
+
+const toolchainSession = await driver.createSession(
+  workDir,
+  "zenigata-reviewer",
+);
+await driver.prompt(
+  toolchainSession,
+  "Toolchain probe: run the version checks the script gives you.",
+);
+const toolchainOutput = await driver.readOutput(toolchainSession);
+assert.match(
+  toolchainOutput,
+  /compat toolchain ran/,
+  `the toolchain probe's final turn did not report the versions: ${JSON.stringify(toolchainOutput)}`,
+);
+await driver.dispose(toolchainSession);
+
+const toolchainOk = (await (await fetch(mockEvents)).json()).filter(
+  (event: { kind: string }) => event.kind === "toolchain",
+);
+assert.ok(
+  toolchainOk.length > 0,
+  "the reviewer never made its scripted toolchain shell call",
+);
+assert.ok(
+  toolchainOk.at(-1).succeeded === true,
+  "the session shell failed or came back without the versions: with the runner's coreutils-only PATH and the nologin stub as $SHELL, this is red when the config's `shell` key stops winning the spawn layer (the serve inherits the account's login shell and dies below PATH, the deployed failure) or when the wrapper's --suffix PATH stops carrying node and git",
+);
+
 console.log("zt runtime-compat: compat ok");
 process.exit(0);

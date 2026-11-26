@@ -33,3 +33,18 @@ describe("the reviewer definition's permission rows", () => {
     );
   });
 });
+
+/**
+ * The definition defers the posted format to the shipped `review-pr` skill:
+ * the #189 refactor made that skill the format's sole carrier, so the
+ * definition restating its rules would duplicate the skill's contract
+ * (PRJ-539). Deployment-configuration duties do not belong in the agent's
+ * definition — the deployment guarantees the skills tree, and the compat
+ * check proves the delivery.
+ */
+describe("the reviewer definition's skill deferral", () => {
+  it("defers the posted format to the shipped review-pr skill", () => {
+    expect(definition).toContain("You use the `@review-pr` skill");
+    expect(definition).not.toContain("Conventional Comment");
+  });
+});

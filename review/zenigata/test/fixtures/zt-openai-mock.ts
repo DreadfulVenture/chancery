@@ -10,8 +10,10 @@
  *              unless the prompt drives a tool: a delegation prompt returns
  *              a `subagent` tool call for the harness's zt-worker agent, a
  *              shell prompt returns a `shell` tool call echoing the shell
- *              marker, and a docs prompt returns a `webfetch` tool call
- *              against this mock's own /docs/handbook (PRJ-496). Once the
+ *              marker, a toolchain prompt returns a `shell` tool call
+ *              running the node and git version checks, and a docs prompt
+ *              returns a `webfetch` tool call against this mock's own
+ *              /docs/handbook (PRJ-496). Once the
  *              tool result is in the messages, the parent's final text
  *              names its probe, and the parent's tool-result content is
  *              recorded under GET /events as a "parent-tool" row saying
@@ -59,6 +61,7 @@ const SHELL_MARKER = "zt-compat-shell-ok";
 const DOCS_MARKER = "zt-compat-docs-fake";
 const SHELL_FINAL_TEXT = "compat shell ran and returned the marker";
 const DOCS_FINAL_TEXT = "compat docs page fetched and read";
+const TOOLCHAIN_FINAL_TEXT = "compat toolchain ran and reported the versions";
 const DOCS_PAGE = `${DOCS_MARKER}: the reviewer fetched the local docs fake`;
 
 /** The request records: chat turns, their completions, one
@@ -67,13 +70,15 @@ const DOCS_PAGE = `${DOCS_MARKER}: the reviewer fetched the local docs fake`;
  * "parent-tool" row per reviewer probe's final call, saying whether the
  * grant's tool call returned its marker. */
 interface MockEvent {
-  kind: "chat" | "chat-done" | "worker-read" | "parent-tool";
+  kind: "chat" | "chat-done" | "worker-read" | "parent-tool" | "toolchain";
   model?: string;
   waitedMs?: number;
   sawToolResult?: boolean;
   toolCalls?: number;
   tool?: string;
   succeeded?: boolean;
+  /** Whether the request carried the skills list naming review-pr. */
+  skillListed?: boolean;
   at: number;
 }
 
@@ -163,8 +168,19 @@ function choose(body: ChatBody): Scripted {
       // asserts stay reachable. The row's tool is the call that precedes
       // the result; the delegated flow's `subagent` result (the
       // background notice) carries no marker, so its row reads
-      // succeeded false and nothing asserts on it.
+      // succeeded false and nothing asserts on it. The toolchain probe's
+      // shell result carries no marker either — its evidence row is its
+      // own `toolchain` kind, so a toolchain run never lands a `shell`
+      // parent-tool row the shell probe's assert would read.
       const result = toolResultText(body);
+      if (result.includes("git version")) {
+        events.push({
+          kind: "toolchain",
+          succeeded: /^v\d/.test(result) && result.includes("git version"),
+          at: Date.now(),
+        });
+        return { content: TOOLCHAIN_FINAL_TEXT, finish: "stop" };
+      }
       const calls = [...body.messages]
         .reverse()
         .find(
@@ -207,6 +223,27 @@ function choose(body: ChatBody): Scripted {
                 description: "compat probe",
                 prompt:
                   "Read the harness's target file with the read tool, then report the child text and nothing else.",
+              }),
+            },
+          },
+        ],
+        finish: "tool_calls",
+      };
+    }
+    if (/toolchain/i.test(asks)) {
+      // The toolchain probe: the same foreground shell grant the shell
+      // probe uses, running the two programs the runtime's PATH wrapper
+      // guarantees. Checked before the shell branch, so the probe's
+      // wording never routes to the shell script by accident.
+      return {
+        toolCalls: [
+          {
+            id: "call_shell_toolchain",
+            type: "function",
+            function: {
+              name: "shell",
+              arguments: JSON.stringify({
+                command: "node --version && git --version",
               }),
             },
           },
@@ -330,11 +367,20 @@ function handleChat(res: ServerResponse, body: ChatBody): void {
   const id = "chatcmpl-zt-" + events.length;
   const wait = scripted.delay ?? 0;
 
+  // Whether the request's skill guidance lists review-pr: the available
+  // skills render carries `<id>review-pr</id>`, a string nothing else in
+  // the session's context produces — the observable the delivery pin
+  // asserts on (PRJ-539).
+  const skillListed = JSON.stringify(body.messages).includes(
+    "<id>review-pr</id>",
+  );
+
   events.push({
     kind: "chat",
     model,
     waitedMs: wait,
     sawToolResult: sawToolResult(body),
+    skillListed,
     at: Date.now(),
   });
 
