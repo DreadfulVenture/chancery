@@ -23,6 +23,11 @@ import { resolveHost, hostContext } from "../daemon/host-client.ts";
 //   for-await exiting silently. The test kills the server mid-run,
 //   brings a new one up on the same port, and pins events flowing on
 //   both sides of the outage; the abort signal ends the subscription.
+// - the clean end (zenigata review 709, comment 19440): a host that
+//   ends its SSE body politely — a graceful shutdown — is the designed
+//   path, not a failure: the decoder's final flush delivers a trailing
+//   unterminated block, and the reconnect's log says ended, never
+//   failed.
 
 const STATE = {
   priorUrl: undefined as string | undefined,
@@ -206,4 +211,95 @@ test("the event stream survives a host restart: it reconnects and events resume"
   controller.abort();
   await subscription;
   await second.close();
+});
+
+test("a graceful stream end logs ended, never failed, and flushes the trailing unterminated block", async () => {
+  const port = await freePort();
+  // The polite close: the server writes one complete block, then a
+  // block the close cuts before its blank-line terminator, then ends
+  // the response body — no socket destruction, so the client's reader
+  // answers done, the clean arm the outage test never lights. The
+  // server stays listening: the reconnect after the clean end lands
+  // here too, and the abort below ends the subscription.
+  const server = http.createServer((request, response) => {
+    if (request.url === "/api/event") {
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        Connection: "keep-alive",
+      });
+      response.write(
+        `data: ${JSON.stringify({ type: "session.created", data: { id: "graceful-first" } })}\n\n`,
+      );
+      response.write(
+        `data: ${JSON.stringify({ type: "session.created", data: { id: "graceful-tail" } })}`,
+      );
+      response.end();
+      return;
+    }
+    response.writeHead(404);
+    response.end("{}");
+  });
+  await new Promise<void>((resolve) =>
+    server.listen(port, "127.0.0.1", resolve),
+  );
+
+  const resolved = resolveHost({
+    url: `http://127.0.0.1:${port}`,
+    password: "pw",
+  });
+  assert.ok(resolved.ok);
+  const host = hostContext(resolved as never, {
+    reconnectBaseMs: 10,
+    reconnectMaxMs: 50,
+  });
+
+  // The reconnect's log is the assertion surface: the clean end must
+  // say ended, and no failed line may fire.
+  const lines: string[] = [];
+  const priorError = console.error;
+  console.error = (...parts: unknown[]) => {
+    lines.push(parts.map(String).join(" "));
+  };
+
+  const controller = new AbortController();
+  const events: Array<{ type: string; data?: { id?: string } }> = [];
+  const subscription = (async () => {
+    for await (const event of host.event.subscribe({
+      signal: controller.signal,
+    })) {
+      events.push(event as { type: string; data?: { id?: string } });
+    }
+  })();
+
+  const waitFor = async (probe: () => boolean, limit = 2000) => {
+    for (let i = 0; i < limit; i += 1) {
+      if (probe()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("waitFor: condition never held");
+  };
+  // The tail is the decoder's final flush: the block the close cut
+  // before its terminator must still be delivered. The abort runs
+  // either way, so a regression fails the test instead of leaving a
+  // reconnect loop alive to hang the runner.
+  try {
+    await waitFor(() =>
+      events.some((event) => event.data?.id === "graceful-tail"),
+    );
+    assert.ok(
+      lines.some((line) => line.includes("event stream ended")),
+      `the clean end never logged ended: ${JSON.stringify(lines)}`,
+    );
+    assert.equal(
+      lines.some((line) => line.includes("event stream failed")),
+      false,
+      `the clean end logged failed: ${JSON.stringify(lines)}`,
+    );
+  } finally {
+    controller.abort();
+    await subscription;
+    console.error = priorError;
+    server.closeAllConnections();
+    await new Promise<void>((done) => server.close(() => done()));
+  }
 });

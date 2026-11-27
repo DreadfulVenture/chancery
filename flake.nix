@@ -540,18 +540,16 @@
               " && touch "$out"
             '';
 
-            # The watcher daemon's settings boundary (PRJ-540, zenigata
-            # review 700): the rendered config file is a store path,
-            # world-readable by construction, so the module must refuse a
-            # token anywhere in settings — the sources read the
-            # environment first and the block wins per key, and a token
-            # pasted here would silently override the secrets file. The
-            # check (nix/watcher-daemon-token-refusal.nix) runs one eval
-            # per source placement — the forge's top-level forgeToken and
-            # a token inside each of the four source blocks — plus a
-            # clean control: each refusal must fire and name that
-            # source's secret, and the control must pass clean.
-            watcher-daemon-token-refusal-check = pkgs.runCommand "watcher-daemon-token-refusal-check" { } ''
+            # The watcher daemon module's assertions (PRJ-540, zenigata
+            # reviews 700 and 709): the check
+            # (nix/watcher-daemon-assertions.nix) runs one bare eval per
+            # refusal the module must fire — a token at each of the five
+            # source placements (the forge's top-level forgeToken and a
+            # token inside each of the four source blocks), and a
+            # forgotten opencodeUrl, which the empty default routes to
+            # the module's own assertion — plus a clean control that
+            # must pass with no refusal at all.
+            watcher-daemon-assertions-check = pkgs.runCommand "watcher-daemon-assertions-check" { } ''
               # The eval-only nix invocation redirects its state dirs to
               # the build's tmp: the sandbox grants no /nix/var writes.
               export NIX_STATE_DIR="$TMPDIR/state"
@@ -560,7 +558,23 @@
               ${pkgs.nix}/bin/nix-instantiate --eval --strict \
                 --arg modulePath ${./nix/watcher-daemon-module.nix} \
                 --arg nixpkgsPath ${pkgs.path} \
-                ${./nix/watcher-daemon-token-refusal.nix} && touch "$out"
+                ${./nix/watcher-daemon-assertions.nix} && touch "$out"
+            '';
+
+            # The zenigata module's opencodeUrl teaching (zenigata review
+            # 709): the same pattern the watcher module carries — the
+            # empty default lets a forgotten key reach the module's own
+            # assertion instead of the module system's bare
+            # used-but-not-defined error. One bare eval without the key:
+            # the refusal must fire and name the option.
+            zenigata-opencodeurl-check = pkgs.runCommand "zenigata-opencodeurl-check" { } ''
+              export NIX_STATE_DIR="$TMPDIR/state"
+              export NIX_CONF_DIR="$TMPDIR/conf"
+              export HOME="$TMPDIR/home"
+              ${pkgs.nix}/bin/nix-instantiate --eval --strict \
+                --arg modulePath ${./nix/zenigata-module.nix} \
+                --arg nixpkgsPath ${pkgs.path} \
+                ${./nix/zenigata-module-assertions.nix} && touch "$out"
             '';
 
             # The director's own surface load: the packaged entry must be a

@@ -127,12 +127,17 @@ in
 
     opencodeUrl = mkOption {
       type = types.str;
+      default = "";
       description = ''
         The opencode server's base url (WATCHER_OPENCODE_URL) — the
         service the daemon's stamp writes, synthetic mail, and event
         stream ride. There is no upstream default: the unit's sandbox
         cannot read the operator's service registration file, so the
-        deployer must state the server.
+        deployer must state the server. The empty default exists so
+        forgetting the key reaches the module's assertion — which
+        teaches the why — instead of the module system's bare
+        used-but-not-defined error, which names the option but not the
+        reason.
       '';
     };
 
@@ -166,7 +171,7 @@ in
         message = "services.watcher-daemon.stateDir must be exactly /var/lib/<name> (systemd's StateDirectory takes only the path's last component); got ${cfg.stateDir}.";
       }
       {
-        assertion = cfg.opencodeUrl != "" && cfg.opencodeUrl != null;
+        assertion = cfg.opencodeUrl != "";
         message = "services.watcher-daemon.opencodeUrl must be set: the unit's sandbox cannot read the host's service registration file, so the opencode server must be stated.";
       }
       {

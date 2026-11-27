@@ -114,7 +114,15 @@ in
 
     opencodeUrl = mkOption {
       type = types.str;
-      description = "Base URL of the opencode background service.";
+      default = "";
+      description = ''
+        Base URL of the opencode background service the session driver
+        talks to. The empty default exists so forgetting the key
+        reaches the module's assertion — which names the option and the
+        reason — instead of the module system's bare
+        used-but-not-defined error; the runtime's own config check
+        refuses an unset `ZENIGATA_OPENCODE_URL` at boot as well.
+      '';
     };
 
     memoryUrl = mkOption {
@@ -250,6 +258,10 @@ in
         # config check would crash-loop the unit.
         assertion = cfg.allowedLogins != [ ];
         message = "services.zenigata.allowedLogins must not be empty: ZENIGATA_ALLOWED_LOGINS is required and an empty list renders it empty.";
+      }
+      {
+        assertion = cfg.opencodeUrl != "";
+        message = "services.zenigata.opencodeUrl must be set: the session driver talks to the opencode background service, so its base url must be stated (the runtime's own config check refuses it at boot too).";
       }
       {
         # Without initiator=agent the memory daemon's lineage gate refuses

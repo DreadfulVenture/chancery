@@ -229,9 +229,12 @@ export const hostContext = (
     try {
       for (;;) {
         const next = await reader.read();
-        buffer += decoder.decode(next.value ?? { stream: !next.done }, {
-          stream: !next.done,
-        });
+        // A clean end answers value: undefined, and decode(undefined,
+        // {stream: false}) is the legal final flush — a stand-in object
+        // here would throw before the done handling below runs, so a
+        // graceful close would be misreported as a failure and any
+        // trailing unterminated block would be dropped.
+        buffer += decoder.decode(next.value, { stream: !next.done });
         if (next.done && buffer === "") return;
         if (next.done) buffer += "\n\n";
         let boundary = buffer.indexOf("\n\n");

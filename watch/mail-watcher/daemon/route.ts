@@ -1,12 +1,17 @@
 // The daemon's local route (PRJ-540): the registration surface the
 // watcher tools in opencode sessions proxy to. The daemon binds
-// loopback only — the route serves the same user's processes, the same
-// trust domain the host's registration file lives in, and it carries no
+// loopback only, and the route is unauthenticated: loopback is every
+// local uid, not one user, so any process on the host can register,
+// list, and forget watches for any session id, and a watch's note
+// rides the mail verbatim — free text into any session's mail. This
+// serves a single-operator host, where the operator's own processes
+// are the whole uid set; the day a second uid appears on that host,
+// the route needs a token before it serves them. It carries no
 // credentials in either direction: the forge and source tokens live in
 // the daemon's own environment and are never part of any request or
 // answer here. A caller names the session it acts for (the session id
-// the tool context carries); the route is id-addressable within that
-// same-user trust domain, exactly as the host's wake schedule is.
+// the tool context carries); the route is id-addressable, exactly as
+// the host's wake schedule is.
 //
 // The four routes map one to one onto the watcher tools' needs:
 //
@@ -77,10 +82,10 @@ const bodyOf = async (
   return parsed as Record<string, unknown>;
 };
 
-// The route's start: binds the loopback address (never a wildcard — a
-// route that answered off-host would carry the registration surface
-// beyond its trust domain) and resolves once listening, so a caller
-// knows the url is live.
+// The route's start: binds the loopback address (never a wildcard —
+// the registration surface is for the host's own processes, and a
+// route that answered off-host would serve it to the network) and
+// resolves once listening, so a caller knows the url is live.
 export const startRoute = ({
   host = "127.0.0.1",
   port,
