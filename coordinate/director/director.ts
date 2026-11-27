@@ -40,7 +40,11 @@
 //   the terminal's own kind; at most one stored report and one wake
 //   notice per terminal event. A turn interrupted by shutdown and later
 //   resumed has two terminal events, so it can bring a notice and then
-//   the resumed turn's own report.
+//   the resumed turn's own report. A succeeded turn whose final step
+//   ended (provider finish "stop") without producing one text block is a
+//   degenerate completion — a provider cut mid-execution — and files as
+//   its own "truncated" kind (PRJ-499); a turn with no recorded step
+//   evidence files as "report", since there is nothing to judge.
 // - a dispatched session has no permission answerer: no TUI dialog and no
 //   `opencode run` auto-replier is attached, so an ask-shaped permission
 //   rule would park the turn's tool fiber on a deferred nobody resolves —
@@ -849,6 +853,20 @@ function reportBody(
   });
   const statusAt = lines.findLastIndex((line) => /^\s*STATUS:/.test(line));
   const blockedAt = lines.findLastIndex((line) => /^\s*BLOCKED\b/.test(line));
+  const where = entry.directory || "the worker's directory";
+  // A turn that carried neither marker renders its ENDING, not its head.
+  // The ending is the completion evidence — a mid-flow cut ends
+  // mid-sentence there — while a head cut lands mid-word and mimics the
+  // truncation it should reveal (PRJ-499).
+  if (statusAt === -1 && blockedAt === -1) {
+    const tail = cutTail(text, REPORT_HEAD_CHARS);
+    const notShown = text.length - tail.length;
+    return [
+      tail,
+      "",
+      `[… ${notShown} more UTF-16 code units at the start not shown. Full text: opencode session export ${sessionID}. The work itself is in ${where}.]`,
+    ];
+  }
   let blocked: { start: number; text: string } | undefined;
   if (blockedAt !== -1) {
     const end = lines.findIndex(
@@ -886,7 +904,6 @@ function reportBody(
     );
   }
   const notShown = Math.max(0, text.length - head.length - shownPastHead);
-  const where = entry.directory || "the worker's directory";
   return [
     ...kept,
     ...(kept.length ? [""] : []),
@@ -901,6 +918,14 @@ function cutAt(text: string, limit: number): string {
   if (text.length <= limit) return text;
   const last = text.charCodeAt(limit - 1);
   return text.slice(0, last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit);
+}
+
+// A tail cut never starts between the two halves of a surrogate pair.
+function cutTail(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const start = text.length - limit;
+  const first = text.charCodeAt(start);
+  return text.slice(first >= 0xdc00 && first <= 0xdfff ? start - 1 : start);
 }
 
 // The pump sees only live events, so an activation that adopted a worker
@@ -919,6 +944,7 @@ const KINDS: Record<string, string> = {
   report: "Worker turn report",
   failed: "Worker turn NOT COMPLETED (turn-not-completed)",
   interrupted: "Worker turn interrupted (no recorded reason)",
+  truncated: "Worker turn TRUNCATED (final step produced no text)",
 };
 
 // Read rows are the director's own trail; a week of them answers "what
@@ -1094,13 +1120,18 @@ async function unreadReports(
   return { unread, truncated: scan.truncated };
 }
 
+// The worker contract's completion marker, anywhere in the turn's text —
+// the same line reportBody's keep rules look for.
+const hasStatusLine = (text: string): boolean => /^\s*STATUS:/m.test(text);
+
 // The pulled body: the kind header, the worker/session line, the PARTIAL
 // label when the storing activation joined mid-turn, and the text under
 // today's cap rules. Worker text enters the model here and only here —
 // as a tool result.
 function renderReportBody(row: ReportRow): string {
   const lines = [KINDS[row.kind] || KINDS.report, describe(row.worker, row)];
-  if (row.kind === "failed" && row.reason) lines.push(`reason: ${row.reason}`);
+  if ((row.kind === "failed" || row.kind === "truncated") && row.reason)
+    lines.push(`reason: ${row.reason}`);
   if (row.kind === "interrupted")
     lines.push(
       "",
@@ -1111,6 +1142,16 @@ function renderReportBody(row: ReportRow): string {
     lines.push(
       "",
       "The worker's turn did not complete. Treat its outputs as unverified.",
+    );
+  if (row.kind === "truncated")
+    lines.push(
+      "",
+      "The turn's final step ended with no text and no tool call — a provider cut mid-execution produces exactly this shape. Treat the turn's outputs as unverified.",
+    );
+  if (row.kind === "report" && row.text && !hasStatusLine(row.text))
+    lines.push(
+      "",
+      "note: the turn filed as succeeded but its final text carries no STATUS line — the worker's completion signal is missing.",
     );
   if (row.partial) lines.push(PARTIAL_LINE(row.worker));
   lines.push(
@@ -1855,6 +1896,17 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   const usageSamples = new Map<string, UsageSample>();
   const stepModels = new Map<string, { providerID: string; id: string }>();
   const spentFallbacks = new Set<string>();
+  // PRJ-499: the step evidence the truncation verdict reads. `stepStates`
+  // tracks one open step's text sighting between its start and its end;
+  // `finalSteps` holds the turn's newest ended step — its finish, its
+  // output-token count, and whether the step produced any text. A step
+  // whose start was never seen (a mid-turn join) records nothing, so the
+  // verdict stays "report": no evidence, no verdict.
+  const stepStates = new Map<string, { textSeen: boolean; open: boolean }>();
+  const finalSteps = new Map<
+    string,
+    { finish: string; output: number; hadText: boolean }
+  >();
 
   // Lazy adoption from the dispatch stamp. The session's directory must
   // equal this activation's exactly; a subagent child carries its parent's
@@ -1913,6 +1965,8 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
     usageSamples.delete(sessionID);
     stepModels.delete(sessionID);
     spentFallbacks.delete(sessionID);
+    stepStates.delete(sessionID);
+    finalSteps.delete(sessionID);
   };
 
   // The read the callers use (PRJ-525): the recorded sample first, the
@@ -1938,8 +1992,8 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
   // terminal with a turn marker behind it (or buffered text not flushed
   // yet) files once and clears both; a terminal with neither is a
   // duplicate terminal for a turn already settled and is dropped.
-  // `kind` picks the pulled body's wording; `reason` carries a failure's
-  // or interrupt's recorded why.
+  // `kind` picks the pulled body's wording; `reason` carries a failure's,
+  // an interrupt's, or a truncation's recorded why.
   const deliver = async (
     event: HostEvent,
     kind: string,
@@ -2052,7 +2106,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const dispatchTool: ToolDefinition = {
     name: "director_dispatch",
-    description: `Dispatch a worker session: create a new session in \`directory\` running \`agent\` (default "build"), stamp this session as its coordinator, deliver \`brief\` as a waking prompt, pinning \`model\` ("provider/model") to the session first when given, and return immediately with the session id. The worker also gets an unattended permission policy at creation (every action allowed for that session) so its tool calls never wait on a permission ask no headless session could answer; config-level deny rules are overridden for the worker too. Never spawns a subprocess and never streams stdout; each turn end files a report for this session and wakes it with a fixed notice naming the worker session and the unread count — call report_read to read the bodies. Worker text never rides the notice; a long body is cut to its head, with its last STATUS line, any BLOCKED paragraph, and a pointer to the full text kept. One stored report and at most one notice per turn end (none if the send fails): overlapping plugin activations that see the same turn end are deduped by its event id. A subagent's turns are part of its parent's and never report on their own. A turn interrupted with no recorded reason (a host shutdown) files an interrupted report and wakes you the same way: the host may resume that turn after a restart, and if resumed it reports when it ends. A worker that stays busy across a restart may never report, so check its session (director_worker_status) before re-dispatching or steering it. When \`base\` is given, the target worktree is validated before anything is created: a directory that is not a readable git worktree, a detached HEAD, or a HEAD not exactly at that commit refuses the dispatch at the call with the mismatch named, and the result carries the worktree it validated (path, branch, head, base).`,
+    description: `Dispatch a worker session: create a new session in \`directory\` running \`agent\` (default "build"), stamp this session as its coordinator, deliver \`brief\` as a waking prompt, pinning \`model\` ("provider/model") to the session first when given, and return immediately with the session id. The worker also gets an unattended permission policy at creation (every action allowed for that session) so its tool calls never wait on a permission ask no headless session could answer; config-level deny rules are overridden for the worker too. Never spawns a subprocess and never streams stdout; each turn end files a report for this session and wakes it with a fixed notice naming the worker session and the unread count — call report_read to read the bodies. Worker text never rides the notice; a long body is cut to its head — to its tail when the text carries no STATUS line — with its last STATUS line, any BLOCKED paragraph, and a pointer to the full text kept. One stored report and at most one notice per turn end (none if the send fails): overlapping plugin activations that see the same turn end are deduped by its event id. A subagent's turns are part of its parent's and never report on their own. A turn interrupted with no recorded reason (a host shutdown) files an interrupted report and wakes you the same way: the host may resume that turn after a restart, and if resumed it reports when it ends. A turn whose final step ended with no text and no tool call — a provider cut mid-execution — files as a truncated report with the same wake. A worker that stays busy across a restart may never report, so check its session (director_worker_status) before re-dispatching or steering it. When \`base\` is given, the target worktree is validated before anything is created: a directory that is not a readable git worktree, a detached HEAD, or a HEAD not exactly at that commit refuses the dispatch at the call with the mismatch named, and the result carries the worktree it validated (path, branch, head, base).`,
     input: dispatchSchema,
     output: REPLY_OUTPUT,
     execute: async (raw, context) => {
@@ -2370,7 +2424,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const readTool: ToolDefinition = {
     name: "report_read",
-    description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head, with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures and interrupts file as their own kinds. A fixed wake notice names the worker session and the unread count, and adds the worker's context share when it is at or past half its model's window (the gate is the inclusive \`share >= 0.5\`); this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
+    description: `Read the worker reports filed for this session: each watched worker's turn end files one report for the session its stamp names — final text under the cap rules (a long text is cut to its head — to its tail when the text carries no STATUS line — with the last STATUS line and any BLOCKED paragraph kept verbatim), and failures, interrupts, and truncated final steps file as their own kinds. A fixed wake notice names the worker session and the unread count, and adds the worker's context share when it is at or past half its model's window (the gate is the inclusive \`share >= 0.5\`); this tool returns the bodies. Reading marks a report read. Unread reports return oldest first, up to \`limit\` reports and \`maxChars\` body characters, with the count still unread stated; call again for the rest. Reports address only the session they were filed for — this session's unread reports and no others. When a turn's text is needed beyond what a report kept, opencode session export <worker session> holds the full text.`,
     input: readSchema,
     output: REPLY_OUTPUT,
     execute: async (raw, context) => {
@@ -3578,6 +3632,14 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
               if (entry) {
                 entry.pendingTurn = true;
                 entry.midTurn = false;
+                // PRJ-499: the new turn's step evidence starts empty —
+                // the truncation verdict reads only this turn's final
+                // step, never the previous turn's.
+                stepStates.set(data.sessionID, {
+                  textSeen: false,
+                  open: false,
+                });
+                finalSteps.delete(data.sessionID);
               }
               break;
             }
@@ -3589,6 +3651,10 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
               const buffer = buffers.get(data.sessionID) || [];
               buffer.push({ text: data.text || "" });
               buffers.set(data.sessionID, buffer);
+              // PRJ-499: text arrived during an open step — the step
+              // produced its own text.
+              const stepState = stepStates.get(data.sessionID);
+              if (stepState?.open) stepState.textSeen = true;
               break;
             }
             // The usage stream (PRJ-525): a step's start carries the model
@@ -3599,6 +3665,12 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
             // worker's first turn records its usage this way.
             case "session.step.started": {
               const entry = await adopted(data.sessionID);
+              if (entry) {
+                // PRJ-499: the open step's text sighting resets here, and
+                // any earlier step's record stops being the turn's newest.
+                stepStates.set(data.sessionID, { textSeen: false, open: true });
+                finalSteps.delete(data.sessionID);
+              }
               const ref = data.model;
               if (
                 entry &&
@@ -3624,6 +3696,19 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
             case "session.step.ended": {
               if (foreign.has(data.sessionID) || !track.has(data.sessionID))
                 break;
+              // PRJ-499: the step's shape rides its end — the finish
+              // reason and the output-token count, with whether the step
+              // produced any text. A step whose start was never seen here
+              // records nothing.
+              const stepState = stepStates.get(data.sessionID);
+              if (stepState?.open) {
+                finalSteps.set(data.sessionID, {
+                  finish: typeof data.finish === "string" ? data.finish : "",
+                  output: Number(data.tokens?.output ?? 0),
+                  hadText: stepState.textSeen,
+                });
+                stepState.open = false;
+              }
               const model = stepModels.get(data.sessionID);
               const tokens = data.tokens;
               if (
@@ -3637,9 +3722,28 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
               usageSamples.set(data.sessionID, { tokens, model });
               break;
             }
-            case "session.execution.succeeded":
-              await deliver(event, "report", null);
+            case "session.execution.succeeded": {
+              // PRJ-499: a turn whose final step ended (provider finish
+              // "stop") without producing one text block is a degenerate
+              // completion — the model cut out mid-execution, and the
+              // host's drain reads it as a normal end. It files as its own
+              // kind, the way a failure or an interrupt does. No recorded
+              // step (a mid-turn join, a restart) keeps kind "report":
+              // no evidence, no verdict.
+              const finalStep = finalSteps.get(data.sessionID);
+              const truncated =
+                finalStep !== undefined &&
+                finalStep.finish === "stop" &&
+                !finalStep.hadText;
+              await deliver(
+                event,
+                truncated ? "truncated" : "report",
+                truncated
+                  ? `the turn's final step ended with no text and no tool call (provider finish=stop, ${finalStep.output} output tokens)`
+                  : null,
+              );
               break;
+            }
             case "session.execution.failed": {
               const error = data.error || {};
               const reason =

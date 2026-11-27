@@ -1466,6 +1466,240 @@ test("a report stored by an activation that joined mid-turn is labeled partial",
   }
 });
 
+// One step's start and end, the shape the pump's step handlers read.
+const stepEvents = async (
+  fixture: ReturnType<typeof fakeContext>,
+  sessionID: string,
+  step: { finish: string; output: number },
+) => {
+  await fixture.emit("session.step.started", {
+    sessionID,
+    model: { providerID: "llm-proxy", id: "auto/glm-test" },
+  });
+  await fixture.emit("session.step.ended", {
+    sessionID,
+    finish: step.finish,
+    tokens: {
+      input: 461,
+      output: step.output,
+      reasoning: 0,
+      cache: { read: 50, write: 0 },
+    },
+  });
+};
+
+test("a degenerate final step files the turn as truncated, not succeeded", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    const worker = dispatched.sessionID;
+    await fixture.emit("session.execution.started", { sessionID: worker });
+    // Step 1: a mid-turn progress text, then a tool call — the turn is
+    // visibly mid-flow.
+    await fixture.emit("session.step.started", {
+      sessionID: worker,
+      model: { providerID: "llm-proxy", id: "auto/glm-test" },
+    });
+    await fixture.emit("session.text.ended", {
+      sessionID: worker,
+      text: "Now the facades — the delegation line at each site:",
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: worker,
+      finish: "tool-calls",
+      tokens: {
+        input: 461,
+        output: 3883,
+        reasoning: 0,
+        cache: { read: 50, write: 0 },
+      },
+    });
+    // Step 2: the final step ends with finish=stop and produces no text —
+    // the degenerate completion PRJ-499 traced. The earlier step's text
+    // does not satisfy this step's sighting.
+    await stepEvents(fixture, worker, { finish: "stop", output: 3 });
+    await fixture.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => fixture.mails.length === 1);
+
+    const pulled = await readReports(fixture, "ses-director");
+    assert.equal(pulled.reports[0].kind, "truncated");
+    assert.ok(
+      pulled.reports[0].reason.includes("finish=stop"),
+      `reason carries the provider finish: ${pulled.reports[0].reason}`,
+    );
+    assert.ok(pulled.reports[0].reason.includes("3 output tokens"));
+    assert.ok(
+      pulled.reports[0].body.includes("Treat the turn's outputs as unverified"),
+    );
+    // The buffered text still rides: the body ends where the turn did.
+    assert.ok(
+      pulled.reports[0].body.includes(
+        "Now the facades — the delegation line at each site:",
+      ),
+    );
+    // The truncation header carries the verdict, so the no-STATUS note
+    // (a report-only annotation) stays out of the way.
+    assert.ok(!pulled.reports[0].body.includes("completion signal"));
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("a final step that produced text files the turn as succeeded", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    const worker = dispatched.sessionID;
+    await fixture.emit("session.execution.started", { sessionID: worker });
+    // Step 1: a mid-turn progress text, then a tool call — the turn is
+    // visibly mid-flow.
+    await fixture.emit("session.step.started", {
+      sessionID: worker,
+      model: { providerID: "llm-proxy", id: "auto/glm-test" },
+    });
+    await fixture.emit("session.text.ended", {
+      sessionID: worker,
+      text: "Now the facades — the delegation line at each site:",
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: worker,
+      finish: "tool-calls",
+      tokens: {
+        input: 461,
+        output: 3883,
+        reasoning: 0,
+        cache: { read: 50, write: 0 },
+      },
+    });
+    // Step 2: the model writes its closing text, and the step ends with
+    // finish=stop having produced text — a normal completion.
+    await fixture.emit("session.step.started", {
+      sessionID: worker,
+      model: { providerID: "llm-proxy", id: "auto/glm-test" },
+    });
+    await fixture.emit("session.text.ended", {
+      sessionID: worker,
+      text: "The slice landed.\n\nSTATUS: done",
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: worker,
+      finish: "stop",
+      tokens: {
+        input: 461,
+        output: 734,
+        reasoning: 0,
+        cache: { read: 50, write: 0 },
+      },
+    });
+    await fixture.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => fixture.mails.length === 1);
+
+    const pulled = await readReports(fixture, "ses-director");
+    assert.equal(pulled.reports[0].kind, "report");
+    assert.ok(pulled.reports[0].body.includes("Worker turn report"));
+    assert.ok(!pulled.reports[0].body.includes("TRUNCATED"));
+    assert.ok(!pulled.reports[0].body.includes("completion signal"));
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("a turn with no recorded step evidence files as report", async () => {
+  const fixture = fakeContext();
+  const cleanup = await plugin.setup(fixture.ctx);
+  try {
+    const dispatched = await dispatchWorker(fixture, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    const worker = dispatched.sessionID;
+    // No step events at all: an empty turn. No evidence, no verdict.
+    await fixture.emit("session.execution.started", { sessionID: worker });
+    await fixture.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => fixture.mails.length === 1);
+    const first = await readReports(fixture, "ses-director");
+    assert.equal(first.reports[0].kind, "report");
+    assert.ok(
+      first.reports[0].body.includes(
+        "(no final text from this turn reached the report)",
+      ),
+    );
+    assert.ok(!first.reports[0].body.includes("completion signal"));
+
+    // A step end whose start was never seen (a mid-turn join) records
+    // nothing either.
+    await fixture.emit("session.execution.started", { sessionID: worker });
+    await fixture.emit("session.text.ended", {
+      sessionID: worker,
+      text: "the tail of a turn",
+    });
+    await fixture.emit("session.step.ended", {
+      sessionID: worker,
+      finish: "stop",
+      tokens: {
+        input: 461,
+        output: 3,
+        reasoning: 0,
+        cache: { read: 50, write: 0 },
+      },
+    });
+    await fixture.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => fixture.mails.length === 2);
+    const second = await readReports(fixture, "ses-director");
+    assert.equal(second.reports[0].kind, "report");
+  } finally {
+    await cleanup?.();
+  }
+});
+
+test("a long STATUS-less report renders its tail with the start-hidden pointer", async () => {
+  const filler = Array.from({ length: 100 }, (_, i) => `detail line ${i}`).join(
+    "\n",
+  );
+  const text = `${filler}\n\nWorking forward through the revert — contracts first:`;
+  const { body, worker } = await pullText(text);
+  // The ending is shown, the beginning is not — the tail is the
+  // completion evidence a head cut would hide.
+  assert.ok(
+    body.includes("Working forward through the revert — contracts first:"),
+  );
+  assert.ok(!body.includes("detail line 0"));
+  assert.ok(body.includes("more UTF-16 code units at the start not shown."));
+  assert.ok(body.includes(`opencode session export ${worker}`));
+  // The turn's text carries no STATUS, so the report-only note rides too.
+  assert.ok(body.includes("completion signal is missing"));
+});
+
+test("a tail cut splits no surrogate pair and counts exactly", async () => {
+  // The 1,200-character tail starts on an emoji's low surrogate, so the
+  // cut moves back to keep the pair whole: the pointer hides 5 units.
+  const text = `${"x".repeat(5)}😀${"z".repeat(1199)}`;
+  const { body } = await pullText(text);
+  assert.ok(body.includes("😀"));
+  assert.ok(!body.includes("xxxxx"));
+  assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(body));
+  assert.ok(
+    body.includes("[… 5 more UTF-16 code units at the start not shown."),
+  );
+});
+
+test("the no-STATUS note rides only a succeeded turn whose text carries no STATUS line", async () => {
+  const without = await pullText("Did the thing mid-flow, and then —");
+  assert.ok(without.body.includes("completion signal is missing"));
+  assert.equal(without.page.reports[0].kind, "report");
+
+  const withStatus = await pullText("Did the thing.\n\nSTATUS: done");
+  assert.ok(!withStatus.body.includes("completion signal is missing"));
+});
+
 test("a subagent child carrying its parent's stamp and location sends no mail", async () => {
   const fixture = fakeContext();
   const cleanup = await plugin.setup(fixture.ctx);
