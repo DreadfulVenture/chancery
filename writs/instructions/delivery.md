@@ -1,4 +1,4 @@
-# Delivery mechanics
+# Path Delivery Mechanics
 
 Context: this file carries the mechanical rules for how paths and generated files reach the operator. The prose rules
 live in writing.md; this file is wire format, not style.

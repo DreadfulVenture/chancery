@@ -3,7 +3,10 @@
 Context for every agent reading this: this file holds the operator's standing rules for comments, always in force.
 
 Durable comments only. Comment to explain why, inline and self-contained: not where the code lives, not what comes next,
-and never a restatement of what the code already says.
+and never a restatement of what the code already says. If your comment is annotating the code right next to it that
+someone can read themselves, it does not need to exist. Comments should be minimal, code should be simple and
+self-explanatory and generally sparse on commenting except in cases where someone needs to be aware of something
+unexpected.
 
 Never reference what goes stale: line numbers, "above" and "below", volatile file paths, module or symbol locations used
 as navigation, branch-local or uncommitted docs, plans, roadmaps, change history, internal wikis, and GitHub blob or
