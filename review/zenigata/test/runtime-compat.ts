@@ -101,6 +101,16 @@ const events = await (await fetch(mockEvents)).json();
 const child = events.filter(
   (event) => event.kind === "chat-done" && event.model === "worker",
 );
+if (child.length === 0) {
+  // The failure diagnostic: the mock's event tail says whether the
+  // delegator made its subagent call at all and which model the child
+  // rode — an unresolved agent file and a misrouted model read
+  // differently here.
+  console.error(
+    "zt runtime-compat: mock event tail:",
+    JSON.stringify(events.slice(-12)),
+  );
+}
 assert.ok(
   child.length > 0,
   "the delegated pass never ran a child turn through the mock",

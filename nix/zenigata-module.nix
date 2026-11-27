@@ -1,11 +1,13 @@
-# NixOS module: the Zenigata pull-request review bot.
+# NixOS module: the Zenigata pull-request review bot (PRJ-548 rework).
 #
-# One service, one environment file for the secrets, and every non-secret
-# knob as an option that maps onto a ZENIGATA_* variable (the mapping is
-# spelled out in review/zenigata/docs/deployment.md). The agent
-# definition is published into /etc/zenigata when agentFile is set; which
-# directories the opencode service scans is the deployment's config, and
-# this module stays out of it.
+# One service, one environment file for the secrets, every non-secret knob
+# as an option that maps onto a ZENIGATA_* variable (the mapping is spelled
+# out in review/zenigata/docs/deployment.md). The unit runs the runtime
+# package's launcher: the opencode serve starts inside the config
+# directory the launcher points it at — the package's own layout, or the
+# composed two-file directory the module builds when overrideConfig
+# carries the deployment's opencode.jsonc — and the bot execs beside it,
+# so a deployment is an enablement, not an assembly.
 {
   config,
   lib,
@@ -37,7 +39,24 @@ let
   # the CSV join cannot carry fails.
   accountName = types.strMatching "[A-Za-z0-9][A-Za-z0-9._-]*";
 
-  package = pkgs.callPackage ../review/zenigata/package.nix { };
+  # The deployment's config home, composed when overrideConfig carries a
+  # file: the package floor's opencode.json with the deployment's
+  # opencode.jsonc beside it, plus the agent and skills entries the
+  # runtime home carries — the two-file directory the serve's own
+  # precedence layers (jsonc wins for settings). The unit's
+  # OPENCODE_CONFIG_DIR points here; without a deployment file the
+  # launcher defaults to the package's own single-file home.
+  composedConfigHome =
+    if cfg.overrideConfig == null then
+      null
+    else
+      pkgs.runCommand "zenigata-opencode-config-home" { } ''
+        mkdir -p $out
+        for entry in opencode.json agent skills; do
+          ln -s "${cfg.package}/share/zenigata/opencode-home/$entry" "$out/$entry"
+        done
+        ln -s "${cfg.overrideConfig}" "$out/opencode.jsonc"
+      '';
 in
 {
   options.services.zenigata = {
@@ -49,14 +68,44 @@ in
       description = "Port the intake server listens on, on loopback only.";
     };
 
+    opencodePort = mkOption {
+      type = types.port;
+      default = 8473;
+      description = ''
+        Port the packaged opencode serve listens on, on loopback only. The
+        launcher composes the bot's serve URL from it; no deployment
+        wiring reads or rewrites it.
+      '';
+    };
+
+    overrideConfig = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      description = ''
+        Optional path to an opencode.jsonc the deployment ships, layered
+        over the runtime package's own config floor — the deployment's
+        model route, the forge MCP server the reviewer posts through, and
+        every other deployment-owned surface (PRJ-501's credential-bearing
+        injection). The module composes the serve's config directory with
+        the package floor's `opencode.json` and the deployment's
+        `opencode.jsonc` beside it, and points the unit at it: the v2.3.0
+        serve reads both files from one directory and merges with the
+        jsonc winning for settings, so the deployment's file wins through
+        the serve's own precedence, with no env var carrying a config
+        path.
+      '';
+    };
+
     stateDir = mkOption {
       type = types.str;
       default = "/var/lib/zenigata";
       description = ''
-        Directory holding the review journal (`reviews.jsonl`) and the
-        disposable review worktrees. systemd's `StateDirectory` takes only
-        the path's last component, so the path must be exactly
-        `/var/lib/<name>`; the assertion on the module enforces it.
+        Directory holding the review journal (`reviews.jsonl`), the
+        disposable review worktrees, and the serve's own state (its
+        database and session records live under it). systemd's
+        `StateDirectory` takes only the path's last component, so the
+        path must be exactly `/var/lib/<name>`; the assertion on the
+        module enforces it.
       '';
     };
 
@@ -64,8 +113,10 @@ in
       type = types.path;
       description = ''
         Environment file loaded by the unit's `EnvironmentFile`, carrying
-        `ZENIGATA_EVENT_TOKEN` and `ZENIGATA_ADAPTER_TOKEN` — and, when
-        the opencode service has a password, `ZENIGATA_OPENCODE_KEY`.
+        `ZENIGATA_EVENT_TOKEN`, `ZENIGATA_ADAPTER_TOKEN`, and every
+        credential the stack reads from the environment — the model
+        provider's key among them, named as the deployment's override
+        config references it.
       '';
     };
 
@@ -109,19 +160,6 @@ in
         a link into the forge with it, and the dropped starts' re-request
         affordance points there. Not a secret: the unit carries it in its
         plain environment and the status page's config echo shows it.
-      '';
-    };
-
-    opencodeUrl = mkOption {
-      type = types.str;
-      default = "";
-      description = ''
-        Base URL of the opencode background service the session driver
-        talks to. The empty default exists so forgetting the key
-        reaches the module's assertion — which names the option and the
-        reason — instead of the module system's bare
-        used-but-not-defined error; the runtime's own config check
-        refuses an unset `ZENIGATA_OPENCODE_URL` at boot as well.
       '';
     };
 
@@ -207,40 +245,25 @@ in
       default = "zenigata-reviewer";
       description = ''
         Agent name the session driver selects for every review and
-        reply session. The packaged definition resolves to this id
-        through the native decode: with `permissions` in the
-        frontmatter, the agent runtime derives the id from the
-        definition file's name, so the file is published under this
-        id and that is what makes `ZENIGATA_AGENT` resolve. The
-        option's own caveat: `agentFile` publishes any definition,
-        and a definition whose frontmatter carries a key the native
-        schema lacks (a `name`) and no `permissions` takes the legacy
-        decode, where the frontmatter `name` carries the id instead —
-        keep whichever path a published definition takes in agreement
-        with `ZENIGATA_AGENT`.
-      '';
-    };
-
-    agentFile = mkOption {
-      type = types.nullOr types.path;
-      default = null;
-      description = ''
-        Path to the review agent's definition markdown. When set, the
-        module publishes a copy of it as
-        `/etc/zenigata/agent/<agentName>.md`, under the agent id the
-        session driver selects; a change to the definition lands at the
-        next system rebuild. Pointing the opencode service's config at
-        `/etc/zenigata` is the deployment's business; the package ships
-        a default definition at
-        `<package>/share/zenigata/agent/reviewer.md`.
+        reply session. The runtime package composes the reviewer's
+        definition into its own config layout under this same name —
+        the packaged default is what makes `ZENIGATA_AGENT` resolve,
+        and a deployment that renames the agent supplies its own
+        definition through the override layer.
       '';
     };
 
     package = mkOption {
       type = types.package;
-      default = package;
-      defaultText = "the flake's zenigata package";
-      description = "The Zenigata package the unit runs.";
+      description = ''
+        The Zenigata runtime package the unit runs: the pinned serve, the
+        reviewer agent, the skills tree, and the bot in one closure, with
+        the launcher bin the unit's ExecStart starts. Set it to the
+        flake's `packages.zenigata-runtime` — the runtime composes
+        flake-pinned inputs (the branch-tracking opencode serve and the
+        skills assets package) that a plain nixpkgs callPackage cannot
+        provide.
+      '';
     };
   };
 
@@ -260,10 +283,6 @@ in
         message = "services.zenigata.allowedLogins must not be empty: ZENIGATA_ALLOWED_LOGINS is required and an empty list renders it empty.";
       }
       {
-        assertion = cfg.opencodeUrl != "";
-        message = "services.zenigata.opencodeUrl must be set: the session driver talks to the opencode background service, so its base url must be stated (the runtime's own config check refuses it at boot too).";
-      }
-      {
         # Without initiator=agent the memory daemon's lineage gate refuses
         # every observation write: the bot would answer replies but
         # silently never learn from them.
@@ -271,12 +290,6 @@ in
         message = "services.zenigata.memoryUrl must carry the initiator=agent query parameter: without it the memory daemon's lineage gate refuses every observation write and the bot silently never learns.";
       }
     ];
-
-    # The agent definition, published for the opencode service to scan;
-    # the registration itself is the deployment's config.
-    environment.etc = mkIf (cfg.agentFile != null) {
-      "zenigata/agent/${cfg.agentName}.md".source = cfg.agentFile;
-    };
 
     systemd.services.zenigata = {
       description = "Zenigata pull-request review bot";
@@ -290,13 +303,17 @@ in
       environment = {
         ZENIGATA_LISTEN_PORT = toString cfg.listenPort;
         ZENIGATA_STATE_DIR = cfg.stateDir;
+        OPENCODE_SERVE_PORT = toString cfg.opencodePort;
         ZENIGATA_ALLOWED_LOGINS = concatStringsSep "," cfg.allowedLogins;
         ZENIGATA_ADAPTER_URL = cfg.adapterUrl;
         ZENIGATA_FORGE_URL = cfg.forgeUrl;
-        ZENIGATA_OPENCODE_URL = cfg.opencodeUrl;
         ZENIGATA_MEMORY_URL = cfg.memoryUrl;
         ZENIGATA_REVIEW_TIMEOUT_SECONDS = toString cfg.reviewTimeoutSeconds;
         ZENIGATA_AGENT = cfg.agentName;
+        # The serve's state lands under HOME (XDG's defaults derive from
+        # it), inside the granted state directory: no extra ReadWritePaths
+        # for the serve's database and session records.
+        HOME = cfg.stateDir;
       }
       // lib.optionalAttrs (cfg.allowedRepos != [ ]) {
         ZENIGATA_ALLOWED_REPOS = concatStringsSep "," cfg.allowedRepos;
@@ -306,6 +323,9 @@ in
       }
       // lib.optionalAttrs (cfg.personaFile != null) {
         ZENIGATA_PERSONA_FILE = cfg.personaFile;
+      }
+      // lib.optionalAttrs (cfg.overrideConfig != null) {
+        OPENCODE_CONFIG_DIR = composedConfigHome;
       }
       # The three knobs default to the quiet-spend posture; the variables
       # render only when an option departs from its default, so a
@@ -322,7 +342,12 @@ in
       };
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/zenigata";
+        # The launcher: the serve starts in the package's own config
+        # layout, then the bot execs in the foreground. One unit, one
+        # process pair; a stop or a crash takes both, and
+        # Restart=on-failure loops the pair (the boot preflight's named
+        # exits included).
+        ExecStart = "${cfg.package}/bin/zenigata-stack";
         EnvironmentFile = "${cfg.secretsFile}";
         DynamicUser = true;
         # The 0700 keeps the journal (review bodies, failure messages) and

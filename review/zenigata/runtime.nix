@@ -1,9 +1,20 @@
-# The complete zenigata review runtime as one package (PRJ-479): the pinned
-# opencode serve binary, the runtime's neutral serve config, and the zenigata
-# bot — whose session driver carries its @opencode/client pin. Infra consumes
-# packages.<system>.zenigata-runtime and layers its own deployment wiring
-# (listen address and password, the review route with the gateway's virtual
-# key, the agent-definition directories the serve scans) on top.
+# The complete zenigata review runtime as one package (PRJ-479, PRJ-548): the
+# pinned opencode serve binary, the runtime's neutral serve config, the
+# reviewer agent definition, and the skills tree — ordinary derivations
+# composed into one the normal way (plain symlink composition, no wrapper
+# machinery), with the stack launcher the flake's `.#zenigata` app runs.
+#
+# The config layout the serve reads holds exactly ONE config file, the
+# neutral floor: the v2.3.0 serve reads both `opencode.json` and
+# `opencode.jsonc` from every scanned config directory (config/discovery.ts
+# `names`, loaded in that order, missing files skipped) and merges with the
+# later document winning for settings (config.ts `latest` is findLast), so
+# the deployment's own `opencode.jsonc` layers over the floor by native
+# precedence when it sits beside it — the NixOS module's `overrideConfig`
+# option composes that two-file directory; no env var carries a config
+# path. Policy rows are the union with the earliest-loaded document's
+# authority winning (the PRJ-535 fact), so the floor's policy rows keep
+# their authority over any deployment file.
 #
 # The compatibility contract is behavior, not version equality: the flake's
 # zenigata-runtime-compat check runs the driver's integration tests against
@@ -32,8 +43,9 @@
 {
   lib,
   symlinkJoin,
-  makeBinaryWrapper,
+  writeShellScriptBin,
   writeText,
+  runCommand,
   opencodeServe,
   zenigata,
   nodejs_24,
@@ -137,7 +149,59 @@ let
     shell = "/bin/sh";
   };
 
-  runtimeConfigJson = writeText "zenigata-opencode-config.json" (builtins.toJSON runtimeConfig);
+  runtimeConfigJson = writeText "opencode.json" (builtins.toJSON runtimeConfig);
+
+  # The serve's config home: one derivation, plain symlink composition.
+  # Exactly one config file ships here — the floor as `opencode.json` —
+  # beside the reviewer agent's definition under the id the driver selects
+  # and the skills tree at the entry the serve's skill discovery scans
+  # (`<config entry>/skills`, the v2.3.0 source's contract). A deployment
+  # that ships its own config places it in this directory's shape as
+  # `opencode.jsonc` — the module's `overrideConfig` option composes that
+  # directory — and the serve's native two-file precedence layers it over
+  # the floor.
+  opencodeHome = runCommand "zenigata-opencode-home" { } ''
+    mkdir -p $out/share/zenigata/opencode-home/agent
+    ln -s ${runtimeConfigJson} $out/share/zenigata/opencode-home/opencode.json
+    ln -s ${zenigata}/share/zenigata/agent/reviewer.md \
+      $out/share/zenigata/opencode-home/agent/zenigata-reviewer.md
+    ln -s ${opencodeAssets}/share/skills.opencode \
+      $out/share/zenigata/opencode-home/skills
+  '';
+
+  # The stack launcher: the package's own bin a service's ExecStart runs
+  # (and the flake's `.#zenigata` app). It composes the environment the
+  # pair needs — the config home (the package's own layout unless the
+  # deployment points it at its composed two-file directory), the serve
+  # port and bot URL, one shared password (minted when unset, handed to
+  # the serve as OPENCODE_PASSWORD and to the bot as its Basic-auth key),
+  # and the PATH suffix that guarantees node and git after whatever PATH
+  # the caller carries (PRJ-539: the review flow runs node and git
+  # programs a minimal unit PATH leaves dead) — then starts the serve and
+  # execs the bot in the foreground. The two processes share one unit (or
+  # one terminal): systemd's cgroup kill — or the terminal's signal —
+  # takes both down together, and Restart=on-failure restarts the pair.
+  launcher = writeShellScriptBin "zenigata-stack" ''
+    set -eu
+    : "''${OPENCODE_CONFIG_DIR:-${opencodeHome}/share/zenigata/opencode-home}"
+    export OPENCODE_CONFIG_DIR
+    : "''${OPENCODE_SERVE_PORT:=8473}"
+    : "''${ZENIGATA_OPENCODE_URL:=http://127.0.0.1:''${OPENCODE_SERVE_PORT}}"
+    export OPENCODE_SERVE_PORT ZENIGATA_OPENCODE_URL
+    if [ -z "''${ZENIGATA_OPENCODE_KEY:-}" ]; then
+      ZENIGATA_OPENCODE_KEY="$(head -c 24 /dev/urandom | base64 | tr -d '\n')"
+      export ZENIGATA_OPENCODE_KEY
+    fi
+    export OPENCODE_PASSWORD="''${ZENIGATA_OPENCODE_KEY}"
+    export PATH="$PATH:${
+      lib.makeBinPath [
+        nodejs_24
+        git
+      ]
+    }"
+    ${opencodeServe}/bin/opencode serve --hostname 127.0.0.1 --port "$OPENCODE_SERVE_PORT" &
+    exec ${zenigata}/bin/zenigata
+  '';
 in
 symlinkJoin {
   pname = "zenigata-runtime";
@@ -148,50 +212,19 @@ symlinkJoin {
   paths = [
     opencodeServe
     zenigata
+    opencodeHome
+    launcher
   ];
 
-  nativeBuildInputs = [ makeBinaryWrapper ];
-
-  postBuild = ''
-    mkdir -p $out/share/zenigata/opencode
-    cp ${runtimeConfigJson} $out/share/zenigata/opencode/config.json
-
-    # The review session loads the review-pr skill — and the humanizer its
-    # flow runs beside it — from the skills tree the deployment wires into
-    # the serve's config home (PRJ-539): the package ships that tree, the
-    # opencode assets package's per-client composition, at
-    # share/skills.opencode, and deployment.md names the wiring step.
-    ln -s ${opencodeAssets}/share/skills.opencode $out/share/skills.opencode
-
-    # The review session's shell PATH carries the runtime's own node and
-    # git, appended after whatever PATH the deployment's unit sets (PRJ-539):
-    # the review flow runs the tests and builds the change calls for, and
-    # those are node and git programs a minimal unit PATH leaves dead. The
-    # deployment can still add to the PATH the unit carries; the suffix only
-    # guarantees these two. The spawn layer itself — which shell runs at
-    # all — is the config's `shell` key above, not this suffix.
-    localReal=$out/bin/.opencode-unwrapped
-    mv $out/bin/opencode $localReal
-    makeBinaryWrapper $localReal $out/bin/opencode \
-      --suffix PATH : ${
-        lib.makeBinPath [
-          nodejs_24
-          git
-        ]
-      }
-  '';
-
   # What a deployment's module consumes without reaching into the tree:
-  # the serve derivation behind the package, the serve's version, and the
-  # in-package path of the neutral config it may install or compose over.
+  # the serve derivation behind the package and the serve's version.
   passthru = {
     inherit opencodeServe;
     opencodeVersion = opencodeServe.version;
-    opencodeConfigPath = "share/zenigata/opencode/config.json";
   };
 
   meta = {
-    description = "The complete Zenigata review runtime: the pinned opencode serve, its neutral config, and the bot";
+    description = "The complete Zenigata review runtime: the pinned opencode serve, its neutral config, the reviewer agent, and the skills tree";
     platforms = lib.platforms.all;
   };
 }

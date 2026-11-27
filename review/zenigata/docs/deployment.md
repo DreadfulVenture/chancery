@@ -131,8 +131,8 @@ malformed.
 | `ZENIGATA_FORGE_URL`                | yes      | Base URL of the forge the adapter serves (e.g. `https://forge.example.com`): the status page renders every PR cell as a link into the forge. Not a secret — the config echo shows it plainly.                                                                                                                                                                                                           |
 | `ZENIGATA_ADAPTER_TOKEN`            | yes      | Bearer token the bot sends on every adapter call.                                                                                                                                                                                                                                                                                                                                                       |
 | `ZENIGATA_EVENT_TOKEN`              | yes      | Bearer token the intake demands on inbound events.                                                                                                                                                                                                                                                                                                                                                      |
-| `ZENIGATA_OPENCODE_URL`             | yes      | Base URL of the opencode background service the session driver talks to.                                                                                                                                                                                                                                                                                                                                |
-| `ZENIGATA_OPENCODE_KEY`             | no       | The opencode service's password, when it has one. The service authenticates mutations with HTTP Basic auth (username `opencode`) and leaves reads open; no header is sent when unset. The deployment sources the password from the service's state file (`~/.local/state/opencode/service.json`, `password` key on the service host) and puts it in the secrets file.                                   |
+| `ZENIGATA_OPENCODE_URL`             | no       | Base URL of the opencode background service the session driver talks to. The packaged stack composes it from the launcher's own serve port; a deployment that runs the bot against an external serve sets it. Unset means the packaged stack's serve.                                                                                                                                                   |
+| `ZENIGATA_OPENCODE_KEY`             | no       | The opencode service's password. The packaged stack shares one: the launcher hands it to the serve (as its password) and to the bot (as the Basic-auth key, username `opencode`), and mints one when unset, so the packaged stack carries no state-file password dance. A deployment that runs the bot against an external serve sources that serve's password into the secrets file.                   |
 | `ZENIGATA_MEMORY_URL`               | yes      | The full MCP endpoint URL of the memory daemon, query params included (below).                                                                                                                                                                                                                                                                                                                          |
 | `ZENIGATA_REVIEW_TIMEOUT_SECONDS`   | no       | Whole-run deadline; default `1800`. A run that exceeds it reaches no verdict and posts nothing: the journal record is the failure surface, and only a completed review reaches the PR. A review the forge created from an abandoned in-flight post can still land afterwards; the run accepts that, and the adapter SHOULD dedupe posts on `(repo, pr, expectedHeadSha)` (see `docs/forge-adapter.md`). |
 | `ZENIGATA_TURN_POLL_SECONDS`        | no       | Seconds between the session driver's turn-state polls; default `3`. Each poll is one short request; a long turn backs off mildly.                                                                                                                                                                                                                                                                       |
@@ -165,31 +165,34 @@ co-location or a shared filesystem is part of this URL's contract.
 `nixosModules.zenigata` (imported from `flake.nix`) exposes `services.zenigata`. Every option maps onto the environment
 above:
 
-| Option                 | Type               | Default                        | Sets                                                                                                                                                                  |
-| ---------------------- | ------------------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enable`               | bool               | `false`                        | —                                                                                                                                                                     |
-| `listenPort`           | port               | `8471`                         | `ZENIGATA_LISTEN_PORT`                                                                                                                                                |
-| `stateDir`             | str                | `/var/lib/zenigata`            | `ZENIGATA_STATE_DIR`; must be exactly `/var/lib/<name>` because systemd's `StateDirectory` takes only the path's last component, which the unit declares              |
-| `secretsFile`          | path               | —                              | The unit's `EnvironmentFile`, carrying `ZENIGATA_EVENT_TOKEN`, `ZENIGATA_ADAPTER_TOKEN`, and (when the opencode service has a password) `ZENIGATA_OPENCODE_KEY`       |
-| `allowedLogins`        | listOf str         | —                              | `ZENIGATA_ALLOWED_LOGINS` (joined with commas)                                                                                                                        |
-| `allowedRepos`         | listOf str         | `[]`                           | `ZENIGATA_ALLOWED_REPOS`; an empty list leaves the variable unset, which means every repository                                                                       |
-| `humans`               | listOf accountName | `[]`                           | `ZENIGATA_HUMANS`; an empty list leaves the variable unset (see the identity configuration, below). Each entry is type-checked against the account-name shape         |
-| `personaFile`          | nullOr path        | `null`                         | `ZENIGATA_PERSONA_FILE`, set only when non-null                                                                                                                       |
-| `adapterUrl`           | str                | —                              | `ZENIGATA_ADAPTER_URL`                                                                                                                                                |
-| `forgeUrl`             | str                | —                              | `ZENIGATA_FORGE_URL` — the forge the status page's PR links point into; not a secret, the config echo shows it plainly                                                |
-| `opencodeUrl`          | str                | —                              | `ZENIGATA_OPENCODE_URL`                                                                                                                                               |
-| `memoryUrl`            | str                | —                              | `ZENIGATA_MEMORY_URL`, full endpoint URL with the `app` and `initiator` params; the description of the option spells out that `initiator=agent` must never be dropped |
-| `reviewTimeoutSeconds` | ints.positive      | `1800`                         | `ZENIGATA_REVIEW_TIMEOUT_SECONDS`                                                                                                                                     |
-| `turnPollSeconds`      | ints.positive      | `3`                            | `ZENIGATA_TURN_POLL_SECONDS`, set only when the option differs from its default                                                                                       |
-| `turnBudgetSeconds`    | ints.positive      | `900`                          | `ZENIGATA_TURN_BUDGET_SECONDS`, set only when the option differs from its default                                                                                     |
-| `retryPolicy`          | enum               | `never`                        | `ZENIGATA_RETRY_POLICY`, set only when the option differs from its default; `never` keeps every current deployment's posture                                          |
-| `agentName`            | str                | `zenigata-reviewer`            | `ZENIGATA_AGENT`                                                                                                                                                      |
-| `agentFile`            | nullOr path        | `null`                         | Publishes the agent definition under the module's conf dir (below)                                                                                                    |
-| `package`              | package            | the flake's `zenigata` package | The unit's `ExecStart`                                                                                                                                                |
+| Option                 | Type               | Default             | Sets                                                                                                                                                                  |
+| ---------------------- | ------------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enable`               | bool               | `false`             | —                                                                                                                                                                     |
+| `listenPort`           | port               | `8471`              | `ZENIGATA_LISTEN_PORT`                                                                                                                                                |
+| `opencodePort`         | port               | `8473`              | The packaged serve's loopback port; the launcher composes the bot's serve URL from it                                                                                 |
+| `overrideConfig`       | nullOr path        | `null`              | The deployment's own config file; the module composes the serve's config directory with it beside the package floor (below)                                           |
+| `stateDir`             | str                | `/var/lib/zenigata` | `ZENIGATA_STATE_DIR`; must be exactly `/var/lib/<name>` because systemd's `StateDirectory` takes only the path's last component, which the unit declares              |
+| `secretsFile`          | path               | —                   | The unit's `EnvironmentFile`, carrying `ZENIGATA_EVENT_TOKEN`, `ZENIGATA_ADAPTER_TOKEN`, and every credential the stack reads from the environment                    |
+| `allowedLogins`        | listOf str         | —                   | `ZENIGATA_ALLOWED_LOGINS` (joined with commas)                                                                                                                        |
+| `allowedRepos`         | listOf str         | `[]`                | `ZENIGATA_ALLOWED_REPOS`; an empty list leaves the variable unset, which means every repository                                                                       |
+| `humans`               | listOf accountName | `[]`                | `ZENIGATA_HUMANS`; an empty list leaves the variable unset (see the identity configuration, below). Each entry is type-checked against the account-name shape         |
+| `personaFile`          | nullOr path        | `null`              | `ZENIGATA_PERSONA_FILE`, set only when non-null                                                                                                                       |
+| `adapterUrl`           | str                | —                   | `ZENIGATA_ADAPTER_URL`                                                                                                                                                |
+| `forgeUrl`             | str                | —                   | `ZENIGATA_FORGE_URL` — the forge the status page's PR links point into; not a secret, the config echo shows it plainly                                                |
+| `memoryUrl`            | str                | —                   | `ZENIGATA_MEMORY_URL`, full endpoint URL with the `app` and `initiator` params; the description of the option spells out that `initiator=agent` must never be dropped |
+| `reviewTimeoutSeconds` | ints.positive      | `1800`              | `ZENIGATA_REVIEW_TIMEOUT_SECONDS`                                                                                                                                     |
+| `turnPollSeconds`      | ints.positive      | `3`                 | `ZENIGATA_TURN_POLL_SECONDS`, set only when the option differs from its default                                                                                       |
+| `turnBudgetSeconds`    | ints.positive      | `900`               | `ZENIGATA_TURN_BUDGET_SECONDS`, set only when the option differs from its default                                                                                     |
+| `retryPolicy`          | enum               | `never`             | `ZENIGATA_RETRY_POLICY`, set only when the option differs from its default; `never` keeps every current deployment's posture                                          |
+| `agentName`            | str                | `zenigata-reviewer` | `ZENIGATA_AGENT`                                                                                                                                                      |
+| `package`              | package            | —                   | The unit's `ExecStart` — set it to the flake's `packages.zenigata-runtime`; the runtime composes flake-pinned inputs a plain nixpkgs callPackage cannot provide       |
 
-The unit runs as a `DynamicUser` with a `StateDirectory`, takes the secrets from the `EnvironmentFile`, sets the
-non-secret variables from the options, and hardens with `NoNewPrivileges`, `ProtectSystem=strict`, and `ReadWritePaths`
-on the state directory. `git` is on the unit's PATH because the pipeline clones and fetches.
+The unit runs the runtime package's launcher as its `ExecStart`: the opencode serve starts inside the package's own
+config layout and the bot execs beside it, so one unit carries the whole stack, a stop or a crash takes both, and
+`Restart=on-failure` loops the pair. The unit runs as a `DynamicUser` with a `StateDirectory`, takes the secrets from
+the `EnvironmentFile`, sets the non-secret variables from the options, and hardens with `NoNewPrivileges`,
+`ProtectSystem=strict`, and `ReadWritePaths` on the state directory — which also holds the serve's own state, its `HOME`
+set to the state directory. `git` rides the package's own PATH wrapper.
 
 ### The persona override
 
@@ -198,30 +201,25 @@ entrypoint when `ZENIGATA_PERSONA_FILE` is unset. Setting the module's `personaF
 replaces the packaged persona for every prompt the bot sends. The override beats the packaged default; the packaged
 default is what ships when nobody overrides.
 
-### The agent definition and `agentFile`
+### The agent definition
 
-The package ships the review agent's definition at `<package>/share/zenigata/agent/reviewer.md`. When the module's
-`agentFile` is set, the module publishes a copy of that definition at `/etc/zenigata/agent/<agentName>.md`; a change to
-the definition lands at the next system rebuild. The agent runtime derives an agent's id from the definition file's
-name, and the session driver selects the agent by id — publishing under `<agentName>.md` is what makes `ZENIGATA_AGENT`
-resolve. Registering the conf dir with the opencode service is the deployment's business: the opencode service config
-decides which directories it scans, and the module stays out of that wiring.
-
-The definition carries its own policy: the `permissions` block in its frontmatter grants the reviewer's working tools —
-reading, globbing, grepping, running shell commands, and looking up reference material on the network, plus the subagent
-delegation the flow uses. It grants the skill action over the wildcard, so the session reaches every skill the
-deployment ships — `review-pr`, which the driving prompt names, and `humanizer`, which the session's own flow runs,
-among them — while every non-skill action stays behind the deny-all floor an agent ruleset carries. The forge MCP's
-review-posting tools are the deliberate carve-out that does NOT ship: the deployment's own config carries those rows,
-named for the MCP server that deployment runs (`<server>_<tool>`, the action format the v2.3.0 source composes for MCP
-tools). A deployment that pins no rows gets a reviewer that cannot post — the correct default, since the shipped
-definition must stay free of any one deployment's server naming. A file-defined agent's rules land after the runtime's
-config floor and win, so the definition is the operative grant map and every deployment carries it without re-allowing
-anything. The authoring actions (`edit`, `write`, `patch`) stay denied as tool mounts, and one misuse rides behind them
-as a denial: a trailing `shell` row refuses `git push*` commands. That denial matches the command text the shell tool
-checks as its permission resource — the raw command string, per command segment (verified against the 2.3.0 source) — so
-it catches commands spelled `git push …` and not a push that starts differently; the no-push invariant does not rest on
-the row alone.
+The runtime package composes the review agent's definition into its own config layout under the id the session driver
+selects (`agent/zenigata-reviewer.md`, the file-name-is-the-id rule the agent runtime decodes), so `ZENIGATA_AGENT`'s
+default resolves with nothing published. The definition carries its own policy: the `permissions` block in its
+frontmatter grants the reviewer's working tools — reading, globbing, grepping, running shell commands, and looking up
+reference material on the network, plus the subagent delegation the flow uses. It grants the skill action over the
+wildcard, so the session reaches every skill the package ships — `review-pr`, which the driving prompt names, and
+`humanizer`, which the session's own flow runs, among them — while every non-skill action stays behind the deny-all
+floor an agent ruleset carries. The forge MCP's review-posting tools are the deliberate carve-out that does NOT ship:
+the deployment's own override config carries those rows, named for the MCP server that deployment runs
+(`<server>_<tool>`, the action format the v2.3.0 source composes for MCP tools). A deployment that pins no rows gets a
+reviewer that cannot post — the correct default, since the shipped definition must stay free of any one deployment's
+server naming. A file-defined agent's rules land after the runtime's config floor and win, so the definition is the
+operative grant map and every deployment carries it without re-allowing anything. The authoring actions (`edit`,
+`write`, `patch`) stay denied as tool mounts, and one misuse rides behind them as a denial: a trailing `shell` row
+refuses `git push*` commands. That denial matches the command text the shell tool checks as its permission resource —
+the raw command string, per command segment (verified against the 2.3.0 source) — so it catches commands spelled
+`git push …` and not a push that starts differently; the no-push invariant does not rest on the row alone.
 
 The grants do not make the reviewer harmless. `shell` on `*` subsumes every authoring tool — redirection, `git apply`,
 `rm` — so a build writing through the shell is the grant working. The forge surface changed shape with review 665: the
@@ -252,29 +250,51 @@ carve-out after it (a headless serve has nobody to answer a permission ask, so t
 refuses the integration channel at the policy level — deliberately not `integration.use`, whose deny also covers
 providers served from local config and would take out the deployment's own model route — and turns sharing and
 self-update off. The `mcp.use` refusal is gone (review 665): the deployment passes the forge MCP into the serve, the
-reviewer session posts its own review through it, and the deployment's config carries the reviewer's forge-tool rows,
-named for that server. The `plugin.use` refusal is gone too (PRJ-535): the earliest-loaded policy wins the serve's
+reviewer session posts its own review through it, and the deployment's override config carries the reviewer's forge-tool
+rows, named for that server. The `plugin.use` refusal is gone too (PRJ-535): the earliest-loaded policy wins the serve's
 union, so a floor deny would have made every deployment-layer plugin allow ungrantable; plugins load where the
 deployment grants them, and a deployment that grants no plugin gets none. The reviewer agent's own definition carries
 its working grants (reads, searches and globs, shell commands, web lookups, subagent delegation, and its skills): the
 file-defined agent's rules land after the floor and win, so the grants travel in the package and no deployment re-allows
-anything. The deployment-only wiring — the model route with the gateway's virtual-key attribution, the serve's address
-and password, the agent-definition directories it scans, the skills directory the review session's skills load from, the
-forge MCP server the session posts through, with the reviewer's forge-tool rows named for it, and the plugin grants for
-the plugins that deployment wires — is the deployment's layer; the package's `opencodeConfigPath` passthru names where
-the config lands inside it. The packaged serve is wrapped: the shell PATH a review session runs under carries the
-runtime's own node and git, appended after whatever PATH the deployment's unit sets (PRJ-539) — the review flow runs the
-tests and builds the change calls for, and those are node and git programs a minimal unit PATH leaves dead. The spawn
-layer itself — which shell the session's shell tool runs through at all — is the neutral config's `shell` key
-(`/bin/sh`): the serve inherits the service account's login shell as `$SHELL`, and a deployment whose service account's
-shell is nologin dies at spawn, below PATH, on every shell call; the config names the shell instead, and the
-deployment's own config `shell` key overrides it. The runtime package also ships the skills tree, at
-`share/skills.opencode` — the opencode assets package's per-client composition, built by the flake's assets packaging
-from the writs skills tree — and wiring it into the serve's config home is the deployment's step: link the tree into the
-config home as the `skills` directory, or list its path under the config's `skills` key. The serve's skill discovery
-scans `<config entry>/skill` and `<config entry>/skills` and the config's `skills` list (the v2.3.0 source's contract),
-and the reviewer's skill grant covers everything it finds — the prompt names `review-pr`, whose flow carries `humanizer`
-(which carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
+anything.
+
+The package composes the serve's whole config layout itself, at `<package>/share/zenigata/opencode-home`: the neutral
+floor as `opencode.json` — the layout's only config file — the reviewer agent's definition at
+`agent/zenigata-reviewer.md`, and the skills tree — the opencode assets package's per-client composition, built by the
+flake's assets packaging from the writs skills tree — linked at the `skills` directory the serve's skill discovery scans
+(`<config entry>/skill` and `<config entry>/skills`, the v2.3.0 source's contract). The launcher points
+`OPENCODE_CONFIG_DIR` at that layout by default, so the packaged serve loads the package's own composition with nothing
+wired: PRJ-539's deployment-side wiring step is gone, and there is nothing left for a deployer to skip.
+
+What remains deployment-owned rides one file, placed the native way. The v2.3.0 serve reads both `opencode.json` and
+`opencode.jsonc` from every scanned config directory — `config/discovery.ts`'s `names` list, loaded in that order with
+missing files skipped — and merges with the later document winning for settings (`config.ts`'s `latest` is `findLast`),
+so a deployment's own `opencode.jsonc` sitting beside the floor's `opencode.json` layers over it through the serve's own
+precedence, with no env var carrying a config path. Policy rows are the union with the earliest-loaded document's
+authority winning (the PRJ-535 fact), so the floor's policy rows keep their authority. The module's `overrideConfig`
+option composes that two-file directory — the package floor's `opencode.json` plus the deployment's `opencode.jsonc`,
+with the agent and skills entries beside them — and points the unit's `OPENCODE_CONFIG_DIR` at it; a deployment that
+ships no file gets the launcher's package-layout default. The deployment's file carries the model route with the
+gateway's virtual-key attribution, the forge MCP server the session posts through with the reviewer's forge-tool rows
+named for it, and the plugin grants for the plugins that deployment wires — the credential-bearing surfaces PRJ-501
+keeps deployment-injected. The launcher composes the PATH the pair runs under: the runtime's own node and git, appended
+after whatever PATH the caller sets (PRJ-539) — the review flow runs the tests and builds the change calls for, and
+those are node and git programs a minimal unit PATH leaves dead. The spawn layer itself — which shell the session's
+shell tool runs through at all — is the neutral config's `shell` key (`/bin/sh`): the serve inherits the service
+account's login shell as `$SHELL`, and a deployment whose service account's shell is nologin dies at spawn, below PATH,
+on every shell call; the config names the shell instead, and the deployment's own `shell` key beats it. The reviewer's
+skill grant covers everything the layout ships — the prompt names `review-pr`, whose flow carries `humanizer` (which
+carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
+
+The flake's `.#zenigata` app runs the package's launcher, and that invocation is the whole story between nothing and a
+reviewable stack: source the env file (`set -a; . ./zenigata.env; set +a`) and run it. The launcher starts the serve on
+`OPENCODE_SERVE_PORT` (default 8473), composes the bot's serve URL, and mints a shared serve password from
+`ZENIGATA_OPENCODE_KEY` — unset, it generates one and hands it to both sides — then execs the bot. The acceptance
+harness (`test/runtime-compat-run.ts`, the flake's `zenigata-runtime-compat` check) stands the stack up through exactly
+that invocation with a fixture env file and the deployment's file placed beside the floor in the config directory, and
+runs the review-shaped pass against it: one review event through the bot's intake, the reviewer session loading
+`review-pr` from the package's own tree, and the review landing on a local forge fake through the deployment's forge
+MCP.
 
 The bin also carries a `--check-config` mode beside the server boot: given a rendered unit environment (JSON), the
 unit's environment file, and the identity list that deployment carries (JSON), it composes the environment files the way

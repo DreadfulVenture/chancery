@@ -325,10 +325,21 @@
 
           # The status UI runs as its own app, separate from the bot: it
           # consumes the intake's HTTP surface and deploys independently.
+          # The stack app (PRJ-548): `nix run .#zenigata` stands the whole
+          # runtime up from the package's own launcher — the serve in the
+          # config directory the launcher points it at (the package's own
+          # layout, or the deployment's composed two-file directory) and
+          # the bot beside it, fed by the sourced environment. One command
+          # and an env file are the whole story between nothing and a
+          # reviewable stack.
           apps = {
             zenigata-ui = {
               type = "app";
               program = "${config.packages.zenigata-ui}/bin/zenigata-ui";
+            };
+            zenigata = {
+              type = "app";
+              program = "${config.packages.zenigata-runtime}/bin/zenigata-stack";
             };
           };
 
@@ -406,12 +417,15 @@
                     {
                       services.zenigata = {
                         enable = true;
+                        package = config.packages.zenigata-runtime;
                         allowedLogins = [ "example-user" ];
                         inherit (identity) humans;
                         adapterUrl = "http://adapter.invalid";
                         forgeUrl = "https://forge.example.com";
-                        opencodeUrl = "http://opencode.invalid";
                         memoryUrl = "http://127.0.0.1:28132/mcp?app=zenigata&initiator=agent";
+                        overrideConfig = pkgs.writeText "zenigata-rendered-config-override" ''
+                          {}
+                        '';
                         secretsFile = pkgs.writeText "zenigata-rendered-config-secrets" ''
                           ZENIGATA_EVENT_TOKEN=event-secret
                           ZENIGATA_ADAPTER_TOKEN=adapter-secret
@@ -559,22 +573,6 @@
                 --arg modulePath ${./nix/watcher-daemon-module.nix} \
                 --arg nixpkgsPath ${pkgs.path} \
                 ${./nix/watcher-daemon-assertions.nix} && touch "$out"
-            '';
-
-            # The zenigata module's opencodeUrl teaching (zenigata review
-            # 709): the same pattern the watcher module carries — the
-            # empty default lets a forgotten key reach the module's own
-            # assertion instead of the module system's bare
-            # used-but-not-defined error. One bare eval without the key:
-            # the refusal must fire and name the option.
-            zenigata-opencodeurl-check = pkgs.runCommand "zenigata-opencodeurl-check" { } ''
-              export NIX_STATE_DIR="$TMPDIR/state"
-              export NIX_CONF_DIR="$TMPDIR/conf"
-              export HOME="$TMPDIR/home"
-              ${pkgs.nix}/bin/nix-instantiate --eval --strict \
-                --arg modulePath ${./nix/zenigata-module.nix} \
-                --arg nixpkgsPath ${pkgs.path} \
-                ${./nix/zenigata-module-assertions.nix} && touch "$out"
             '';
 
             # The director's own surface load: the packaged entry must be a

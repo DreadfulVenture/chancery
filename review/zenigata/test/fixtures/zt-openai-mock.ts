@@ -55,6 +55,25 @@ const CHILD_TEXT = "child report text";
 const CHILD_DELAY_MS = Number(process.env.ZT_MOCK_CHILD_DELAY_MS ?? 2000);
 const ROUNDTRIP_TEXT = "runtime compat round-trip";
 
+// The acceptance pass's review flow (PRJ-548): the reviewer session the
+// bot's pipeline drives scripts its own chain — load the review-pr skill
+// (the load that used to miss on the unwired deployment), take a shell
+// look at the change, post through the deployment's forge MCP, and end
+// with the status line the bookkeeping stage reads. Each hop is detected
+// statelessly from the tool result the previous hop left in the
+// messages, and every hop records an event row the runner asserts from.
+const DIFF_MARKER = "zt-accept-diff-shot";
+const REVIEW_BODY = [
+  "Agent-generated:",
+  "",
+  "Reviewed the fixture change with the review-pr flow.",
+  "",
+  "The change is one line on README.md; the payload follows the format",
+  "the review-pr skill carries.",
+  "",
+  "review-status: posted",
+].join("\n");
+
 /** The reviewer-grant probes' markers and finals: the shell command's echo,
  * the docs fake's page, and the parent text each final turn reports. */
 const SHELL_MARKER = "zt-compat-shell-ok";
@@ -66,17 +85,26 @@ const DOCS_PAGE = `${DOCS_MARKER}: the reviewer fetched the local docs fake`;
 
 /** The request records: chat turns, their completions, one
  * "worker-read" row per child's second model call, saying whether the
- * child's `read` tool call returned the marker file's content, and one
+ * child's `read` tool call returned the marker file's content, one
  * "parent-tool" row per reviewer probe's final call, saying whether the
- * grant's tool call returned its marker. */
+ * grant's tool call returned its marker, and the acceptance pass's
+ * "review-flow" rows naming each hop of the scripted review chain. */
 interface MockEvent {
-  kind: "chat" | "chat-done" | "worker-read" | "parent-tool" | "toolchain";
+  kind:
+    | "chat"
+    | "chat-done"
+    | "worker-read"
+    | "parent-tool"
+    | "toolchain"
+    | "review-flow";
   model?: string;
   waitedMs?: number;
   sawToolResult?: boolean;
   toolCalls?: number;
   tool?: string;
   succeeded?: boolean;
+  stage?: string;
+  result?: string;
   /** Whether the request carried the skills list naming review-pr. */
   skillListed?: boolean;
   at: number;
@@ -95,7 +123,10 @@ interface ChatBody {
 }
 
 function toolResultText(body: ChatBody): string {
-  const tool = body.messages.find((m) => m.role === "tool");
+  // The LAST tool message: a multi-tool flow (the review chain loads a
+  // skill, shells, then posts) keeps every earlier result in the
+  // messages, and the first one would read forever.
+  const tool = [...body.messages].reverse().find((m) => m.role === "tool");
   if (!tool) return "";
   if (typeof tool.content === "string") return tool.content;
   if (Array.isArray(tool.content)) {
@@ -132,6 +163,10 @@ function choose(body: ChatBody): Scripted {
         succeeded: toolResultText(body).includes(
           process.env.ZT_MOCK_READ_MARKER ?? "zt-compat-worker-read-ok",
         ),
+        // The result text, truncated: the runner's diagnostics read the
+        // denial or the path error the read came back with, not just the
+        // boolean.
+        result: toolResultText(body).slice(0, 300),
         at: Date.now(),
       });
       return { content: CHILD_TEXT, finish: "stop" };
@@ -161,6 +196,66 @@ function choose(body: ChatBody): Scripted {
       .find((m) => m.role === "user");
     const asks = typeof lastUser?.content === "string" ? lastUser.content : "";
     if (sawToolResult(body)) {
+      // The acceptance pass's review chain (PRJ-548) is detected from the
+      // result content each hop left behind, before the probes' generic
+      // final handler: only the review flow carries the skill's rendered
+      // content, the diff marker, and the forge fake's ack.
+      const reviewResult = toolResultText(body);
+      if (reviewResult.includes("ztforge-accepted")) {
+        events.push({
+          kind: "review-flow",
+          stage: "posted",
+          succeeded: true,
+          at: Date.now(),
+        });
+        return { content: REVIEW_BODY, finish: "stop" };
+      }
+      if (reviewResult.includes("<skill_content")) {
+        const loaded = reviewResult.includes('name="review-pr"');
+        events.push({
+          kind: "review-flow",
+          stage: "skill-loaded",
+          succeeded: loaded,
+          at: Date.now(),
+        });
+        return {
+          toolCalls: [
+            {
+              id: "call_review_shell",
+              type: "function",
+              function: {
+                name: "shell",
+                arguments: JSON.stringify({
+                  command: `echo ${DIFF_MARKER}`,
+                }),
+              },
+            },
+          ],
+          finish: "tool_calls",
+        };
+      }
+      if (reviewResult.includes(DIFF_MARKER)) {
+        return {
+          toolCalls: [
+            {
+              id: "call_review_post",
+              type: "function",
+              function: {
+                name: "ztforge_create_review",
+                arguments: JSON.stringify({
+                  repo: process.env.ZT_MOCK_REPO ?? "zt-accept/widgets",
+                  pr: Number(process.env.ZT_MOCK_PR ?? 7),
+                  expectedHeadSha: process.env.ZT_MOCK_HEAD_SHA ?? "",
+                  verdict: "APPROVE",
+                  body: REVIEW_BODY,
+                  comments: [],
+                }),
+              },
+            },
+          ],
+          finish: "tool_calls",
+        };
+      }
       // The parent's final turn: the tool result is in. The evidence row
       // goes out unconditionally on this turn, the way the worker-read
       // rows do, with `succeeded` computed from the marker's presence —
@@ -209,6 +304,25 @@ function choose(body: ChatBody): Scripted {
         return { content: DOCS_FINAL_TEXT, finish: "stop" };
       }
       return { content: FINAL_TEXT, finish: "stop" };
+    }
+    if (/review pull request/i.test(asks) && !sawToolResult(body)) {
+      // The acceptance pass's first hop: load the review-pr skill — the
+      // load whose failure on an unwired deployment was PRJ-548's live
+      // miss. A serve without the tree errors this call, the chain
+      // stalls, and the run's bookkeeping goes red naming it.
+      return {
+        toolCalls: [
+          {
+            id: "call_review_skill",
+            type: "function",
+            function: {
+              name: "skill",
+              arguments: JSON.stringify({ id: "review-pr" }),
+            },
+          },
+        ],
+        finish: "tool_calls",
+      };
     }
     if (/delegate/i.test(asks)) {
       return {

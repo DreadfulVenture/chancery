@@ -143,6 +143,29 @@ function url(env: Record<string, string | undefined>, name: string): string {
   return value;
 }
 
+/**
+ * A URL with a default: the variable may be unset where the composition
+ * that renders it knows the answer — the runtime package's launcher
+ * composes the serve URL from its own port, so a deployment that runs
+ * the packaged stack sets nothing and the default holds. A value that
+ * trims empty is treated as unset (the contract optional() honors).
+ */
+function urlWithDefault(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: string,
+): string {
+  const raw = optional(env, name);
+  if (raw === undefined) {
+    return fallback;
+  }
+  const result = urlSchema.safeParse(raw);
+  if (!result.success) {
+    throw new Error(`${name}: ${result.error.issues[0]?.message ?? "invalid"}`);
+  }
+  return raw;
+}
+
 function csv(env: Record<string, string | undefined>, name: string): string[] {
   const value = required(env, name);
   return splitCsv(value);
@@ -308,7 +331,11 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     forgeUrl: url(env, "ZENIGATA_FORGE_URL"),
     adapterToken: required(env, "ZENIGATA_ADAPTER_TOKEN"),
     eventToken: required(env, "ZENIGATA_EVENT_TOKEN"),
-    opencodeUrl: url(env, "ZENIGATA_OPENCODE_URL"),
+    opencodeUrl: urlWithDefault(
+      env,
+      "ZENIGATA_OPENCODE_URL",
+      "http://127.0.0.1:8473",
+    ),
     opencodeKey: optional(env, "ZENIGATA_OPENCODE_KEY"),
     memoryUrl: url(env, "ZENIGATA_MEMORY_URL"),
     reviewTimeoutSeconds: int(
