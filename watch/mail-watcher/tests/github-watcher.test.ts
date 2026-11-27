@@ -57,7 +57,9 @@ type GhState = {
   outage: boolean;
   // A status message the failures carry — the redaction test fills it.
   echo: string;
-  // When true, every read answers 403 with the rate-limit headers.
+  // When true, reads answer 403 with the rate-limit headers until the
+  // reset the header names passes — the api's own behavior, so the
+  // refusal and the source's hold end at the same wall-clock instant.
   rateLimit: boolean;
   rateLimitReset: number;
   calls: string[];
@@ -103,7 +105,7 @@ async function startGithub(state: GhState) {
       });
       res.end(reason);
     };
-    if (state.rateLimit) {
+    if (state.rateLimit && Date.now() < state.rateLimitReset * 1000) {
       res.writeHead(403, "rate limit exceeded", {
         "content-type": "application/json",
         "x-ratelimit-remaining": "0",
@@ -952,66 +954,135 @@ test("an outage keeps its pass, names the route and the status, and leaks no cre
 });
 
 test("the rate limit holds the reads until the reset, and the wake lands exactly once after it", async () => {
-  const state = ghState();
-  state.pull = mkPull();
-  const gh = await startGithub(state);
-  const forge = await startForgeFake();
-  const logged: string[] = [];
-  const original = console.error;
-  console.error = (...args: unknown[]) => {
-    logged.push(args.map(String).join(" "));
+  // The two legs split the timing boundary that flaked the old single
+  // shape under load (PRJ-515): the hold was armed with its reset one
+  // wall-clock second out, so a loaded runner could cross the reset
+  // between arming the hold and asserting on it — the reads that then
+  // resumed were the expiry working, and the mid-hold assertion failed
+  // on its own timing. Each leg now owns one side of the boundary and
+  // asserts nothing across it.
+  //
+  // The hold leg arms its reset a full minute out: nothing can expire
+  // mid-leg under any load, so a read during the settle is a real hold
+  // failure, never the reset arriving. The wake leg arms a reset about
+  // a second out and makes no mid-hold assertion — the fake stops
+  // refusing at its own reset, the same wall-clock boundary the
+  // source's hold expires at, so the first pass after expiry reads the
+  // pending change and wakes, exactly once, whatever the runner's load.
+  const holdLeg = async () => {
+    const state = ghState();
+    state.pull = mkPull();
+    const gh = await startGithub(state);
+    const forge = await startForgeFake();
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      const fixture = fakeContext([{ id: "ses-1", metadata: {} }]);
+      fixture.ctx.options = optionsWith(forge.url, githubOptions(gh));
+      await withEnv({ WATCHER_POLL_SECONDS: "0.05" }, async () => {
+        const cleanup = await boot(fixture);
+        try {
+          await register(fixture, "ses-1", {
+            kind: "github-pr",
+            repo: REPO,
+            ref: "12",
+          });
+          await settle(40);
+          assert.equal(fixture.mails.length, 0);
+
+          // The api starts refusing with its reset a minute out, and a
+          // change pends behind the hold: the held passes must read
+          // nothing and wake nobody.
+          state.rateLimit = true;
+          state.rateLimitReset = Math.floor(Date.now() / 1000) + 60;
+          state.pull = {
+            ...state.pull,
+            updated_at: new Date().toISOString(),
+            draft: true,
+          };
+          await waitFor(
+            () =>
+              logged.some((line) =>
+                line.includes("the github source hit the api rate limit"),
+              ),
+            1200,
+          );
+          const callsAtHold = state.calls.length;
+          await settle(150);
+          assert.equal(
+            state.calls.length,
+            callsAtHold,
+            "no reads ride the held backoff",
+          );
+          assert.equal(fixture.mails.length, 0, "the held passes wake nobody");
+        } finally {
+          await cleanup?.();
+        }
+      });
+    } finally {
+      console.error = original;
+      await gh.close();
+      await forge.close();
+    }
   };
-  try {
-    const fixture = fakeContext([{ id: "ses-1", metadata: {} }]);
-    fixture.ctx.options = optionsWith(forge.url, githubOptions(gh));
-    await withEnv({ WATCHER_POLL_SECONDS: "0.05" }, async () => {
-      const cleanup = await boot(fixture);
-      try {
-        await register(fixture, "ses-1", {
-          kind: "github-pr",
-          repo: REPO,
-          ref: "12",
-        });
-        await settle(40);
-        assert.equal(fixture.mails.length, 0);
+  await holdLeg();
 
-        // The api starts refusing: the source says so once and holds
-        // its reads until the reset the header named.
-        state.rateLimit = true;
-        state.rateLimitReset = Math.floor(Date.now() / 1000) + 1;
-        const changedAt = new Date().toISOString();
-        state.pull = { ...state.pull, updated_at: changedAt, draft: true };
-        await waitFor(
-          () =>
-            logged.some((line) =>
-              line.includes("the github source hit the api rate limit"),
-            ),
-          1200,
-        );
-        const callsAtHold = state.calls.length;
-        await settle(40);
-        assert.equal(
-          state.calls.length,
-          callsAtHold,
-          "no reads ride the held backoff",
-        );
+  const wakeLeg = async () => {
+    const state = ghState();
+    state.pull = mkPull();
+    const gh = await startGithub(state);
+    const forge = await startForgeFake();
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      const fixture = fakeContext([{ id: "ses-1", metadata: {} }]);
+      fixture.ctx.options = optionsWith(forge.url, githubOptions(gh));
+      await withEnv({ WATCHER_POLL_SECONDS: "0.05" }, async () => {
+        const cleanup = await boot(fixture);
+        try {
+          await register(fixture, "ses-1", {
+            kind: "github-pr",
+            repo: REPO,
+            ref: "12",
+          });
+          await settle(40);
+          assert.equal(fixture.mails.length, 0);
 
-        // After the reset the reads resume and the change wakes, once.
-        state.rateLimit = false;
-        await waitFor(() => fixture.mails.length === 1, 2000);
-        const text = envelope(fixture.mails[0].text);
-        assert.ok(text.includes("GitHub mail — PR change"), text);
-        await settle(60);
-        assert.equal(fixture.mails.length, 1);
-      } finally {
-        await cleanup?.();
-      }
-    });
-  } finally {
-    console.error = original;
-    await gh.close();
-    await forge.close();
-  }
+          // The api starts refusing with its reset about a second out,
+          // and a change pends behind the hold. No assertion rides the
+          // hold here: on a loaded runner the hold may expire before
+          // the next look, and in the boundary case the first read can
+          // land past the reset with no hold armed at all — either way
+          // the reads resume at the reset and the wake lands once.
+          state.rateLimit = true;
+          state.rateLimitReset = Math.floor(Date.now() / 1000) + 1;
+          state.pull = {
+            ...state.pull,
+            updated_at: new Date().toISOString(),
+            draft: true,
+          };
+          await waitFor(() => fixture.mails.length === 1, 2000);
+          const text = envelope(fixture.mails[0].text);
+          assert.ok(text.includes("GitHub mail — PR change"), text);
+          await settle(60);
+          assert.equal(fixture.mails.length, 1);
+        } finally {
+          await cleanup?.();
+        }
+      });
+    } finally {
+      console.error = original;
+      await gh.close();
+      await forge.close();
+    }
+  };
+  await wakeLeg();
 });
 
 test("a missing token disables the github source with its named line; the forge source still stands; the absent block is silent", async () => {
