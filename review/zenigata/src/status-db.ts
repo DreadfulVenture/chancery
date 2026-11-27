@@ -39,7 +39,7 @@ import { z } from "zod";
 import type { Clock, Logger } from "./ctx.js";
 import { FAILED_DRAFT_TRUNCATION_MARKER, type JournalLine } from "./journal.js";
 import { redactSecrets } from "./redact.js";
-import type { FailedDraftView, RunDraftsView, RunView } from "./ui.js";
+import type { FailedDraftView, RunDraftsView, RunView } from "./page.js";
 
 /** The "recent runs" window, newest first. */
 const MAX_RUNS = 10;

@@ -13,6 +13,8 @@ result*
 artifacts/
 review/zenigata/node_modules/
 review/zenigata/dist/
+review/zenigata-ui/node_modules/
+review/zenigata-ui/dist/
 
 # The mail-watcher plugin's installed dependencies (npm ci at test
 # time; the nix package builds its own from the lockfile).

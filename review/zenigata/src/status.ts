@@ -15,12 +15,66 @@ import type { Config } from "./config.js";
 import type { JournalLine, ReviewStartRecord } from "./journal.js";
 import type { StatusDb } from "./status-db.js";
 import { redactSecrets } from "./redact.js";
-import type {
-  DroppedStartView,
-  SessionStartView,
-  SessionView,
-  StatusData,
-} from "./ui.js";
+import type { SessionStartView, RunView } from "./page.js";
+
+// ---------------------------------------------------------------------------
+// The /status JSON contract's shapes
+// ---------------------------------------------------------------------------
+
+export interface UptimeInfo {
+  /** Process start, ISO 8601. */
+  startedAt: string;
+  uptimeSeconds: number;
+  /** The port the intake actually bound (the OS resolves a 0 config). */
+  listenPort: number;
+  /** The configured adapter URL, userinfo and query tokens stripped. */
+  adapterUrl: string;
+}
+
+export interface SessionView {
+  eventId: string;
+  repo: string;
+  pr: number;
+  eventKind: string;
+  requester: string;
+  commentId: string;
+  /** The pipeline stage the run last reported ("queued" before dispatch). */
+  stage: string;
+  /** The journaled start's moment — the accepted moment it carried, ISO 8601. */
+  acceptedAt: string;
+  /** The accept moment or the last stage report, ISO 8601. */
+  lastActivityAt: string;
+}
+
+export interface DroppedStartView {
+  eventId: string;
+  repo: string;
+  pr: number;
+  eventKind: string;
+  /** The journaled start's moment, ISO 8601. */
+  acceptedAt: string;
+}
+
+export interface StatusConfig {
+  /** The configured listen port (0 = the OS picks one). */
+  listenPort: number;
+  allowedLogins: number;
+  allowedRepos: number;
+  retryPolicy: string;
+  reviewTimeoutSeconds: number;
+  turnPollSeconds: number;
+  turnBudgetSeconds: number;
+  agent: string;
+}
+
+/** GET /status's pinned response shape. Page-only render data gains nothing here. */
+export interface StatusData {
+  uptime: UptimeInfo;
+  sessions: SessionView[];
+  droppedStarts: { count: number; starts: DroppedStartView[] };
+  runs: RunView[];
+  config: StatusConfig;
+}
 
 type ReviewRequestedEvent = Extract<ForgeEvent, { kind: "review_requested" }>;
 

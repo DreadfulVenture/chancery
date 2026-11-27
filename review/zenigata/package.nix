@@ -1,9 +1,8 @@
 # The Zenigata package: buildNpmPackage over this product tree, following
 # the private-repo precedent — importNpmLock for the dependency setup and
 # nodejs_24 as the runtime.
-# Data files the process resolves relative to dist/ (persona.md,
-# assets/) install beside it; everything else sits where the install
-# phase's own commands put it.
+# persona.md installs beside dist/ (the process resolves it there);
+# everything else sits where the install phase's own commands put it.
 {
   lib,
   buildNpmPackage,
@@ -21,7 +20,6 @@ let
       ./tsconfig.json
       ./src
       ./persona.md
-      ./assets
       ./agent
     ];
   };
@@ -58,7 +56,6 @@ buildNpmPackage {
     cp -r node_modules $out/
     cp -r dist $out/
     cp persona.md $out/persona.md
-    cp -r assets $out/assets
     cp -r agent $out/share/zenigata/agent
 
     # package.json's bin entry maps zenigata to dist/index.js; the wrapper

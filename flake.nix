@@ -304,6 +304,7 @@
             memory-store-plugin = pkgs.callPackage ./memory/opencode-client/package.nix { };
             memory-store-opencode = pkgs.callPackage ./nix/opencode-assets.nix { };
             zenigata = pkgs.callPackage ./review/zenigata/package.nix { };
+            zenigata-ui = pkgs.callPackage ./review/zenigata-ui/package.nix { };
             zenigata-runtime = pkgs.callPackage ./review/zenigata/runtime.nix {
               # callPackage'd again rather than read from config.packages:
               # referencing an attribute of the set being defined loops
@@ -320,6 +321,15 @@
             discovery-reminder = pkgs.callPackage ./writs/discovery-reminder/package.nix { };
             oc-wake = pkgs.callPackage ./wake/oc-wake/package.nix { };
             agenix-secrets-helper = pkgs.callPackage ./tool/agenix-secrets/package.nix { };
+          };
+
+          # The status UI runs as its own app, separate from the bot: it
+          # consumes the intake's HTTP surface and deploys independently.
+          apps = {
+            zenigata-ui = {
+              type = "app";
+              program = "${config.packages.zenigata-ui}/bin/zenigata-ui";
+            };
           };
 
           checks = {
@@ -428,34 +438,38 @@
                   touch "$out"
                 '';
 
-            # The status page's notification script (PRJ-502), evaluated
-            # from the BUILT package: the vitest sandbox runs the script
-            # as the dev transform emits it, but production serves tsc's
-            # output — the page embeds dist/status-notify.js's own
-            # composition — and no dev-side check executes those bytes. A
-            # target change or a downleveled helper would pass the suite
-            # and ship a script that dies in the browser; this check runs
-            # the built composition through the same browser-globals
-            # harness and pins the failure-then-retry behavior on it.
-            zenigata-notify-script =
-              pkgs.runCommand "zenigata-notify-script-check"
+            # The status UI's notification consumption (PRJ-502), evaluated
+            # from the BUILT package: the vitest suite runs the notifier
+            # through the dev transform, but the browser bundle is built
+            # from tsc's output — and no dev-side check executes those
+            # bytes. This check runs the built dist module through the
+            # same phases and pins the failure-then-retry behavior on it.
+            # (The bundle wraps these same modules; the build phase's
+            # esbuild step is what makes the bundle exist at all.)
+            zenigata-ui-notifier =
+              pkgs.runCommand "zenigata-ui-notifier-check"
                 {
                   nativeBuildInputs = [ pkgs.nodejs_24 ];
                 }
                 ''
                   node --input-type=module -e "
-                    const { clientScript, SEEN_KEY } = await import('${config.packages.zenigata}/dist/status-notify.js');
+                    const { FinishNotifier, SEEN_KEY } = await import('${config.packages.zenigata-ui}/dist/notifier.js');
                     const constructed = [];
-                    class Notification {
-                      constructor(title, options) {
-                        constructed.push({ title, options });
-                      }
-                      static permission = 'granted';
-                      static requestPermission() {
-                        return Promise.resolve('granted');
-                      }
-                    }
+                    let permission = 'granted';
+                    const sink = {
+                      supported: () => true,
+                      permission: () => permission,
+                      request: async () => 'granted',
+                      deliver: (notice) => {
+                        constructed.push(notice);
+                        return true;
+                      },
+                    };
                     const store = new Map();
+                    const seenStore = {
+                      read: () => JSON.parse(store.get(SEEN_KEY) ?? '[]'),
+                      write: (ids) => store.set(SEEN_KEY, JSON.stringify(ids)),
+                    };
                     // The storage holds a last check for the boot poll
                     // to diff against: an empty storage would make the
                     // boot poll a cold open that speaks the window
@@ -465,28 +479,7 @@
                       SEEN_KEY,
                       JSON.stringify(['acme/widget#9@2026-11-01T00:00:00.000Z@posted']),
                     );
-                    const control = { textContent: undefined, remove() {}, appendChild() {} };
-                    const document = {
-                      getElementById: () => control,
-                      createElement: () => ({ textContent: undefined, addEventListener() {} }),
-                    };
-                    const localStorage = {
-                      getItem: (key) => store.get(key) ?? null,
-                      setItem: (key, value) => store.set(key, value),
-                    };
-                    let served;
-                    const fetch = () =>
-                      Promise.resolve({ ok: true, json: () => Promise.resolve({ runs: served }) });
-                    let interval;
-                    const setInterval = (fn) => {
-                      interval = fn;
-                      return 1;
-                    };
-                    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-                    const boot = new Function(
-                      'document', 'localStorage', 'Notification', 'fetch', 'setInterval',
-                      clientScript(),
-                    );
+                    const notifier = new FinishNotifier(seenStore, sink);
                     const run = {
                       ts: '2026-11-25T12:00:00.000Z',
                       repo: 'acme/widget',
@@ -495,27 +488,22 @@
                       verdict: null,
                       failure: { stage: 'blind', message: 'the draft never parsed' },
                     };
-                    served = [run];
-                    boot(document, localStorage, Notification, fetch, setInterval);
-                    await settle();
+                    notifier.consume([run]);
                     if (constructed.length !== 1) {
-                      throw new Error('the built script did not raise the failed run exactly once');
+                      throw new Error('the built notifier did not raise the failed run exactly once');
                     }
-                    if (constructed[0].options.tag !== 'acme/widget#2@2026-11-25T12:00:00.000Z@failed') {
-                      throw new Error('the built script carried the wrong notification tag');
+                    if (constructed[0].id !== 'acme/widget#2@2026-11-25T12:00:00.000Z@failed') {
+                      throw new Error('the built notifier carried the wrong notification id');
                     }
-                    await interval();
-                    await settle();
+                    notifier.consume([run]);
                     if (constructed.length !== 1) {
-                      throw new Error('the built script re-notified the same state');
+                      throw new Error('the built notifier re-notified the same state');
                     }
-                    served = [{ ...run, outcome: 'posted', verdict: 'APPROVE' }];
-                    await interval();
-                    await settle();
-                    if (constructed.length !== 2 || constructed[1].options.tag !== 'acme/widget#2@2026-11-25T12:00:00.000Z@posted') {
-                      throw new Error('the built script missed the re-settled outcome');
+                    notifier.consume([{ ...run, outcome: 'posted', verdict: 'APPROVE' }]);
+                    if (constructed.length !== 2 || constructed[1].id !== 'acme/widget#2@2026-11-25T12:00:00.000Z@posted') {
+                      throw new Error('the built notifier missed the re-settled outcome');
                     }
-                    console.log('the built notification script raised the failure, stayed quiet, and spoke the retry');
+                    console.log('the built notifier raised the failure, stayed quiet, and spoke the retry');
                   " && touch "$out"
                 '';
 

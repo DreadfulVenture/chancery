@@ -1,0 +1,259 @@
+:root {
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  background: #0d1017;
+  color: #e6edf3;
+  font:
+    400 1.05rem/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  margin: 0 auto;
+  max-width: 62rem;
+  padding: 1.4rem clamp(1rem, 4vw, 3rem) 2.4rem;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.5rem;
+  margin: 0 0 1.1rem;
+}
+h1 {
+  font-size: 1.55rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+header .muted {
+  font-size: 0.85rem;
+}
+.panel {
+  background: #141a23;
+  border: 1px solid #242c38;
+  border-radius: 12px;
+  margin-bottom: 1.1rem;
+  overflow-x: auto;
+  padding: 0.95rem 1.2rem 1.1rem;
+}
+.panel h2 {
+  color: #97a1b0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  margin: 0 0 0.75rem;
+  text-transform: uppercase;
+}
+.health {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 1.35rem;
+  gap: 0.55rem 0.9rem;
+  margin: 0;
+}
+.health .fact {
+  font-variant-numeric: tabular-nums;
+}
+.fine {
+  color: #97a1b0;
+  font-size: 0.85rem;
+  margin: 0.6rem 0 0;
+}
+.chip {
+  background: #1a212c;
+  border: 1px solid #3a4350;
+  border-radius: 999px;
+  color: #a7b1be;
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.12rem 0.65rem;
+  white-space: nowrap;
+}
+.chip.ok {
+  background: #122a1b;
+  border-color: #2c5f3a;
+  color: #55d069;
+}
+.chip.warn {
+  background: #2a2210;
+  border-color: #6b561f;
+  color: #e3b341;
+}
+.chip.bad {
+  background: #2c1411;
+  border-color: #7c3a33;
+  color: #ff857b;
+}
+.muted {
+  color: #97a1b0;
+}
+.small {
+  font-size: 0.88rem;
+}
+.danger {
+  color: #ff857b;
+}
+.draft {
+  border-top: 1px solid #1d242e;
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+}
+.draft-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+}
+.draft-refusal {
+  color: #ff857b;
+  font-size: 0.82rem;
+  margin: 0.3rem 0 0;
+}
+.draft-reply {
+  background: #0d1017;
+  border: 1px solid #242c38;
+  border-radius: 6px;
+  font:
+    400 0.78rem/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  margin: 0.3rem 0 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 0.4rem 0.55rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-tail {
+  background: #0d1017;
+  border: 1px solid #242c38;
+  border-radius: 6px;
+  font:
+    400 0.78rem/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  margin: 0.3rem 0 0;
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.4rem 0.55rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.transcript-note {
+  margin: 0.35rem 0 0;
+}
+.transcript summary {
+  cursor: pointer;
+  margin: 0.35rem 0 0;
+}
+.transcript-body {
+  background: #0d1017;
+  border: 1px solid #242c38;
+  border-radius: 6px;
+  font:
+    400 0.78rem/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  margin: 0.3rem 0 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 0.4rem 0.55rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* The full-width log row (PRJ-547): the block hugs its row's bottom
+   edge, and the row above keeps its rule as the seam. Dense
+   preformatted text never wraps inside a column again — the expanded
+   block spans the table in a colspan-everything row beneath its own. */
+.row-log td {
+  padding: 0 0.6rem 0.5rem;
+}
+.log-pin {
+  cursor: pointer;
+  display: inline-block;
+  margin: 0.35rem 0 0;
+  user-select: none;
+}
+.log-pin input {
+  accent-color: #7fb2ff;
+  margin: 0 0.3rem 0 0;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th {
+  border-bottom: 1px solid #2b3441;
+  color: #97a1b0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 0.25rem 0.6rem 0.45rem;
+  text-align: left;
+  text-transform: uppercase;
+}
+td {
+  border-bottom: 1px solid #1d242e;
+  padding: 0.5rem 0.6rem;
+  vertical-align: top;
+}
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+.grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1.6rem;
+  margin: 0;
+}
+.grid dt {
+  color: #97a1b0;
+  font-size: 0.88rem;
+}
+.grid dd {
+  margin: 0;
+}
+.empty {
+  color: #97a1b0;
+  font-size: 1rem;
+  margin: 0.2rem 0 0.1rem;
+}
+footer {
+  color: #97a1b0;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  gap: 0.3rem 1.5rem;
+  justify-content: space-between;
+  margin-top: 1.4rem;
+}
+/* The notifications control (PRJ-502): a quiet link-styled button the
+   page's own register can carry; the app renders its states into the
+   span beside it. */
+footer button {
+  background: none;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+a {
+  color: #7fb2ff;
+}

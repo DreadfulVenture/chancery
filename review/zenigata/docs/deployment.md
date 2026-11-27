@@ -7,67 +7,77 @@ duty.
 
 ## Endpoints the process serves
 
-| Path         | Method | Auth                   | What it does                                                          |
-| ------------ | ------ | ---------------------- | --------------------------------------------------------------------- |
-| `/`          | GET    | none                   | The status surface as one human page (see "The status surface").      |
-| `/status`    | GET    | none                   | The status surface as JSON; the pinned machine contract.              |
-| `/v1/events` | POST   | `ZENIGATA_EVENT_TOKEN` | Intake for adapter events; 202 accepted, processed in the background. |
-| `/metrics`   | GET    | none                   | Prometheus text exposition.                                           |
-| `/healthz`   | GET    | none                   | 200 `ok`.                                                             |
+| Path                | Method | Auth                   | What it does                                                                       |
+| ------------------- | ------ | ---------------------- | ---------------------------------------------------------------------------------- |
+| `/status`           | GET    | none                   | The status surface as JSON; the pinned machine contract.                           |
+| `/page`             | GET    | none                   | The status UI's data feed: the full page data model as JSON (see "The status UI"). |
+| `/log/<session id>` | GET    | none                   | A live session's transcript view as JSON; keyed to the sessions this boot holds.   |
+| `/v1/events`        | POST   | `ZENIGATA_EVENT_TOKEN` | Intake for adapter events; 202 accepted, processed in the background.              |
+| `/metrics`          | GET    | none                   | Prometheus text exposition.                                                        |
+| `/healthz`          | GET    | none                   | 200 `ok`.                                                                          |
+| `/`                 | GET    | none                   | A placeholder naming the UI app and the machine surface; no run data.              |
 
 This table is the endpoints' canonical contract: what is open and what each endpoint carries. The only write endpoint is
 the token-bearing intake; the read-only probes and the status surface sit behind no authentication, and none of them
 carries a secret — /metrics exposes durations and counters, and the status surface redacts at every projection (below).
-Any other path answers 404; `/ui`, the status page's former address, retired when the human page moved to `/`.
+Any other path answers 404; `/ui`, the status page's former address, stays retired.
 
 The server binds `127.0.0.1` only; anything reaching it from elsewhere needs a reverse proxy in front.
 
-## The status surface
+## The status UI
 
-`GET /status` renders one JSON object, and `GET /` renders the same object as the human page, so the answer to "is the
-bot functioning and what has it done" needs no journal walk or process probe. The JSON is the machine contract: its
-shape is pinned, and anything that scrapes it can rely on it byte for byte. The human page renders the same projection
-for reading, in the order an operator reads at 2am: the health line (uptime, the bound port, and the adapter's
-reachability), the sessions running or parked right now, the recent runs with their verdicts and wall times, the review
-starts a restart dropped, the bot's own narration as a log tail, and the configuration echo. It is one static page — one
-embedded CSS block and the one inline script the notifications serve (below), no stylesheets or external assets.
+The human status page is its own app, `zenigata-ui` (`nix run .#zenigata-ui`), deployed and served separately from the
+bot: it runs its own small server that renders the built page and proxies the bot's read surface — `/page`,
+`/log/<session id>`, `/status` — server-side, so the browser stays same-origin and the intake keeps its loopback bind.
+The bot's HTTP surface above is the contract the UI consumes; the bot renders nothing.
 
-`GET /` renders that projection with the rendering-only inputs beside it; the JSON's machine-pinned shape carries none
-of them.
+`GET /status` renders one JSON object whose shape is pinned: anything that scrapes it can rely on it byte for byte.
+`GET /page` renders the full page data model for the UI: the same projection beside the page-only inputs — the live
+rows' started stamps and reviewer-session ids, the runs' wall times, failed drafts, and transcript views, the forge URL,
+the narration tail, and the adapter's reachability. The pinned `/status` shape carries none of them.
 
-The favicon is the page's head link — a data URI composed at boot from the packaged
-`review/zenigata/assets/favicon.svg`. No route serves the asset and the page fetches nothing for the link; an unreadable
-asset renders it off with a log line, and the boot continues.
+The UI renders the whole page from that feed, in the order an operator reads at 2am: the health line (uptime, the bound
+port, and the adapter's reachability), the sessions running or parked right now, the recent runs with their verdicts and
+wall times, the review starts a restart dropped, the bot's own narration as a log tail, and the configuration echo. The
+server root names the app and the machine surface instead of rendering data.
 
-While the page is open it also notifies. Its inline script polls `GET /status` every 30 seconds — the runs answer is one
-small SQL read, and reviews finish over minutes, so the interval reads as live without costing anything — and each run
-that finished since the last check raises one browser notification: `repo#pr` as the title, the posted run's verdict or
-the failed run's short reason as the body, and the run's identity (repo, pull request, start stamp, and the outcome the
-row carries) as the tag, so a repeat poll never doubles — and a retry that settles the row with a different outcome
-carries a new identity and notifies: the failure's follow-up speaks when the retry posts. The tag is best-effort: WebKit
-parses it but does not coalesce by it (two WebKit bug reports track the no-op), so the dedupe that holds is the
-seen-state, which open tabs of the same origin share through localStorage on every poll. Skipped and aborted runs are
-not finishes — they posted nothing and did not fail — and notify nobody. Permission is requested through the page's own
-quiet control in the footer, because browsers require a user gesture for the prompt: default permission shows a small
-"enable notifications" button, granted shows a muted "notifications on", and a declined grant takes the control off the
-page — the page keeps working, silently, and the seen-state still advances, so a later grant starts with the next finish
-rather than replaying old ones. A cold start — the browser holding no seen-state at all — has no last check to diff
-against, and the first poll speaks the window it opens to anyway, at most the ten rows the runs window carries: an open
-or refresh of a granted tab says what finished since the last seen state (the operator's ruling, 2026-11-25), so a
-browser whose localStorage does not persist — private mode, cleared storage — is not silent forever while the control
-reads "notifications on". There is no branch to flip and no latch to arm: a boot window with no finishes in it has
-nothing to say, and the first finish observed afterwards speaks on its own poll. Consumption follows delivery: a
-successfully constructed notification marks the finish seen, and a construction the browser refuses leaves the finish
-unseen for the next poll to retry — one try per finish per poll, quiet and cheap — so a broken notification path eats
-nothing and still lands its finishes when the browser recovers; permission that is not granted is the different,
-deliberate silence, because with no delivery path a retry could use the window is consumed unread. The seen-state lives
-in the browser's localStorage under one key, pruned to the current runs window, with a boot-scoped in-memory twin beside
-it — a storage that refuses writes still holds each delivered finish to one notification per tab life, and the twin's
-delivered records are re-persisted on a later poll once the storage accepts writes again. And on a non-secure context —
-plain HTTP from a non-localhost host, the shape a reverse proxy in front of the loopback bind produces — Notification is
-undefined: the footer shows no control and no hint, and the page works exactly as before. Delivery is tab-open only by
-ruling: the browser's own Notification API, no service worker, no Web Push — closing the tab stops the notifications,
-which is the accepted shape, not a defect.
+While the page is open it polls `GET /page` every 30 seconds and each run that finished since the last check raises one
+browser notification: `repo#pr` as the title, the posted run's verdict or the failed run's short reason as the body, and
+the run's identity (repo, pull request, start stamp, and the outcome the row carries) as the id, so a repeat poll never
+doubles — and a retry that settles the row with a different outcome carries a new identity and notifies: the failure's
+follow-up speaks when the retry posts. The id is best-effort: WebKit parses it but does not coalesce by it (two WebKit
+bug reports track the no-op), so the dedupe that holds is the seen-state, which open tabs of the same origin share
+through localStorage on every poll. Skipped and aborted runs are not finishes — they posted nothing and did not fail —
+and notify nobody. Permission is requested through the page's own quiet control in the footer, because browsers require
+a user gesture for the prompt: default permission shows a small "enable notifications" button, granted shows a muted
+"notifications on", and a declined grant takes the control off the page — the page keeps working, silently, and the
+seen-state still advances, so a later grant starts with the next finish rather than replaying old ones. A cold start —
+the browser holding no seen-state at all — has no last check to diff against, and the first poll speaks the window it
+opens to anyway, at most the ten rows the runs window carries: an open or refresh of a granted tab says what finished
+since the last seen state (the operator's ruling, 2026-11-25), so a browser whose localStorage does not persist —
+private mode, cleared storage — is not silent forever while the control reads "notifications on". There is no branch to
+flip and no latch to arm: a boot window with no finishes in it has nothing to say, and the first finish observed
+afterwards speaks on its own poll. Consumption follows delivery: a successfully constructed notification marks the
+finish seen, and a construction the browser refuses leaves the finish unseen for the next poll to retry — one try per
+finish per poll, quiet and cheap — so a broken notification path eats nothing and still lands its finishes when the
+browser recovers; permission that is not granted is the different, deliberate silence, because with no delivery path a
+retry could use the window is consumed unread. The seen-state lives in the browser's localStorage under one key, pruned
+to the current runs window, with a boot-scoped in-memory twin beside it — a storage that refuses writes still holds each
+delivered finish to one notification per tab life, and the twin's delivered records are re-persisted on a later poll
+once the storage accepts writes again. And on a non-secure context — plain HTTP from a non-localhost host, the shape a
+reverse proxy in front of the loopback bind produces — Notification is undefined: the footer shows no control and no
+hint, and the page works exactly as before. Delivery is tab-open only by ruling: the browser's own Notification API, no
+service worker, no Web Push — closing the tab stops the notifications, which is the accepted shape, not a defect.
+
+The live rows' session logs refresh in place (PRJ-547's log UX): a running row's expanded log block renders full-width
+beneath its own row — dense preformatted text never wraps inside a column again — and while a block stands open the
+page's poll also fetches that session's transcript view from `GET /log/<session id>` and re-renders the block's body in
+place, on the same 30-second cadence. The block's pin control (a checkbox, rendered checked) chooses the scroll mode:
+pinned, each swap rides the tail — the newest turn is the read; unpinned, the reading line carries over so content
+appending below does not move it, and re-checking the pin jumps to the tail at once. Settled and swept sessions answer
+not found, and an open block keeps the state it rendered; a per-block epoch drops a stale overlapping answer, so two
+fetches can never land out of order. A failed run's transcript is frozen between settle and sweep — its block carries
+neither the refresh key nor the pin control, because its text never changes.
 
 The surface has no write endpoints of its own and carries no secret — /metrics exposes durations and counters, and the
 status surface redacts at every projection (below); the endpoint is open like `/metrics` and `/healthz`.

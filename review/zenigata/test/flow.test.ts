@@ -24,7 +24,8 @@ import {
   makeReviewRequested,
 } from "../src/adapters/forge-double.js";
 import { worktreeDirName } from "../src/review.js";
-import { MAX_BODY_BYTES, REVIEW_SLOTS } from "../src/server.js";
+import { MAX_BODY_BYTES } from "../src/http/intake.js";
+import { REVIEW_SLOTS } from "../src/pipeline.js";
 import type { SessionDriver } from "../src/contracts/session.js";
 import type { ForgeAdapter, ForgeEvent } from "../src/contracts/forge.js";
 import { MemoryFake } from "./memory-fake.js";

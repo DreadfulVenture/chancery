@@ -29,16 +29,16 @@ import {
 } from "../src/journal.js";
 import {
   composeTranscriptView,
-  REVIEW_SLOTS,
   SESSION_LOG_GLANCE_CAP,
   TOOL_INPUT_CAP,
   TOOL_OUTPUT_CAP,
   TRANSCRIPT_TURN_MARKER,
   TRANSCRIPT_VIEW_CAP,
-} from "../src/server.js";
+} from "../src/transcript.js";
+import { REVIEW_SLOTS } from "../src/pipeline.js";
 import { StatusDb, statusDbPath } from "../src/status-db.js";
-import { LiveSessions } from "../src/status.js";
-import type { StatusData } from "../src/ui.js";
+import { LiveSessions, type StatusData } from "../src/status.js";
+import type { PageData } from "../src/page.js";
 import {
   ADAPTER_TOKEN,
   EVENT_TOKEN,
@@ -82,6 +82,14 @@ const fetchStatus = async (harness: Harness): Promise<StatusData> => {
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toContain("application/json");
   return (await response.json()) as StatusData;
+};
+
+/** The page feed: the UI app's data source, /page's full data model. */
+const fetchPage = async (harness: Harness): Promise<PageData> => {
+  const response = await fetch(`${intakeUrl(harness)}/page`);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/json");
+  return (await response.json()) as PageData;
 };
 
 /** The rows the projection file holds, counted through plain SQL. */
@@ -269,11 +277,11 @@ describe("status surface", () => {
     ]);
     expect(body.droppedStarts.count).toBe(0);
 
-    // The page's NOW row names the run's age on its chip, from the
-    // ledger's started stamp — while /status's pinned session shape
-    // carries no started field at all.
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toMatch(/class="chip ok">running /);
+    // The page feed's NOW row carries the ledger's started stamp — the
+    // age the UI derives its running chip from — while /status's pinned
+    // session shape carries no started field at all.
+    const page = await fetchPage(h);
+    expect(page.sessions[0]?.startedAtMs).toEqual(expect.any(Number));
     const statusText = await (await fetch(`${intakeUrl(h)}/status`)).text();
     expect(statusText).not.toContain("startedAtMs");
 
@@ -342,11 +350,11 @@ describe("status surface", () => {
     await h.source.postToIntake(intakeUrl(h), EVENT_TOKEN, event);
     await waitFor(() => h.forge.parkedGets === 1);
 
-    // Parked in the intake stage, before the session exists: the log
-    // cell names the fact.
-    const before = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(before).toContain("no session yet");
-    expect(before).not.toContain("session log</summary>");
+    // Parked in the intake stage, before the session exists: the page
+    // feed's row carries no session id and no log.
+    const before = await fetchPage(h);
+    expect(before.sessions[0]?.sessionId).toBeUndefined();
+    expect(before.sessions[0]?.log).toBeUndefined();
 
     releaseGets();
     await waitFor(async () => {
@@ -355,18 +363,21 @@ describe("status surface", () => {
     });
 
     // The session exists now; its log is empty while the prompt is
-    // parked, and the cell says so instead of implying a log.
-    const during = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(during).toContain(
-      "the session stands, but has recorded nothing yet",
-    );
+    // parked — the found state with no text, which the UI renders as
+    // its "recorded nothing yet" note.
+    const during = await fetchPage(h);
+    expect(during.sessions[0]?.log).toMatchObject({
+      state: "found",
+      text: "",
+    });
 
     releasePrompt();
     await h.handle.awaitSettled(event.eventId);
-    // Settled: the live row is gone, so the cell rides the runs table's
-    // failed-row transcript path instead — a posted run carries none.
-    const after = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(after).toContain("Nothing running right now.");
+    // Settled: the live row is gone, so the failed-run transcript path
+    // would carry it — a posted run carries none.
+    const after = await fetchPage(h);
+    expect(after.sessions).toEqual([]);
+    expect(after.runs[0]?.transcript).toBeUndefined();
   });
 
   it("the live log cell renders the log through the failed rows' own bounded read", async () => {
@@ -394,10 +405,12 @@ describe("status surface", () => {
     });
 
     const started = Date.now();
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    const page = await fetchPage(h);
     expect(Date.now() - started).toBeLessThan(15_000);
     expect(aborted).toBe(true);
-    expect(page).toContain("the log could not be read right now");
+    // The bound turned the hung read into the unavailable state, which
+    // the UI renders as its "could not be read" note.
+    expect(page.sessions[0]?.log).toEqual({ state: "unavailable" });
 
     releasePrompt();
     await h.handle.awaitSettled(event.eventId);
@@ -442,14 +455,19 @@ describe("status surface", () => {
     expect(queued?.pr).toBe(events[events.length - 1].pr);
     expect(body.droppedStarts.count).toBe(0);
 
-    // The human page states parked versus running: the sessions in the
-    // pipeline read running (green) — each chip carrying the run's age
-    // from the ledger's started stamp — while the one queued behind the
-    // limiter reads parked and names what it is waiting for.
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toMatch(/class="chip ok">running /);
-    expect(page).toContain(`class="chip warn">parked</span>`);
-    expect(page).toContain("waiting for a free review slot");
+    // The page feed carries what the UI's parked/running chips derive
+    // from: the running rows hold their started stamps, the queued row
+    // has not left the queue and carries none.
+    const page = await fetchPage(h);
+    const pageQueued = page.sessions.find(
+      (session) => session.stage === "queued",
+    );
+    expect(pageQueued?.startedAtMs).toBeUndefined();
+    for (const session of page.sessions.filter(
+      (row) => row.stage !== "queued",
+    )) {
+      expect(session.startedAtMs).toEqual(expect.any(Number));
+    }
 
     releaseGets();
     await Promise.all(
@@ -522,9 +540,11 @@ describe("status surface", () => {
     expect(text).toContain("https://forge.invalid/x failed");
     expect(text).not.toContain("hunter2-clone");
     expect(text).not.toContain(EVENT_TOKEN);
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toContain("restart dropped");
-    expect(page).not.toContain("hunter2-clone");
+    const page = await fetchPage(h);
+    expect(page.droppedStarts.count).toBe(1);
+    // The page feed carries no credential either — the redaction ran at
+    // the projection, one source both feeds render from.
+    expect(JSON.stringify(page)).not.toContain("hunter2-clone");
   });
 
   it("redacts a credentialed adapter URL the configuration carried", async () => {
@@ -537,10 +557,10 @@ describe("status surface", () => {
     });
     const body = await fetchStatus(credentialed);
     expect(body.uptime.adapterUrl).toBe("https://forge.invalid/x");
-    const page = await (await fetch(`${intakeUrl(credentialed)}/`)).text();
-    expect(page).toContain("https://forge.invalid/x");
-    expect(page).not.toContain("hunter2-secret");
-    expect(page).not.toContain(EVENT_TOKEN);
+    const page = await fetchPage(credentialed);
+    expect(page.uptime.adapterUrl).toBe("https://forge.invalid/x");
+    expect(JSON.stringify(page)).not.toContain("hunter2-secret");
+    expect(JSON.stringify(page)).not.toContain(EVENT_TOKEN);
 
     const tokenInQuery = await harness({
       script: happyScript(),
@@ -638,13 +658,15 @@ describe("status surface", () => {
       env: { ZENIGATA_STATE_DIR: stateDir },
     });
 
-    // The runs table gains the wall column and renders the human form
-    // each run's stamps make.
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toContain("<th>wall time</th>");
-    expect(page).toContain(`class="muted">4h</span>`);
-    expect(page).toContain(`class="muted">5m 30s</span>`);
-    expect(page).toContain(`class="muted">&lt;1s</span>`);
+    // The page feed gains the wall times, in seconds, each run's stamps
+    // make; the UI renders the human forms from them. The projection's
+    // row order is its own rule — the three values are the pin.
+    const page = await fetchPage(h);
+    expect(
+      page.runs
+        .map((run) => run.wallSeconds)
+        .sort((a, b) => (a ?? 0) - (b ?? 0)),
+    ).toEqual([0, 330, 14400]);
 
     // The machine contract stays byte-shape pinned: no wall time on the wire.
     const body = await (await fetch(`${intakeUrl(h)}/status`)).text();
@@ -682,7 +704,7 @@ describe("status surface", () => {
     ).toBe(true);
   });
 
-  it("GET / serves the human page with no secrets, and /ui is retired", async () => {
+  it("GET / serves the UI-app placeholder with no secrets, and /ui is retired", async () => {
     const h = await harness({ script: happyScript() });
     const releaseGets = h.forge.parkGetPullRequests();
     const event = makeReviewRequested({ repo: REPO, pr: PR });
@@ -698,31 +720,39 @@ describe("status surface", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
     const body = await response.text();
-    expect(body).toContain("zenigata");
-    expect(body).toContain(`${REPO}#${PR}`);
-    expect(body).toContain("intake");
-    expect(body).toContain("restart dropped");
+    // The root names the UI app that renders the human page and the
+    // machine surface; it renders no run data itself.
+    expect(body).toContain("zenigata-ui");
+    expect(body).toContain("/status");
     expect(body).not.toContain(EVENT_TOKEN);
     expect(body).not.toContain(ADAPTER_TOKEN);
+    expect(body).not.toContain(REPO);
     const retired = await fetch(`${intakeUrl(h)}/ui`);
     expect(retired.status).toBe(404);
 
     releaseGets();
     await h.handle.awaitSettled(event.eventId);
-    // After the run settles, the runs table renders the outcome.
-    const done = await fetch(`${intakeUrl(h)}/`);
-    const rendered = await done.text();
-    expect(rendered).toContain("posted");
+    // The settled run's outcome rides /page for the UI to render.
+    const page = await fetchPage(h);
+    expect(page.runs[0]).toMatchObject({ outcome: "posted" });
   });
 
-  it("the health line answers the adapter's reachability, checked at render", async () => {
+  it("GET /page serves the empty boot's honest zeros", async () => {
+    const h = await harness({ script: happyScript() });
+    const page = await fetchPage(h);
+    expect(page.sessions).toEqual([]);
+    expect(page.runs).toEqual([]);
+    expect(page.droppedStarts).toEqual({ count: 0, starts: [] });
+    expect(page.renderedAt).toEqual(expect.any(String));
+    expect(page.uptime.listenPort).toBe(h.handle.port);
+  });
+
+  it("the page feed answers the adapter's reachability, checked at each read", async () => {
     // The default harness points the adapter at a host that cannot
-    // resolve: the human page reads unreachable while the JSON still
-    // carries only the redacted URL.
+    // resolve: the feed reads unreachable.
     const down = await harness({ script: happyScript() });
-    const downPage = await (await fetch(`${intakeUrl(down)}/`)).text();
-    expect(downPage).toContain("adapter unreachable");
-    expect(downPage).not.toContain("adapter reachable");
+    const downPage = await fetchPage(down);
+    expect(downPage.adapterReachable).toBe(false);
 
     // A local fake the test spins up itself answers on any path with any
     // status: the probe reads reachable, it asked for nothing sensitive,
@@ -742,9 +772,8 @@ describe("status surface", () => {
         script: happyScript(),
         env: { ZENIGATA_ADAPTER_URL: `http://127.0.0.1:${adapterPort}` },
       });
-      const page = await (await fetch(`${intakeUrl(up)}/`)).text();
-      expect(page).toContain("adapter reachable");
-      expect(page).not.toContain("adapter unreachable");
+      const page = await fetchPage(up);
+      expect(page.adapterReachable).toBe(true);
       expect(requests).toBe(1);
       expect(lastAuth).toBeUndefined();
     } finally {
@@ -767,63 +796,46 @@ describe("status surface", () => {
         env: { ZENIGATA_ADAPTER_URL: `http://127.0.0.1:${adapterPort}` },
       });
       const started = Date.now();
-      const response = await fetch(`${intakeUrl(h)}/`);
-      expect(response.status).toBe(200);
+      const page = await fetchPage(h);
       const waitedMs = Date.now() - started;
-      // Bounded, not hung: the 1500ms probe gives up, the page answers.
+      // Bounded, not hung: the 1500ms probe gives up, the feed answers.
       expect(waitedMs).toBeGreaterThanOrEqual(1400);
       expect(waitedMs).toBeLessThan(10_000);
-      const page = await response.text();
-      expect(page).toContain("adapter unreachable");
+      expect(page.adapterReachable).toBe(false);
     } finally {
       hanging.closeAllConnections();
       await new Promise((resolve) => hanging.close(resolve));
     }
   }, 15_000);
 
-  it("GET / renders the first screen for a human and carries no external asset", async () => {
+  it("GET /page serves the feed the UI renders its first screen from", async () => {
     const h = await harness({ script: happyScript() });
 
     // Honest empty states on the fresh boot, before any run.
-    const empty = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(empty).toContain("Nothing running right now.");
-    expect(empty).toContain("No runs yet.");
-    expect(empty).toContain("Every start the journal holds, settled.");
+    const empty = await fetchPage(h);
+    expect(empty.sessions).toEqual([]);
+    expect(empty.runs).toEqual([]);
+    expect(empty.log.length).toBeGreaterThan(0);
+    // The forge URL the PR links compose from, and the config echo, ride
+    // the feed.
+    expect(empty.forgeUrl).toBe("https://forge.invalid");
+    expect(empty.config.agent).toBe("zenigata-reviewer");
 
     await postReviewEvent(h);
 
-    const body = await (await fetch(`${intakeUrl(h)}/`)).text();
-    // The read the operator makes at 2am arrives in this order: health
-    // line, what is running, recent runs, dropped starts, the bot's own
-    // narration, config echo.
-    const positions = [
-      "up ",
-      "Running now",
-      "Recent review runs",
-      "restart dropped",
-      "Bot narration",
-      "Configuration",
-    ].map((marker) => body.indexOf(marker));
-    expect(positions).not.toContain(-1);
-    for (let n = 1; n < positions.length; n++) {
-      expect(positions[n]).toBeGreaterThan(positions[n - 1] ?? 0);
-    }
-    // The page depends on nothing outside this document: every link the
-    // head carries is the favicon's data URI, and the one script is
-    // inline — the browser notifications — with no src and no external
-    // asset of any kind.
-    expect(body.match(/<style>/g)).toHaveLength(1);
-    expect(body.match(/<script/gi)).toHaveLength(1);
-    for (const link of body.matchAll(/<link\b[^>]*>/gi)) {
-      expect(link[0]).toMatch('rel="icon"');
-      expect(link[0]).toMatch(/href="data:image\/svg\+xml,/);
-    }
-    expect(body).not.toContain("src=");
+    const page = await fetchPage(h);
+    // The settled run, its wall time, and the narration tail are all on
+    // the feed; the UI renders them in its reading order.
+    expect(page.runs).toHaveLength(1);
+    expect(page.runs[0]).toMatchObject({ outcome: "posted" });
+    expect(
+      page.log.some((line) => line.includes("intake listening on port")),
+    ).toBe(true);
   });
 });
 
-describe("the page's forge links", () => {
-  it("a live session's PR cell links into the forge and offers the re-request", async () => {
+describe("the page feed's forge inputs", () => {
+  it("the forge URL rides the feed; the UI composes the PR links from it", async () => {
     const h = await harness({ script: happyScript() });
     const releaseGets = h.forge.parkGetPullRequests();
     const event = makeReviewRequested({ repo: REPO, pr: PR });
@@ -835,46 +847,17 @@ describe("the page's forge links", () => {
     expect(posted.status).toBe(202);
     await waitFor(() => h.forge.parkedGets === 1);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(
-      page.includes(`<a href="https://forge.invalid/${REPO}/pulls/${PR}">`),
-    ).toBe(true);
-    // The affordance rides the live cell; one session, one affordance.
-    expect((page.match(/request review again/g) ?? []).length).toBe(1);
+    const page = await fetchPage(h);
+    expect(page.forgeUrl).toBe("https://forge.invalid");
+    expect(page.sessions[0]).toMatchObject({ repo: REPO, pr: PR });
 
     releaseGets();
     await h.handle.awaitSettled(event.eventId);
-    // A settled run links too, without the affordance.
-    const done = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(done).toContain(`href="https://forge.invalid/${REPO}/pulls/${PR}"`);
-    expect(done).not.toContain("request review again");
-  });
-
-  it("a dropped start's row links into the forge and offers the re-request", async () => {
-    const stateDir = await mkdtemp(join(tmpdir(), "zenigata-status-"));
-    await appendJournal(journalPath(stateDir), {
-      ts: "2026-11-16T09:00:00.000Z",
-      type: "review-start",
-      eventId: "evt-dropped-link",
-      repo: REPO,
-      pr: 9,
-      commentId: "c-9",
-      eventKind: "review_requested",
-    });
-    const h = await harness({
-      script: happyScript(),
-      env: { ZENIGATA_STATE_DIR: stateDir },
-    });
-
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toContain(
-      `<a href="https://forge.invalid/${REPO}/pulls/9">${REPO}#9</a>`,
-    );
-    expect(page).toContain(">request review again</a>");
-    // The copy names the control the rows now carry.
-    expect(page).toContain(
-      "A re-request re-runs them free: request review again on any row.",
-    );
+    // The settled run links from the same feed, and the dropped-start
+    // rows ride it too.
+    const done = await fetchPage(h);
+    expect(done.forgeUrl).toBe("https://forge.invalid");
+    expect(done.runs[0]).toMatchObject({ repo: REPO, pr: PR });
   });
 
   it("the machine contract gains nothing: no started stamp, no forge URL, no PR links, no narration on /status", async () => {
@@ -900,44 +883,48 @@ describe("the page's forge links", () => {
 // The page's narration tail
 // ---------------------------------------------------------------------------
 
-describe("the page's narration tail", () => {
-  it("renders the bot's narration since boot, with the memory-only store named", async () => {
+describe("the page feed's narration tail", () => {
+  it("carries the bot's narration since boot, with the memory-only store named", async () => {
     const h = await harness({ script: happyScript() });
     await postReviewEvent(h);
     // A skipped run narrates a line of its own; a clean posted run
     // narrates nothing beyond the boot lines.
     await postReviewEvent(h, { requesterLogin: "stranger" });
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    const page = await fetchPage(h);
     // The boot's own narration is in the tail, exactly as journald
     // collected it — prefix and all.
-    expect(page).toContain(
-      `zenigata: intake listening on port ${h.handle.port}`,
-    );
+    expect(
+      page.log.some((line) =>
+        line.includes(`zenigata: intake listening on port ${h.handle.port}`),
+      ),
+    ).toBe(true);
     // The skip's narration landed behind it.
-    expect(page).toContain(
-      `zenigata: skipped ${REPO}#${PR}: requester stranger is not in the allowed logins`,
-    );
-    // The note names the store's contract: in memory since this boot,
-    // written nowhere, emptied by a restart. No log file is implied.
-    expect(page).toContain("held in memory since this boot, written nowhere");
-    expect(page).toContain("a restart empties it");
+    expect(
+      page.log.some((line) =>
+        line.includes(
+          `zenigata: skipped ${REPO}#${PR}: requester stranger is not in the allowed logins`,
+        ),
+      ),
+    ).toBe(true);
     // The narration is a leak surface like any other: no token rides it.
-    expect(page).not.toContain(EVENT_TOKEN);
-    expect(page).not.toContain(ADAPTER_TOKEN);
+    expect(JSON.stringify(page)).not.toContain(EVENT_TOKEN);
+    expect(JSON.stringify(page)).not.toContain(ADAPTER_TOKEN);
   });
 
   it("the reviewer session's turns stay out of the ring — the transcript view reads them through the driver instead", async () => {
     const h = await harness({ script: happyScript() });
     await postReviewEvent(h);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
+    const page = await fetchPage(h);
     // The scripted session's own outputs ride the session driver, never
     // the logger: the ring holds narration alone. A posted run's
-    // session reaches the page by no route — the transcript view reads
+    // session reaches the feed by no route — the transcript view reads
     // failed runs only.
-    expect(page).not.toContain("names nothing; say what was added");
-    expect(page).not.toContain("The case: two lines land");
+    expect(JSON.stringify(page)).not.toContain(
+      "names nothing; say what was added",
+    );
+    expect(JSON.stringify(page)).not.toContain("The case: two lines land");
   });
 });
 
@@ -953,17 +940,18 @@ describe("the failed run's transcript view", () => {
     const h = await harness({ script: failingScript() });
     await postReviewEvent(h);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    // The failure cell carries the collapsible transcript, oldest turn
-    // first: the pipeline's own prompt, then the scripted reply.
-    expect(page).toContain("reviewer session log");
-    expect(page).toContain("user: ");
-    expect(page).toContain("reviewer: not json");
-    // The posted runs' cells stay exactly as they were.
-    expect((page.match(/reviewer session log/g) ?? []).length).toBe(1);
+    const page = await fetchPage(h);
+    // The failed run's transcript view, oldest turn first: the
+    // pipeline's own prompt, then the scripted reply.
+    const transcript = page.runs[0]?.transcript;
+    expect(transcript?.state).toBe("found");
+    expect(transcript?.text).toContain("user: ");
+    expect(transcript?.text).toContain("reviewer: not json");
+    // The posted runs' rows stay transcript-free.
+    expect(page.runs).toHaveLength(1);
   });
 
-  it("a swept session degrades: the note names the fact without the sweeper", async () => {
+  it("a swept session degrades: the view names the fact without the sweeper", async () => {
     const h = await harness({
       script: failingScript(),
       // The sweep's window compare on a clock past the window: one
@@ -972,21 +960,18 @@ describe("the failed run's transcript view", () => {
     });
     await postReviewEvent(h);
 
-    // The first view composes the standing session's transcript and
+    // The first read composes the standing session's transcript and
     // caches it; the sweep's disposal must invalidate that entry, or
-    // the second view would render the stale transcript instead of the
-    // gone note.
-    const before = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(before).toContain("reviewer session log");
+    // the second read would serve the stale transcript instead of the
+    // gone state.
+    const before = await fetchPage(h);
+    expect(before.runs[0]?.transcript?.state).toBe("found");
 
     await h.handle.sweep();
     expect(h.sessions.disposed).toHaveLength(1);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toContain(
-      "the session is gone — the transcript is not available",
-    );
-    expect(page).not.toContain("reviewer session log");
+    const page = await fetchPage(h);
+    expect(page.runs[0]?.transcript?.state).toBe("swept");
   });
 
   it("a window-0 run tears its session down at settle and offers no transcript", async () => {
@@ -996,12 +981,11 @@ describe("the failed run's transcript view", () => {
     });
     await postReviewEvent(h);
     // The immediate teardown ran, and the record carried no session id,
-    // so the row offers no transcript block at all.
+    // so the row offers no transcript view at all.
     expect(h.sessions.disposed).toHaveLength(1);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).not.toContain("reviewer session log");
-    expect(page).not.toContain("transcript was swept");
+    const page = await fetchPage(h);
+    expect(page.runs[0]?.transcript).toBeUndefined();
   });
 
   it("a cap cut can never strand a credential: the newest turn is redacted before it is capped", async () => {
@@ -1024,31 +1008,24 @@ describe("the failed run's transcript view", () => {
     });
     await postReviewEvent(h);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    // The transcript's own rendered line: extract it from the page —
-    // the failed drafts panel beside it renders the raw model output by
-    // PRJ-423's settled design, so the no-fragment assertions scope to
-    // the transcript's pre block alone.
-    const transcriptBody =
-      /<pre class="transcript-body">([\s\S]*?)<\/pre>/.exec(page)?.[1] ?? "";
-    expect(transcriptBody).not.toBe("");
+    const page = await fetchPage(h);
     // The newest turn rendered, capped and marked: the boundary rule
     // kept it.
-    expect(transcriptBody).toContain("reviewer: ");
-    expect(transcriptBody).toContain(TRANSCRIPT_TURN_MARKER);
+    const text = page.runs[0]?.transcript?.text ?? "";
+    expect(text).toContain("reviewer: ");
+    expect(text).toContain(TRANSCRIPT_TURN_MARKER);
     // And no fragment of the raw credential rode it: the redaction ran
     // on the full text before the cut, so the cut landed in
     // already-redacted text.
-    expect(transcriptBody).not.toContain("https://user");
-    expect(transcriptBody).not.toContain("secretpw");
-    expect(page).not.toContain("recorded no turns");
+    expect(text).not.toContain("https://user");
+    expect(text).not.toContain("secretpw");
   });
 
-  it("a newest turn capped mid-codepoint keeps the failure cell's transcript", async () => {
+  it("a newest turn capped mid-codepoint keeps the failed run's transcript", async () => {
     // The unfixed cap cut mid-codepoint and the decoder paid the dangle
     // back as a 3-byte replacement character: the rendered line
     // exceeded the view cap by a byte, the composer dropped the newest
-    // turn whole, and the cell reported a session that "recorded no
+    // turn whole, and the view reported a session that "recorded no
     // turns" — one whose newest turn was merely huge. The boundary
     // trim keeps the turn in place.
     const room =
@@ -1060,18 +1037,17 @@ describe("the failed run's transcript view", () => {
     });
     await postReviewEvent(h);
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).not.toContain("recorded no turns");
-    const transcriptBody =
-      /<pre class="transcript-body">([\s\S]*?)<\/pre>/.exec(page)?.[1] ?? "";
-    expect(transcriptBody).toContain(TRANSCRIPT_TURN_MARKER);
-    expect(transcriptBody).not.toContain("\uFFFD");
+    const page = await fetchPage(h);
+    const transcript = page.runs[0]?.transcript;
+    expect(transcript?.state).toBe("found");
+    expect(transcript?.text).toContain(TRANSCRIPT_TURN_MARKER);
+    expect(transcript?.text).not.toContain("\uFFFD");
   });
 
-  it("a second page view reuses the composed transcript: one driver read across the views", async () => {
+  it("a second page read reuses the composed transcript: one driver read across the reads", async () => {
     // The composed view is cached per session until the sweep
     // invalidates it: a failed run's session is frozen between settle
-    // and sweep, so the second render serves the entry instead of
+    // and sweep, so the second read serves the entry instead of
     // re-reading the driver.
     let reads = 0;
     const counting = (inner: SessionDriver): SessionDriver => ({
@@ -1091,12 +1067,12 @@ describe("the failed run's transcript view", () => {
     });
     await postReviewEvent(h);
 
-    const first = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(first).toContain("reviewer session log");
+    const first = await fetchPage(h);
+    expect(first.runs[0]?.transcript?.state).toBe("found");
     expect(reads).toBe(1);
 
-    const second = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(second).toContain("reviewer session log");
+    const second = await fetchPage(h);
+    expect(second.runs[0]?.transcript?.state).toBe("found");
     expect(reads).toBe(1);
   });
 
@@ -1111,13 +1087,13 @@ describe("the failed run's transcript view", () => {
     await postReviewEvent(h);
 
     const started = Date.now();
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    // The page answers inside the bound's neighborhood, not hung.
+    const page = await fetchPage(h);
+    // The feed answers inside the bound's neighborhood, not hung.
     expect(Date.now() - started).toBeLessThan(10_000);
     // The read itself observed the abort: the contract's signal reached
     // the driver, so the bound cancelled the in-flight request.
     expect(aborted).toBe(true);
-    expect(page).toContain("the transcript could not be read right now");
+    expect(page.runs[0]?.transcript?.state).toBe("unavailable");
   });
 });
 
@@ -2546,7 +2522,7 @@ describe("the failed report on the page", () => {
     ...over,
   });
 
-  it("a seeded failed run renders each draft's stage, attempt, refusal, and escaped reply; a clean run's rows render as before; /status gains nothing", async () => {
+  it("a seeded failed run carries each draft's stage, attempt, refusal, and reply; a clean run carries none; /status gains nothing", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "zenigata-status-"));
     await appendJournal(journalPath(stateDir), {
       ts: "2026-11-16T09:55:00.000Z",
@@ -2576,7 +2552,7 @@ describe("the failed report on the page", () => {
         ],
       }),
     );
-    // One clean posted run beside the failed one: its row renders as before.
+    // One clean posted run beside the failed one: its row stays draft-free.
     await appendJournal(journalPath(stateDir), settledRecord(1, "APPROVE"));
 
     const h = await harness({
@@ -2584,31 +2560,38 @@ describe("the failed report on the page", () => {
       env: { ZENIGATA_STATE_DIR: stateDir },
     });
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    // The failure message, and beneath it the failed report blocks.
-    expect(page).toContain("context draft failed validation twice");
-    expect(page).toContain('<span class="chip mute">context</span>');
-    expect(page).toContain('<span class="chip mute">humanize</span>');
-    expect(page).toContain("attempt 0");
-    expect(page).toContain("attempt 1");
-    // The parse refusal renders, escaped.
-    expect(page).toContain("unexpected token &lt;end&gt; at position 12");
-    // The draft is model output, carried and stored as-is: markup renders
-    // as text — never executes — and the draft is not redacted, unlike
-    // the failure message beside it (the raw reply is what the 2am
-    // reader came for).
-    expect(page).toContain(
-      "&lt;script&gt;alert(&quot;draft&quot;)&lt;/script&gt;",
-    );
-    expect(page).not.toContain("<script>alert");
-    expect(page).toContain("https://user:hunter2-draft@forge.invalid/x");
-    // Exactly the failed run's two drafts render; the clean run
-    // contributed none.
-    expect((page.match(/class="draft"/g) ?? []).length).toBe(2);
-    // The clean run's row unchanged: its verdict chip renders as it did
-    // before this view existed.
-    expect(page).toContain('<span class="chip ok">APPROVE</span>');
-
+    const page = await fetchPage(h);
+    // The failure message rides the row; the failed run is the one with
+    // drafts (the clean run beside it stays draft-free).
+    const failed = page.runs.find((run) => run.failedDrafts !== undefined);
+    expect(failed?.failure).toEqual({
+      stage: "context",
+      message: "context draft failed validation twice",
+    });
+    // The drafts carry through exactly as journaled: stage, attempt,
+    // the parse refusal, and the reply verbatim — model output, carried
+    // and stored as-is, never redacted (the raw reply is what the 2am
+    // reader came for). Rendering escapes it; the feed does not touch it.
+    expect(failed?.failedDrafts).toEqual([
+      {
+        stage: "context",
+        attempt: 0,
+        reply: '{"verdict":',
+        parseError: "unexpected token <end> at position 12",
+        truncated: false,
+      },
+      {
+        stage: "humanize",
+        attempt: 1,
+        reply:
+          '<script>alert("draft")</script> https://user:hunter2-draft@forge.invalid/x',
+        truncated: false,
+      },
+    ]);
+    // Exactly the failed run's two drafts; the clean run contributed none.
+    expect(page.runs).toHaveLength(2);
+    const clean = page.runs.find((run) => run.verdict === "APPROVE");
+    expect(clean?.failedDrafts).toBeUndefined();
     // The machine contract stays byte-shape pinned: no drafts on the wire.
     const wire = await (await fetch(`${intakeUrl(h)}/status`)).text();
     expect(wire).not.toContain("failedDrafts");
@@ -2616,7 +2599,7 @@ describe("the failed report on the page", () => {
     expect(wire).not.toContain("draft-refusal");
   });
 
-  it("a truncated draft renders the capped text with the marker labeled, and an uncapped one claims no truncation", async () => {
+  it("a truncated draft carries the capped text with its marker, and the flag says so", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "zenigata-status-"));
     await appendJournal(
       journalPath(stateDir),
@@ -2636,13 +2619,15 @@ describe("the failed report on the page", () => {
       env: { ZENIGATA_STATE_DIR: stateDir },
     });
 
-    const page = await (await fetch(`${intakeUrl(h)}/`)).text();
-    expect(page).toContain('<span class="chip warn">truncated</span>');
+    const page = await fetchPage(h);
+    const drafts = page.runs[0]?.failedDrafts ?? [];
     // The cap and its marker carry through unchanged: the reply's own
-    // tail sits against the marker, nothing lost between.
-    expect(page.includes("z".repeat(64) + FAILED_DRAFT_TRUNCATION_MARKER)).toBe(
+    // tail sits against the marker, nothing lost between, and the flag
+    // names the cut for the UI to label.
+    expect(drafts[0]?.truncated).toBe(true);
+    expect(drafts[0]?.reply.endsWith(FAILED_DRAFT_TRUNCATION_MARKER)).toBe(
       true,
     );
-    expect((page.match(/class="chip warn">truncated/g) ?? []).length).toBe(1);
+    expect(drafts[1]?.truncated).toBe(false);
   });
 });

@@ -23,6 +23,8 @@ jobs:
             test:
               - 'memory/**'
               - 'review/forgejo-adapter/**'
+              - 'review/zenigata/**'
+              - 'review/zenigata-ui/**'
               - 'watch/**'
               - 'wake/**'
               - 'coordinate/**'

@@ -3,7 +3,7 @@ SHELL := bash
 MAKEFLAGS += --warn-undefined-variables --no-builtin-rules
 
 .PHONY: test
-test: test-memory test-plugin test-watcher test-director test-reminders test-oc-wake ## Run all tests
+test: test-memory test-plugin test-watcher test-director test-reminders test-oc-wake test-zenigata test-zenigata-ui ## Run all tests
 
 .PHONY: test-memory
 test-memory: ## Run hermetic memory-store tests
@@ -29,6 +29,16 @@ test-reminders: ## Run the writs reminder plugin tests
 .PHONY: test-oc-wake
 test-oc-wake: ## Run the oc-wake CLI tests
 	@node --test wake/oc-wake/tests/*.test.ts
+
+.PHONY: test-zenigata
+test-zenigata: ## Run the zenigata bot's vitest suite
+	@npm ci --prefix review/zenigata --no-audit --prefer-offline
+	@npm test --prefix review/zenigata
+
+.PHONY: test-zenigata-ui
+test-zenigata-ui: ## Run the status UI's vitest suite
+	@npm ci --prefix review/zenigata-ui --no-audit --prefer-offline
+	@npm test --prefix review/zenigata-ui
 
 .PHONY: test-runtime-compat
 test-runtime-compat: ## Run the zenigata runtime compat check against the packaged serve (builds the runtime package with nix)
