@@ -940,6 +940,15 @@ const PARTIAL_LINE = (sessionID: string): string =>
 // the first claimant's row stands and a later activation for the same
 // terminal event never reaches a store call.
 const REPORT_PREFIX = "report/";
+
+// The row key one terminal event's report is stored under. The name is
+// shared by storeReport's write and the durable dedupe's check (PRJ-345),
+// so the two can never drift apart.
+const reportRowKey = (
+  director: string,
+  worker: string,
+  eventID: string,
+): string => `${REPORT_PREFIX}${director}/${worker}/${eventID}`;
 const KINDS: Record<string, string> = {
   report: "Worker turn report",
   failed: "Worker turn NOT COMPLETED (turn-not-completed)",
@@ -1062,7 +1071,9 @@ async function storeReport(
     read: false,
   };
   await ctx.storage.set(
-    `${REPORT_PREFIX}${director}/${worker}/${eventID || `noid-${row.created}-${Math.random().toString(36).slice(2, 8)}`}`,
+    eventID
+      ? reportRowKey(director, worker, eventID)
+      : `${REPORT_PREFIX}${director}/${worker}/noid-${row.created}-${Math.random().toString(36).slice(2, 8)}`,
     row,
   );
   try {
@@ -2017,6 +2028,35 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
       debug("report.duplicate", { session: sessionID, key });
       return;
     }
+    // PRJ-345: the claim set lives in the process, so a replayed terminal
+    // reaching a fresh activation — a host restart the settled turn
+    // outlived, a pump re-subscribed against a replaying feed — passes the
+    // claim and would re-store the row (flipping it unread) and wake the
+    // director again for a turn it already holds. The stored report row is
+    // the durable half of the same dedupe: one row per terminal event
+    // under the worker session plus the event id answers "was this turn
+    // delivered before" across restarts. A stored row means the report is
+    // already filed; the claim stays held — releasing it would only send a
+    // sibling activation through the same check — and the replay drops
+    // silently.
+    if (event.id) {
+      let delivered: unknown;
+      try {
+        delivered = await ctx.storage.get(
+          reportRowKey(entry.director, sessionID, event.id),
+        );
+      } catch (error) {
+        // An unreadable ledger is not a refusal: the report delivers, and
+        // the store below says its own failure if the kv is truly down.
+        console.error(
+          `[director] delivered-row read for ${sessionID} failed (delivery proceeds): ${error}`,
+        );
+      }
+      if (delivered !== undefined) {
+        debug("report.duplicate", { session: sessionID, eventID: event.id });
+        return;
+      }
+    }
     const text = blocks
       .map((block) => block.text)
       .join("\n\n")
@@ -2106,7 +2146,7 @@ const setup = async (ctx: HostContext): Promise<() => void> => {
 
   const dispatchTool: ToolDefinition = {
     name: "director_dispatch",
-    description: `Dispatch a worker session: create a new session in \`directory\` running \`agent\` (default "build"), stamp this session as its coordinator, deliver \`brief\` as a waking prompt, pinning \`model\` ("provider/model") to the session first when given, and return immediately with the session id. The worker also gets an unattended permission policy at creation (every action allowed for that session) so its tool calls never wait on a permission ask no headless session could answer; config-level deny rules are overridden for the worker too. Never spawns a subprocess and never streams stdout; each turn end files a report for this session and wakes it with a fixed notice naming the worker session and the unread count — call report_read to read the bodies. Worker text never rides the notice; a long body is cut to its head — to its tail when the text carries no STATUS line — with its last STATUS line, any BLOCKED paragraph, and a pointer to the full text kept. One stored report and at most one notice per turn end (none if the send fails): overlapping plugin activations that see the same turn end are deduped by its event id. A subagent's turns are part of its parent's and never report on their own. A turn interrupted with no recorded reason (a host shutdown) files an interrupted report and wakes you the same way: the host may resume that turn after a restart, and if resumed it reports when it ends. A turn whose final step ended with no text and no tool call — a provider cut mid-execution — files as a truncated report with the same wake. A worker that stays busy across a restart may never report, so check its session (director_worker_status) before re-dispatching or steering it. When \`base\` is given, the target worktree is validated before anything is created: a directory that is not a readable git worktree, a detached HEAD, or a HEAD not exactly at that commit refuses the dispatch at the call with the mismatch named, and the result carries the worktree it validated (path, branch, head, base).`,
+    description: `Dispatch a worker session: create a new session in \`directory\` running \`agent\` (default "build"), stamp this session as its coordinator, deliver \`brief\` as a waking prompt, pinning \`model\` ("provider/model") to the session first when given, and return immediately with the session id. The worker also gets an unattended permission policy at creation (every action allowed for that session) so its tool calls never wait on a permission ask no headless session could answer; config-level deny rules are overridden for the worker too. Never spawns a subprocess and never streams stdout; each turn end files a report for this session and wakes it with a fixed notice naming the worker session and the unread count — call report_read to read the bodies. Worker text never rides the notice; a long body is cut to its head — to its tail when the text carries no STATUS line — with its last STATUS line, any BLOCKED paragraph, and a pointer to the full text kept. One stored report and at most one notice per turn end (none if the send fails): overlapping plugin activations that see the same turn end are deduped by its event id — in-process by the delivery claim, across restarts by the stored report row, so a replayed terminal event delivers nothing new. A subagent's turns are part of its parent's and never report on their own. A turn interrupted with no recorded reason (a host shutdown) files an interrupted report and wakes you the same way: the host may resume that turn after a restart, and if resumed it reports when it ends. A turn whose final step ended with no text and no tool call — a provider cut mid-execution — files as a truncated report with the same wake. A worker that stays busy across a restart may never report, so check its session (director_worker_status) before re-dispatching or steering it. When \`base\` is given, the target worktree is validated before anything is created: a directory that is not a readable git worktree, a detached HEAD, or a HEAD not exactly at that commit refuses the dispatch at the call with the mismatch named, and the result carries the worktree it validated (path, branch, head, base).`,
     input: dispatchSchema,
     output: REPLY_OUTPUT,
     execute: async (raw, context) => {

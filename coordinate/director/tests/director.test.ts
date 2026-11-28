@@ -1079,6 +1079,121 @@ test("a claimed terminal event stays claimed for a fresh activation in the same 
   }
 });
 
+test("a settled turn's terminal replayed to a fresh activation enqueues nothing", async () => {
+  // One host, two activations across a restart: the fresh claim set
+  // cannot see the first delivery, the stored report row can.
+  const host = fakeHost();
+  const before = fakeContext([], { host });
+  const beforeCleanup = await plugin.setup(before.ctx);
+  let worker = "";
+  let terminal = "";
+  try {
+    const dispatched = await dispatchWorker(before, {
+      directory: "/tmp/worktree-a",
+      brief: "do the slice work",
+    });
+    worker = dispatched.sessionID;
+    await before.emit("session.text.ended", {
+      sessionID: worker,
+      text: "the slice landed",
+    });
+    terminal = await before.emit("session.execution.succeeded", {
+      sessionID: worker,
+    });
+    await waitFor(() => host.mails.length === 1);
+  } finally {
+    await beforeCleanup?.();
+  }
+
+  // The report is read between the activations, so the replay must not
+  // only stay silent but leave the read row untouched.
+  const reader = fakeContext([], { host });
+  const readerCleanup = await plugin.setup(reader.ctx);
+  try {
+    await readReports(reader, "ses-director");
+  } finally {
+    await readerCleanup?.();
+  }
+  const rowsBefore = storedRows(host);
+
+  // The restart lost the process's claim set: what the durable row knows,
+  // the claims no longer do.
+  claimsHeld().delete(`${worker}:${terminal}`);
+
+  const after = fakeContext([], { host });
+  const afterCleanup = await plugin.setup(after.ctx);
+  try {
+    // The same turn replayed — started, the text block, the same terminal
+    // event id. A claim set that survived the restart would have dropped
+    // this; the fresh one cannot, and the durable row does.
+    await host.emit("session.execution.started", { sessionID: worker });
+    await host.emit("session.text.ended", {
+      sessionID: worker,
+      text: "the slice landed",
+    });
+    await host.emit(
+      "session.execution.succeeded",
+      { sessionID: worker },
+      terminal,
+    );
+    await settleOnce();
+    await settleOnce();
+    assert.equal(host.mails.length, 1);
+    assert.deepEqual(storedRows(host), rowsBefore);
+    assert.ok(claimsHeld().has(`${worker}:${terminal}`));
+
+    // A genuinely new turn still delivers: the dedupe is per terminal
+    // event, never a blanket silence on the worker.
+    await host.emit("session.execution.started", { sessionID: worker });
+    await host.emit("session.text.ended", {
+      sessionID: worker,
+      text: "second turn",
+    });
+    await host.emit("session.execution.succeeded", { sessionID: worker });
+    await waitFor(() => host.mails.length === 2);
+    const pulled = await readReports(after, "ses-director");
+    assert.equal(pulled.returned, 1);
+    assert.ok(pulled.reports[0].body.includes("second turn"));
+  } finally {
+    await afterCleanup?.();
+  }
+});
+
+test("a delivered-row read that fails does not hold the report: the delivery proceeds", async () => {
+  // The durable dedupe reads the row before delivering; a read that
+  // cannot answer must not turn into a lost report. The failure is said,
+  // the turn delivers, and the store below commits the row it can.
+  const host = fakeHost();
+  const fixture = fakeContext([], { host });
+  const realGet = fixture.ctx.storage.get.bind(fixture.ctx.storage);
+  fixture.ctx.storage.get = async (key: string) => {
+    if (key.startsWith("report/")) throw new Error("kv read failed");
+    return realGet(key);
+  };
+  await captureErrorLogs(async () => {
+    const cleanup = await plugin.setup(fixture.ctx);
+    try {
+      const dispatched = await dispatchWorker(fixture, {
+        directory: "/tmp/worktree-a",
+        brief: "do the slice work",
+      });
+      await fixture.emit("session.text.ended", {
+        sessionID: dispatched.sessionID,
+        text: "the slice landed",
+      });
+      await fixture.emit("session.execution.succeeded", {
+        sessionID: dispatched.sessionID,
+      });
+      await waitFor(() => fixture.mails.length === 1);
+      assert.equal(storedRows(host).length, 1);
+      const pulled = await readReports(fixture, "ses-director");
+      assert.ok(pulled.reports[0].body.includes("the slice landed"));
+    } finally {
+      await cleanup?.();
+    }
+  });
+});
+
 test("delivery claims are pruned after a day", async () => {
   const day = 24 * 60 * 60 * 1000;
   const realNow = Date.now;
