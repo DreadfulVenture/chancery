@@ -16,6 +16,16 @@ Tickets should be worked in the following order:
 3. backlog: If all tickets in started/unstarted are complete or stalled on operator action, you should start pulling
    backlog tickets.
 
+## Filter each call to the tier's state type
+
+Every `list_issues` call carries the `state` filter set to the tier being queried: `started` for tier 1, `unstarted` for
+tier 2, `backlog` for tier 3. Without the filter the call returns tickets in every state, completed and canceled
+included.
+
+Completed and canceled tickets are never part of queue selection. If a result contains either type, the state filter was
+not applied: fix the call, do not filter the result in your head. Looking up a completed or canceled ticket is fine when
+the operator asks about its state; that is never a way to select work.
+
 ## Run each tier through the shared setup
 
 Every tier runs the same pipeline:
@@ -34,11 +44,6 @@ Every tier runs the same pipeline:
 
 Pick from the highest tier that has work, flowing over to the next tier. You should aim to run 3 to 5 tickets in
 parallel when possible.
-
-## Note
-
-Filter out canceled and completed for selecting work by using the states above. You may use these states check the
-status of completed/canceled tickets if needed, but these are not relevant to selecting your next task.
 
 ## Never invent or truncate identifiers
 
