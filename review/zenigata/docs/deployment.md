@@ -278,13 +278,14 @@ ships no file gets the launcher's package-layout default. The deployment's file 
 gateway's virtual-key attribution, the forge MCP server the session posts through with the reviewer's forge-tool rows
 named for it, and the plugin grants for the plugins that deployment wires — the credential-bearing surfaces PRJ-501
 keeps deployment-injected. The launcher composes the PATH the pair runs under: the runtime's own node and git, appended
-after whatever PATH the caller sets (PRJ-539) — the review flow runs the tests and builds the change calls for, and
-those are node and git programs a minimal unit PATH leaves dead. The spawn layer itself — which shell the session's
-shell tool runs through at all — is the neutral config's `shell` key (`/bin/sh`): the serve inherits the service
-account's login shell as `$SHELL`, and a deployment whose service account's shell is nologin dies at spawn, below PATH,
-on every shell call; the config names the shell instead, and the deployment's own `shell` key beats it. The reviewer's
-skill grant covers everything the layout ships — the prompt names `review-pr`, whose flow carries `humanizer` (which
-carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
+after whatever PATH the caller sets (PRJ-539) — the reviewer's own runs are node and git work (behavior probes against a
+running piece, the checkout work around the diff) that a minimal unit PATH leaves dead, while the repo's test suites and
+builds run in CI, whose results the reviewer reads instead of running them itself. The spawn layer itself — which shell
+the session's shell tool runs through at all — is the neutral config's `shell` key (`/bin/sh`): the serve inherits the
+service account's login shell as `$SHELL`, and a deployment whose service account's shell is nologin dies at spawn,
+below PATH, on every shell call; the config names the shell instead, and the deployment's own `shell` key beats it. The
+reviewer's skill grant covers everything the layout ships — the prompt names `review-pr`, whose flow carries `humanizer`
+(which carries the writing source beside its SKILL.md), and the session reaches the rest as its work demands.
 
 The flake's `.#zenigata` app runs the package's launcher, and that invocation is the whole story between nothing and a
 reviewable stack: source the env file (`set -a; . ./zenigata.env; set +a`) and run it. The launcher starts the serve on
