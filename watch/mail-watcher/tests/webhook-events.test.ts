@@ -34,7 +34,7 @@ const runPayload = (over: Record<string, unknown> = {}) => {
       head_sha: "sha-7",
       html_url: "https://forge.example/acme/widgets/actions/runs/999",
       run_number: 12,
-      ...((workflow_run as object) ?? {}),
+      ...(workflow_run as object),
     },
     ...rest,
   };
@@ -51,7 +51,7 @@ const reviewPayload = (over: Record<string, unknown> = {}) => {
       state: "APPROVED",
       user: { login: "fresh-reviewer" },
       html_url: "https://forge.example/acme/widgets/pulls/7#review-42",
-      ...((review as object) ?? {}),
+      ...(review as object),
     },
     ...rest,
   };
@@ -69,7 +69,7 @@ const prPayload = (over: Record<string, unknown> = {}) => {
       merged_at: "2026-11-26T10:00:00Z",
       closed_at: "2026-11-26T10:00:00Z",
       updated_at: "2026-11-26T10:00:01Z",
-      ...((pull_request as object) ?? {}),
+      ...(pull_request as object),
     },
     ...rest,
   };

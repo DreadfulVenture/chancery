@@ -353,7 +353,6 @@ test("the baseline race: a baseline-pending watch takes nothing, and the backlog
       { id: 5, state: "APPROVED", user: { login: "backlog" } },
     ],
   });
-  const queue = createIngestQueue({ wake: () => {}, debug });
   const source = new ForgejoSource(fake, debug, {
     take: () => {
       throw new Error("a baseline-pending watch must never take");
