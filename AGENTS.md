@@ -28,6 +28,27 @@ store config) plus the `.git/hooks` pre-commit and pre-push files that linked wo
 A fresh worktree needs one `nix develop` run before its first push, or the shared pre-push hook refuses it ("No
 .pre-commit-config.yaml file was found"). The hooks are never silenced or bypassed.
 
+## A pull request is ready to merge
+
+A pull request is ready to merge when all three hold, and the answer is computed fresh at read time — never reused from
+an earlier turn.
+
+1. **Reviews are not waiting.** Every review owed on the head's content has landed, and every landed review is addressed
+   or explicitly waived by the operator. No armed-but-unconsumed marker remains (the "waiting for zenigata" class), and
+   no review is newer than the current head.
+2. **CI is green on the current head.** The head SHA itself carries green in every expected job — not a green from an
+   older head — and the branch is up to date with its base: no conflicts, no out-of-date flag.
+3. **No worker is cooking or pending to cook.** No live worker session is editing the pull request's branch or its
+   files, and no dispatched-but-queued slice would touch the branch once a worker frees.
+
+Pull requests stand alone. No pull request is ordered against another — unless the operator says different. If two pull
+requests conflict, deal with the conflict. When one workstream truly requires another, the dependency goes on the
+ticket, the ticket is marked blocked, and the work sits down until it is unblocked.
+
+A green pull request that a free worker is about to extend is not ready: the worker touching the branch is the pull
+request's own state, not an order between pull requests. A push after a review restarts the waiting, so "ready" is a
+claim about the current SHA, never a standing state.
+
 ## Source language
 
 New source code is TypeScript. Raw JavaScript does not enter the repo without the operator's express approval (ruled

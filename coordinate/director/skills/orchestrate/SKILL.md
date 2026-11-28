@@ -55,11 +55,11 @@ restart it.
    mail and this session never waits on CI in a shell. A `pr` watch dissolves itself when the pull request closes; a
    `branch` watch is forgotten when the slice closes.
 5. **Steer** with steer-worker: probe, unblock, or close out. When a slice closes (merged, abandoned, or superseded),
-   verify the work and dispose its worktree as steer-worker describes; keep a worktree with an open PR until merge. If
-   the slice’s ticket is closed by hand, add a closing comment stating the outcome, what delivered or superseded it, and
-   links; a ticket the Linear sync closes automatically on merge closes silently. Defects in the coordinator's own tools
-   ride the same ticket path: a defect found in a live tool becomes a ticket — exact inputs, the errors, the repro
-   steps, and the evidence held — rather than a chat aside narrated and dispatched in its place.
+   verify the work and dispose its worktree as steer-worker describes; keep a worktree with an open PR until its pull
+   request is ready to merge, per the ready-to-merge definition the repo-root AGENTS.md carries. If the slice's ticket
+   is closed by hand, add a closing comment stating the outcome, what delivered or superseded it, and links. Defects in
+   the coordinator's own tools ride the same ticket path: a defect found in a live tool becomes a ticket — exact inputs,
+   the errors, the repro steps, and the evidence held — rather than a chat aside narrated and dispatched in its place.
 6. **Report** to the operator between workers. Every communication raised to the operator is self-contained: it names
    the thing, states where it came from (which ticket, which ruling, and/or which session, as applicable), states what
    is being asked or reported and why now, and never assumes the operator read an earlier message. A ticket number is

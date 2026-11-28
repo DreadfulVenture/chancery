@@ -56,8 +56,9 @@ worktree, and what ran.
 
 When the slice's outcome is final, the coordinator disposes the worktree: remove it and discard untracked state, and do
 not leave debris or ask the operator to clean it up. Dispose on close when the slice is merged, abandoned, or
-superseded. A worktree with an open PR stays until merge. Disposing a worktree does not replace verification; verify
-what exists and what ran before reporting done, and keep the worktree in place while its PR remains open.
+superseded. A worktree with an open PR stays until its pull request is ready to merge, per the ready-to-merge definition
+the repo-root AGENTS.md carries. Disposing a worktree does not replace verification; verify what exists and what ran
+before reporting done, and keep the worktree in place while its PR remains open.
 
 ## Status vocabulary
 
