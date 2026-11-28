@@ -1,4 +1,4 @@
-// The watcher kernel (docs/adr/20261119-watcher-family.md): one poll
+// The watcher kernel: one poll
 // pass, the adoption walk, the registry, and the stamp machinery —
 // everything the watcher sources have in common. A source is an adapter
 // that reads its external system and answers normalized events; it never
@@ -46,7 +46,7 @@ const WATCHES = "watches";
 
 const CLEANUP_POLL_WAIT_MS = 2_000;
 
-// The privacy contract's field kinds (the ADR's Decision): the only
+// The privacy contract's field kinds: the only
 // fields a source event may carry. Enforced at the kernel's boundary on
 // every event, so a source author has nowhere to put a comment body.
 const FIELD_KINDS = new Set(["id", "ref", "url", "status", "measure"]);

@@ -12,8 +12,8 @@ import {
 // The watcher kernel's contract tests, against a fake source: sole-writer
 // semantics, adoption without re-delivery, baseline on register,
 // per-source isolation, and the Field privacy shape — the family's
-// shared contract, the one every source adapter must satisfy (the ADR at
-// docs/adr/20261119-watcher-family.md). The fake host is the existing
+// shared contract, the one every source adapter must satisfy. The fake
+// host is the existing
 // tests' shape: sessions with whole-record metadata replaces, synthetic
 // mail, an event bus. Every write lands in this process; nothing leaves.
 

@@ -35,7 +35,7 @@ arrives after the watch registers; the PagerDuty source turns PagerDuty incident
 source turns ticket changes on watched Linear projects into mail under the same temporal rule — a ticket's changes wake
 only from its registration cursor onward, never the pre-registration backlog. All of the reading and every source token
 live in the standalone daemon (`bin/watcher-daemon`, PRJ-540): the plugin in the session carries no credential and
-proxies the watch tools to the daemon's local route. Its design record is `docs/adr/20261119-watcher-family.md`.
+proxies the watch tools to the daemon's local route.
 
 ### the director
 
@@ -214,9 +214,9 @@ home-manager builds against. `memory-store-plugin` carries the capture plugin at
 `share/skills.{cursor,opencode}`, plus the plan-permission fragment at `share/opencode/plan-permissions.json` — the
 permission rules a deployment folds into its OpenCode configuration under `agents.plan.permissions`. The fragment is the
 whole array on purpose: JSON array elements carry no identity, so a partial merge can neither update nor remove a rule,
-and a renderer overrides it wholesale. The default keeps the ADR and PRD directories writable from plan mode and denies
-plan mode from launching the implementer subagent, which runs with its own permissions and could otherwise edit despite
-the plan agent's own restrictions.
+and a renderer overrides it wholesale. The default keeps the PRD directory writable from plan mode and denies plan mode
+from launching the implementer subagent, which runs with its own permissions and could otherwise edit despite the plan
+agent's own restrictions.
 
 `mail-watcher` is not linked by the module. Since the split (PRJ-540) it is two halves. The plugin — a directory plugin
 at `lib/mail-watcher` — is the credential-free half: it registers the watch tools and proxies them to the daemon's local

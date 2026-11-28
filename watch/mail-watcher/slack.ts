@@ -8,7 +8,7 @@
 // sender, and timestamp.
 //
 // The temporal cursor is the whole channel rule, expressed inside the
-// kernel's model (docs/adr/20261119-watcher-family.md): a watch's
+// kernel's model: a watch's
 // delivered markers — keyed by the message ts, on the subscriber's own
 // watch row — are both the delivery bookkeeping and the cursor. The
 // poll derives the floor (the newest spent ts), reads the channel's

@@ -1,11 +1,6 @@
 # PRD 20261104: Memory redesign — session registry, knowledge base, event-shaped delivery
 
 - **Status**: Draft
-- **Companion ADRs** (the decisions and their measured justification):
-  - `docs/adr/20261104-retire-per-message-delivery.md`
-  - `docs/adr/20261104-corrections-are-operations.md`
-  - `docs/adr/20261104-forget-retains-history.md`
-  - `docs/adr/20261104-sleep-scope.md`
 - **Audience**: the agents that will implement and run it
 - **Provenance**:
   - Authored: agent (design dictated by the operator across the 2026-11-04 session)
@@ -35,11 +30,11 @@ session on every machine. It must deliver:
    first execution of that tool per conversation is rejected with the bound rule as its error text (reject-once; later
    executions are informational), OFF = informational always. Gates fire in every session including child sessions.
 3. **Pull-based recall with honest usage signals.** All other memory access is the agent's own query against
-   class-labeled results (guidance, facts, summaries, and raw session history grouped by conversation). Summaries are
-   session-search material: capture products never enter the knowledge base, whose input is deliberate rows only. Only
-   agent-initiated recall stamps usage counters; automatic deliveries never stamp. Usage counters feed staleness
-   statistics and an instrumented, counter-gated compliance reminder ladder ("N active turns, zero recalls") that
-   observes only _that_ the agent pulled, never _what for_.
+   class-labeled results (facts and summaries; rules answer through `rule_recall`; raw session history surfaces as
+   per-session pointers grouped by conversation). Summaries are session-search material: capture products never enter
+   the knowledge base, whose input is deliberate rows only. Only agent-initiated recall stamps usage counters; automatic
+   deliveries never stamp. Usage counters feed staleness statistics and an instrumented, counter-gated compliance
+   reminder ladder ("N active turns, zero recalls") that observes only _that_ the agent pulled, never _what for_.
 4. **State-statement content.** Stored content is present-tense state: no backreferences, no correction narration, no
    change history in row text. Time is row metadata. Correcting is an operation — remember(new) + forget(old), linked
    invisibly by the daemon for provenance ("why did we decide this?" resolves row → session → session history).
@@ -55,6 +50,12 @@ Automatic delivery is event-shaped only — session start and tool moments. Cont
 Everything else is pull.
 
 ## The data model
+
+Every surface carries its scope key under one name. A new table, route, or payload takes `project` from its first
+commit. The deployed internals keep `repo` — the columns on `working_memory`, `agent_memory`, and `episodic_memory`, the
+resolver function, the wire record's field, recall's `workspace` parameter — until a single-pass rename ticket renames
+them all at once. There is no compatibility shim: the fleet is one operator's, updated together, and the cutover is one
+fleet-wide pass.
 
 **`session`** — registry row per session: machine, project, coding tool, timestamps, `parent_session` + role (child
 sessions are structural, not in-process plugin state).
@@ -82,10 +83,10 @@ ranking metadata only — project rows take an affinity boost in their project, 
 nothing is filtered from recall by scope. A KB correction is itself a deliberate row — write the truer fact, the next
 build's recency precedence evicts the standing claim; `replace`/`forget` tombstone rows out of the delta retroactively.
 
-**`guidance`** — behavioural rules: situation → statement, with the existing grading columns (confirm/disconfirm counts,
-stance, grader, scope). Authored by agents at correction time in a single write — the guidance row IS the correction
-record. Graded only by the agent feedback loop; sleep never touches behavioural rules. Reachable via recall and
-referenced by tool bindings.
+**`situational_rules`** — behavioural rules: situation → statement, with the existing grading columns (confirm and
+disconfirm counts, stance, grader, scope). Authored by agents at correction time in a single write — the rule row IS the
+correction record. Graded only by the agent feedback loop; sleep never touches behavioural rules. Reachable via
+`rule_recall` and delivered at tool moments through bindings.
 
 **`persona_rules`** — the floor, unchanged, plus the recall-discipline line.
 
@@ -98,13 +99,14 @@ repo-specific gate never leaks fleet-wide by accident); inline notes carry scope
 **Cross-project curation**: agents discover bindings from other projects through the key lookup (`tool_rule_lookup` —
 every rule enrolled on a key, each labeled visible or hidden for the calling project), then promote a binding to global
 (`tool_rule_promote` — the global twin is written and the source row forgotten, so the original enrollment's replay
-cannot resurrect it) or copy it into their current project (`tool_rule_copy`, referencing the same key and guidance row)
-— content stays single-source. Bindings never ride the recall surface: recall returns memory content only, and the
-lookup is the one discovery path. Promoted bindings fall under the normal grading loop once bindings reference guidance
-rows, and the holds flag remains the master cutoff. This scope deliberately means something different from content-row
-scope: bindings filter (exact-match firing has no ranking to modulate), guidance/agent_memory scope ranks only.
+cannot resurrect it) or copy it into their current project (`tool_rule_copy`, referencing the same key and situational
+rule) — content stays single-source. Bindings never ride the recall surface: recall returns memory content only, and the
+lookup is the one discovery path. Promoted bindings fall under the normal grading loop once bindings reference
+situational rules, and the holds flag remains the master cutoff. This scope deliberately means something different from
+content-row scope: bindings filter (exact-match firing has no ranking to modulate), situational-rule and agent_memory
+scope ranks only.
 
-**`tool_rules`** — bindings: `tool_id` → nullable `guidance_id` or inline note.
+**`tool_rules`** — bindings: `tool_id` → nullable `guidance_id` (a `situational_rules` row) or inline note.
 
 ### Tool matching
 
@@ -147,7 +149,7 @@ this never assigns tasks"); the correction-protocol pointer; attribution require
 - Zero injected content on message arrival, on every client.
 - Agent-initiated recalls occur in normal work (counters > 0 across sessions, both clients); the compliance ladder stays
   quiet in the common case.
-- Behavioural corrections produce a guidance row the same turn; no sleep process ever writes or alters one.
+- Behavioural corrections produce a situational rule the same turn; no sleep process ever writes or alters one.
 - A fact correction reaches the next KB build and the fleet (tombstone + edge state converges); "why did we decide
   this?" resolves through provenance end to end.
 

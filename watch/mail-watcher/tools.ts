@@ -1,5 +1,5 @@
-// The family's tool surface (the ADR: one tool surface with a source
-// discriminator; a source does not mint its own tools):
+// The family's tool surface: one tool surface with a source
+// discriminator; a source does not mint its own tools:
 // watcher_register / watcher_list / watcher_forget and the projection's
 // forge_state. Since the split (PRJ-540) the tools hold no kernel and
 // no credential: the schemas and the result strings are today's,

@@ -1,4 +1,4 @@
-// The source-contract base class (kernel.ts, docs/adr/20261119-watcher-family.md):
+// The source-contract base class (kernel.ts):
 // what the source adapters share, defined once. The kernel owns the pass
 // machinery — the poll pass, the registry and its adoption walk, the stamp
 // machinery, the mark-first/mail-second delivery discipline, the claims-row

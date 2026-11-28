@@ -1,8 +1,6 @@
 # PRD 20261023: Entity directory
 
 - **Status**: Draft
-- **Companion ADRs**: `docs/adr/20261023-entity-directory.md` (the decisions),
-  `docs/adr/20261023-forward-compatible-sync.md` (the rollout this depends on)
 - **Audience**: the agents that will implement and use it
 - **Provenance**:
   - Authored: agent
@@ -219,8 +217,9 @@ row.
 
 ## Tools
 
-ADR 20261110, "Each domain owns its commands under its own prefix", gives the directory its own prefix, `entity_`, added
-to `TOOL_PREFIXES`. No `memory_*` tool reaches into the directory.
+The directory owns its own tool prefix, `entity_`, under the domain-per-prefix tool organization (`TOOL_PREFIXES`). No
+`memory_*` tool reaches into the directory. The six `entity_*` tools below are not built yet; this section is the
+requirement they have to meet.
 
 - `entity_save`: create an entry, rename it, change `acts_for`, add and remove aliases as explicit lists, restore a
   forgotten entry. Never a full replace: an agent resaving from a partial view would silently drop aliases.
@@ -498,8 +497,8 @@ before drafting, and record framing corrections and reply lessons as observation
 
 ## Rollout
 
-The `entity` kind ships in the same deploy as ADR 20261023-forward-compatible-sync, in order: the hub, then every
-client, before any machine writes an entity. That is the last ordered deploy; later kinds can roll out in any order.
+The `entity` kind's rollout is ordered — the hub, then every client, before any machine writes an entity. It is the last
+ordered deploy; later kinds roll out in any order under the set-aside semantics.
 
 ## Non-goals
 

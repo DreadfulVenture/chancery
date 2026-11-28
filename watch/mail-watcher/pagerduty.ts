@@ -16,9 +16,8 @@
 // stamp machinery (each service's claims row is a `chancery.watches`
 // row on the target session's stamp, beside the forge watches'), the
 // same mark-first mail-second discipline. The extraction the pattern
-// earns is the watcher kernel's source contract
-// (docs/adr/20261119-watcher-family.md), and both legs migrate onto it
-// in later slices; the Linear source rides the same legacy shape.
+// earns is the watcher kernel's source contract, and both legs migrate
+// onto it in later slices; the Linear source rides the same legacy shape.
 //
 // The trigger is a new incident, not a state change. An incident that is
 // already triggered when a service's claims row is first written wakes

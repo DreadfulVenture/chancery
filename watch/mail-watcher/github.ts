@@ -1,5 +1,5 @@
 // The GitHub source: the watcher's second source on the kernel contract
-// (kernel.ts, docs/adr/20261119-watcher-family.md), beside the forge
+// (kernel.ts), beside the forge
 // source in forgejo-source.ts and composed in composer.ts. Where the
 // PagerDuty and Linear sources are
 // config-mapped (the operator maps each watched thing to a director
@@ -41,7 +41,7 @@
 // the watch already carries — the reviews and comments on the pages the
 // read serves, plus the record's change marker — and never the terminal:
 // a watch registered after a fast pipeline reports the finished result
-// (the ADR's first-terminal rule), so a close is never spent silently.
+// never spends a close, so a close is never spent silently.
 // When the register-time read cannot run, the row stamps baseline-pending
 // and the first poll pass spends its pages instead; the terminal arrives
 // one pass late (the kernel's spend pass consumes the whole answer, so
@@ -765,7 +765,8 @@ export class GitHubSource extends WatchSource {
   // The register-time baseline: the items the pages already carry and
   // the record's change marker are the spent backlog — the watch wakes
   // on what arrives after it, never on the page it registered against,
-  // and never on a close (the ADR's first-terminal rule). When the api
+  // and never on a close: a register-time baseline never spends a
+  // terminal. When the api
   // cannot answer, the kernel stamps the watch baseline-pending and the
   // first poll pass spends its pages instead. The kind guard and the
   // unread-to-pending mapping are the base's template.

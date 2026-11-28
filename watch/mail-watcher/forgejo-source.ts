@@ -1,5 +1,5 @@
 // The Forgejo watcher (PRJ-244): the family's first source adapter on
-// the watcher kernel (kernel.ts, docs/adr/20261119-watcher-family.md).
+// the watcher kernel (kernel.ts).
 // The kernel owns everything the sources have in common — the poll pass,
 // the registry and its adoption walk, the stamp machinery (it is the
 // sole writer of the `chancery.watches` rows it adopts), the delivery

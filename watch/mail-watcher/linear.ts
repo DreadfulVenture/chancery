@@ -50,9 +50,8 @@
 // `chancery.watches` row on the target session's stamp, beside the
 // forge watches' and the pagerduty rows), the same mark-first
 // mail-second discipline — through the kernel's legacy leg. The
-// kernel/source split is the family ADR's decision
-// (docs/adr/20261119-watcher-family.md); both legs migrate onto the
-// source contract in later slices.
+// kernel/source split is the family's own decision; both legs migrate
+// onto the source contract in later slices.
 //
 // Unlike the PagerDuty claims row, the Linear row carries no prune: a
 // PagerDuty incident id can never reappear once its read window has

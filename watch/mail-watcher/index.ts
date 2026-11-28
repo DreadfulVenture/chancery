@@ -1,6 +1,5 @@
 // The Forgejo watcher (PRJ-244), split PRJ-540: the family's first
-// source adapter on the watcher kernel (kernel.ts,
-// docs/adr/20261119-watcher-family.md). This file is the plugin entry
+// source adapter on the watcher kernel (kernel.ts). This file is the plugin entry
 // only — the credential-free half that runs inside opencode sessions.
 // Since the split, the forge reads (and every source's reads) leave the
 // opencode process entirely, per the operator's ruling: the tokens live
