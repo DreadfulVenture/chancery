@@ -8,14 +8,14 @@ body {
   background: #0d1017;
   color: #e6edf3;
   font:
-    400 1.05rem/1.5 system-ui,
+    400 1.05rem/1.55 system-ui,
     -apple-system,
     "Segoe UI",
     Roboto,
     sans-serif;
   margin: 0 auto;
-  max-width: 62rem;
-  padding: 1.4rem clamp(1rem, 4vw, 3rem) 2.4rem;
+  max-width: 80rem;
+  padding: 2rem clamp(1.5rem, 5vw, 4rem) 3rem;
 }
 header {
   display: flex;
@@ -23,31 +23,33 @@ header {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 0.4rem 1.5rem;
-  margin: 0 0 1.1rem;
+  margin: 0 0 1.8rem;
 }
 h1 {
-  font-size: 1.55rem;
-  font-weight: 650;
+  font-size: 1.9rem;
+  font-weight: 700;
   letter-spacing: 0.01em;
   margin: 0;
 }
 header .muted {
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
 .panel {
   background: #141a23;
   border: 1px solid #242c38;
-  border-radius: 12px;
-  margin-bottom: 1.1rem;
+  border-radius: 14px;
+  margin-bottom: 1.6rem;
   overflow-x: auto;
-  padding: 0.95rem 1.2rem 1.1rem;
+  padding: 1.25rem 1.5rem 1.5rem;
 }
 .panel h2 {
-  color: #97a1b0;
-  font-size: 0.8rem;
-  font-weight: 600;
+  border-bottom: 1px solid #1d242e;
+  color: #aeb8c6;
+  font-size: 0.85rem;
+  font-weight: 650;
   letter-spacing: 0.09em;
-  margin: 0 0 0.75rem;
+  margin: 0 0 1rem;
+  padding-bottom: 0.55rem;
   text-transform: uppercase;
 }
 .health {
@@ -155,33 +157,161 @@ header .muted {
 .transcript-note {
   margin: 0.35rem 0 0;
 }
+/* The full-width log block (PRJ-547, PRJ-568): the expanded block reads
+   as its own panel inside the row it belongs to — an inset card with a
+   clickable header row — instead of a cramped cell's payload. */
+.transcript {
+  background: #0f141c;
+  border: 1px solid #242c38;
+  border-radius: 10px;
+  margin: 0.4rem 0 0;
+  padding: 0.55rem 0.85rem 0.85rem;
+}
 .transcript summary {
+  color: #aeb8c6;
   cursor: pointer;
+  font-weight: 600;
   margin: 0.35rem 0 0;
 }
+.transcript summary:hover {
+  color: #e6edf3;
+}
+/* The log box (PRJ-568): the reader's own panel — taller by default
+   than the old 16rem pre, vertically resizable, and scrolling its
+   formatted turns inside the frame. */
 .transcript-body {
   background: #0d1017;
   border: 1px solid #242c38;
-  border-radius: 6px;
+  border-radius: 8px;
   font:
-    400 0.78rem/1.45 ui-monospace,
+    400 0.84rem/1.55 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  margin: 0.5rem 0 0;
+  max-height: 42rem;
+  min-height: 20rem;
+  overflow: auto;
+  padding: 0.6rem 0.8rem;
+  resize: vertical;
+}
+.log-turn {
+  border-bottom: 1px solid #1a212b;
+  padding: 0.4rem 0 0.55rem;
+}
+.log-turn:first-child {
+  padding-top: 0;
+}
+.log-turn:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.log-turn-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.6rem;
+}
+.log-stamp {
+  color: #7d8a99;
+  font:
+    400 0.72rem/1.5 ui-monospace,
     SFMono-Regular,
     Menlo,
     Consolas,
     monospace;
+  font-variant-numeric: tabular-nums;
+}
+.log-tool-name {
+  color: #c9d4e0;
+  font:
+    600 0.8rem/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+}
+.log-role {
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+.role-user {
+  color: #7fb2ff;
+}
+.role-reviewer {
+  color: #c792ea;
+}
+.role-report {
+  color: #e3b341;
+}
+.role-log {
+  color: #97a1b0;
+}
+.log-section {
+  margin: 0.35rem 0 0 0.85rem;
+}
+.log-section-label {
+  color: #7d8a99;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.log-section-body {
+  margin: 0.15rem 0 0;
+}
+.log-turn-body {
   margin: 0.3rem 0 0;
-  max-height: 16rem;
-  overflow: auto;
-  padding: 0.4rem 0.55rem;
+}
+.log-prose {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.log-code {
+  background: #0a0d12;
+  border-left: 2px solid #2a3441;
+  font:
+    400 0.76rem/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  margin: 0.25rem 0 0;
+  padding: 0.3rem 0.55rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-code.diff {
+  color: #97a1b0;
+}
+.log-code .add {
+  color: #55d069;
+}
+.log-code .del {
+  color: #ff857b;
+}
+.log-code .meta {
+  color: #7d8a99;
+}
+.log-rule {
+  color: #566170;
+  font:
+    400 0.72rem/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  margin: 0.3rem 0;
+}
+.log-marker {
+  color: #e3b341;
+  font-size: 0.78rem;
+}
 /* The full-width log row (PRJ-547): the block hugs its row's bottom
-   edge, and the row above keeps its rule as the seam. Dense
-   preformatted text never wraps inside a column again — the expanded
-   block spans the table in a colspan-everything row beneath its own. */
+   edge, and the row above keeps its rule as the seam. */
 .row-log td {
-  padding: 0 0.6rem 0.5rem;
+  padding: 0 0.75rem 0.75rem;
 }
 .log-pin {
   cursor: pointer;
@@ -199,17 +329,17 @@ table {
 }
 th {
   border-bottom: 1px solid #2b3441;
-  color: #97a1b0;
-  font-size: 0.72rem;
+  color: #8a95a5;
+  font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.08em;
-  padding: 0.25rem 0.6rem 0.45rem;
+  padding: 0.4rem 0.75rem 0.55rem;
   text-align: left;
   text-transform: uppercase;
 }
 td {
   border-bottom: 1px solid #1d242e;
-  padding: 0.5rem 0.6rem;
+  padding: 0.65rem 0.75rem;
   vertical-align: top;
 }
 tbody tr:last-child td {

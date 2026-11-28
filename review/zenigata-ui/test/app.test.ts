@@ -180,6 +180,60 @@ describe("the poll loop", () => {
       container.querySelector<HTMLInputElement>(".log-pin-box")!.checked,
     ).toBe(false);
   });
+
+  it("the boot render fills each open log block's body and the footer control once", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const a = app(container, {
+      fetchPage: vi.fn().mockResolvedValue(page({ sessions: [liveSession()] })),
+    });
+    await a.poll();
+    // The keyed block's body is the app's render() product — laid down
+    // by the boot hydrate, one copy, before any refresh ran.
+    expect(
+      container.querySelectorAll("details[data-log-session] .log-body"),
+    ).toHaveLength(1);
+    expect(
+      container
+        .querySelector("details[data-log-session] .log-body")!
+        .querySelectorAll(".transcript-body"),
+    ).toHaveLength(1);
+    expect(
+      container.querySelector("details[data-log-session]")?.textContent,
+    ).toContain("old turns");
+    expect(container.querySelector(".notify-control")?.children).toHaveLength(
+      1,
+    );
+  });
+
+  it("the enable path re-renders the footer control in place, never a second copy", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let permission: "granted" | "default" = "default";
+    const sink = {
+      ...silentSink(),
+      permission: () => permission,
+      request: async () => {
+        permission = "granted";
+        return permission;
+      },
+    };
+    const a = app(container, {
+      fetchPage: vi.fn().mockResolvedValue(page()),
+      notifier: new FinishNotifier(noopStore(), sink),
+    });
+    await a.poll();
+    const control = container.querySelector(".notify-control")!;
+    expect(control.querySelector("button")?.textContent).toContain(
+      "notifications off — turn on",
+    );
+    control.querySelector("button")!.click();
+    // The gesture's async tail: request, then the control's re-render.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(control.querySelectorAll("button")).toHaveLength(0);
+    expect(control.children).toHaveLength(1);
+    expect(control.textContent).toContain("notifications on");
+  });
 });
 
 describe("the live log's refresh (PRJ-547)", () => {
@@ -265,38 +319,106 @@ describe("the live log's refresh (PRJ-547)", () => {
     );
   });
 
-  it("pinned, the swap rides the tail; unpinned, the reading line carries over", async () => {
-    const { container, block } = await bootedWithOpenBlock();
-    const tailWrites: number[] = [];
-    const pre = block.querySelector<HTMLElement>(".transcript-body")!;
-    Object.defineProperty(pre, "scrollTop", {
-      get: () => 0,
-      set: (v: number) => tailWrites.push(v),
+  /**
+   * The swap renders a fresh log box every refresh, so a per-instance
+   * stub would die with the element it was written on. The scroll
+   * surface is stubbed at Element.prototype instead: reads answer the
+   * fixed scrollHeight, and every write is captured with the element it
+   * landed on. The caller restores in its own finally.
+   */
+  const captureScrollWrites = (): {
+    writes: Array<{ element: Element; value: number }>;
+    restore: () => void;
+  } => {
+    const writes: Array<{ element: Element; value: number }> = [];
+    const proto = Element.prototype as unknown as Record<
+      string,
+      PropertyDescriptor
+    >;
+    const scrollTop = Object.getOwnPropertyDescriptor(proto, "scrollTop");
+    const scrollHeight = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+    const restore = (): void => {
+      Object.defineProperty(proto, "scrollTop", scrollTop!);
+      Object.defineProperty(proto, "scrollHeight", scrollHeight!);
+    };
+    Object.defineProperty(proto, "scrollTop", {
+      get() {
+        return 0;
+      },
+      set(value: number) {
+        writes.push({ element: this as Element, value });
+      },
       configurable: true,
     });
-    Object.defineProperty(pre, "scrollHeight", {
-      get: () => 4242,
+    Object.defineProperty(proto, "scrollHeight", {
+      get() {
+        return 4242;
+      },
       configurable: true,
     });
-    const b = app(container, {
-      fetchPage: vi.fn().mockResolvedValue(page({ sessions: [liveSession()] })),
-      fetchLog: vi.fn().mockResolvedValue({
-        state: "found",
-        text: "old turns\n\nnewer turn",
-        truncated: false,
-      }),
-    });
-    await b.poll();
-    // Pinned (the rendered default): the fresh pre's scrollTop jumped
-    // to its scrollHeight.
-    expect(tailWrites).toContain(4242);
+    return { writes, restore };
+  };
 
-    // Unpin: the swap carries the old pre's scrollTop instead.
-    const box = block.querySelector<HTMLInputElement>(".log-pin-box")!;
-    box.checked = false;
-    tailWrites.length = 0;
-    await b.poll();
-    expect(tailWrites).toEqual([0]);
+  it("pinned, every swap's fresh box rides the tail; unpinned, the reading line carries over", async () => {
+    const { container, block } = await bootedWithOpenBlock();
+    const { writes, restore } = captureScrollWrites();
+    try {
+      const b = app(container, {
+        fetchPage: vi
+          .fn()
+          .mockResolvedValue(page({ sessions: [liveSession()] })),
+        fetchLog: vi.fn().mockResolvedValue({
+          state: "found",
+          text: "old turns\n\nnewer turn",
+          truncated: false,
+        }),
+      });
+      await b.poll();
+      // Pinned (the rendered default): the fresh box's scrollTop jumped
+      // to its scrollHeight, on the box that is actually in the block.
+      expect(writes).toEqual([
+        { element: block.querySelector(".transcript-body")!, value: 4242 },
+      ]);
+
+      // Unpin: the swap carries the old box's scrollTop instead.
+      const box = block.querySelector<HTMLInputElement>(".log-pin-box")!;
+      box.checked = false;
+      writes.length = 0;
+      await b.poll();
+      expect(writes).toEqual([
+        { element: block.querySelector(".transcript-body")!, value: 0 },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("the pin holds through consecutive swaps, and the block never grows a second copy", async () => {
+    const { container, block } = await bootedWithOpenBlock();
+    const { restore } = captureScrollWrites();
+    try {
+      const b = app(container, {
+        fetchPage: vi
+          .fn()
+          .mockResolvedValue(page({ sessions: [liveSession()] })),
+        fetchLog: vi.fn().mockResolvedValue({
+          state: "found",
+          text: "turn one",
+          truncated: false,
+        }),
+      });
+      await b.poll();
+      await b.poll();
+      await b.poll();
+      // One log box for the row, however many refreshes ran — the
+      // duplicated box was the bug this suite now pins (PRJ-568).
+      expect(block.querySelectorAll(".transcript-body")).toHaveLength(1);
+      expect(block.querySelectorAll(".log-body")).toHaveLength(1);
+      expect(block.textContent).toContain("turn one");
+      expect(block.textContent).not.toContain("old turns");
+    } finally {
+      restore();
+    }
   });
 
   it("re-checking the pin jumps to the tail at once", async () => {

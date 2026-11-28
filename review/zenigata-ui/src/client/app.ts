@@ -14,7 +14,7 @@ import { render } from "lit";
 import { POLL_MS, type FinishNotifier } from "../notifier.js";
 import type { TranscriptView } from "../run-data.js";
 import type { PageData } from "../page-feed.js";
-import { notifyControl, pageTemplate } from "./page.js";
+import { hydratePage, notifyControl, pageTemplate } from "./page.js";
 import { logBody } from "./session-log.js";
 
 /** What the app reaches the world through; injected, never imported. */
@@ -94,25 +94,25 @@ export class StatusPageApp {
   }
 
   render(page: PageData): void {
-    render(
-      pageTemplate(
-        page,
-        this.env.notifier.state,
-        () => void this.enableNotifications(),
-      ),
+    render(pageTemplate(page), this.container);
+    hydratePage(
+      page,
       this.container,
+      this.env.notifier.state,
+      () => void this.enableNotifications(),
     );
   }
 
   /**
    * The footer control's request: the user gesture the prompt needs.
-   * The page itself never re-renders — the control's own span updates
-   * in place, the way the old page's script re-rendered it.
+   * The page itself never re-renders — the control's own span is the
+   * render()'s container, so its content is replaced in place, the way
+   * the old page's script re-rendered it.
    */
   private async enableNotifications(): Promise<void> {
     await this.env.notifier.enable();
     const control =
-      this.container.querySelector<HTMLElement>("#notify-control");
+      this.container.querySelector<HTMLElement>(".notify-control");
     if (control !== null) {
       render(
         notifyControl(
@@ -165,32 +165,38 @@ export class StatusPageApp {
   /**
    * The block's `.log-body` is the swap point — the summary and the pin
    * control outside it are never recreated, so the pin's checked state
-   * survives every swap as natural DOM state. Both scroll modes are the
-   * swap's job: a fresh pre element starts at scrollTop 0, so a swap
-   * that did not set it would snap every reader to the top. Pinned, the
-   * new pre rides the tail (scrollTop = scrollHeight); unpinned, the
-   * old pre's scrollTop carries over — the reading line keeps its place
-   * for the common case of content appended below. A cap cut removes
-   * whole turns at the old end above the reader, and the carried
-   * scrollTop then reads a shifted line — the best-effort cost of the
-   * simple anchor, accepted rather than reconstructing per-turn offsets
-   * the view does not carry. A view with no pre (the gone or unreadable
-   * state) swaps in and scrolls nothing.
+   * survives every swap as natural DOM state. The body div carries no
+   * content the shell template laid down, so this `render()` is the
+   * content's only owner and replaces in place; a body anything else
+   * had rendered into would make this call append a second copy, the
+   * duplicated box of PRJ-568.
+   *
+   * Both scroll modes are the swap's job: a fresh log box starts at
+   * scrollTop 0, so a swap that did not set it would snap every reader
+   * to the top. Pinned, the new box rides the tail (scrollTop =
+   * scrollHeight); unpinned, the old box's scrollTop carries over — the
+   * reading line keeps its place for the common case of content
+   * appended below. A cap cut removes whole turns at the old end above
+   * the reader, and the carried scrollTop then reads a shifted line —
+   * the best-effort cost of the simple anchor, accepted rather than
+   * reconstructing per-turn offsets the view does not carry. A view
+   * with no log box (the gone or unreadable state) swaps in and
+   * scrolls nothing.
    */
   private swapLogBody(block: Element, view: TranscriptView): void {
     const body = block.querySelector<HTMLElement>(".log-body");
     if (body === null) {
       return;
     }
-    const pre = body.querySelector<HTMLElement>(".transcript-body");
-    const top = pre?.scrollTop ?? 0;
+    const box = body.querySelector<HTMLElement>(".transcript-body");
+    const top = box?.scrollTop ?? 0;
     render(logBody(view), body);
     const fresh = body.querySelector<HTMLElement>(".transcript-body");
     if (fresh === null) {
       return;
     }
-    const box = block.querySelector<HTMLInputElement>(".log-pin-box");
-    if (box !== null && box.checked) {
+    const pin = block.querySelector<HTMLInputElement>(".log-pin-box");
+    if (pin !== null && pin.checked) {
       fresh.scrollTop = fresh.scrollHeight;
     } else {
       fresh.scrollTop = top;

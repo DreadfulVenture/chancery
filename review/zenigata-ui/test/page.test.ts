@@ -13,7 +13,7 @@ import {
   liveLogUnder,
   transcriptStateNote,
 } from "../src/client/session-log.js";
-import { pageTemplate } from "../src/client/page.js";
+import { hydratePage, pageTemplate } from "../src/client/page.js";
 import type { PageData } from "../src/page-feed.js";
 
 const mount = (template: ReturnType<typeof pageTemplate>): HTMLElement => {
@@ -99,9 +99,7 @@ describe("the forge links", () => {
   });
 
   it("a live session's PR cell links into the forge and offers the re-request", () => {
-    const container = mount(
-      pageTemplate(page({ sessions: [liveSession()] }), "off", () => {}),
-    );
+    const container = mount(pageTemplate(page({ sessions: [liveSession()] })));
     const links = container.querySelectorAll<HTMLAnchorElement>(
       'td a[href="https://forge.invalid/acme/widget/pulls/1"]',
     );
@@ -126,8 +124,6 @@ describe("the forge links", () => {
             },
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     const links = container.querySelectorAll<HTMLAnchorElement>("td a");
@@ -140,9 +136,7 @@ describe("the forge links", () => {
 
 describe("the live rows' rendering", () => {
   it("a running row's chip names the state and its age from the ledger's stamp", () => {
-    const container = mount(
-      pageTemplate(page({ sessions: [liveSession()] }), "off", () => {}),
-    );
+    const container = mount(pageTemplate(page({ sessions: [liveSession()] })));
     const chip = container.querySelector("tbody .chip.ok");
     expect(chip?.textContent).toMatch(/^running /);
   });
@@ -153,8 +147,6 @@ describe("the live rows' rendering", () => {
         page({
           sessions: [liveSession({ stage: "queued", startedAtMs: undefined })],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.querySelector(".chip.warn")?.textContent).toBe("parked");
@@ -167,8 +159,6 @@ describe("the live rows' rendering", () => {
         page({
           sessions: [liveSession({ sessionId: undefined, log: undefined })],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.textContent).toContain("no session yet");
@@ -187,8 +177,6 @@ describe("the live rows' rendering", () => {
             }),
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.textContent).toContain(
@@ -201,9 +189,7 @@ describe("the PRJ-547 full-width log block", () => {
   it("the expanded block renders full-width beneath its row, keyed to the session, with the pin control", () => {
     const block = liveLogUnder(liveSession());
     expect(block).not.toBeNull();
-    const container = mount(
-      pageTemplate(page({ sessions: [liveSession()] }), "off", () => {}),
-    );
+    const container = mount(pageTemplate(page({ sessions: [liveSession()] })));
     const details = container.querySelector("details[data-log-session]");
     expect(details?.getAttribute("data-log-session")).toBe("sess-live");
     // The under-row spans every column.
@@ -231,7 +217,10 @@ describe("the PRJ-547 full-width log block", () => {
     expect(container.textContent).toContain(
       "the log is capped at the page's 64KiB; its oldest turns are cut",
     );
-    expect(container.querySelector("pre")?.textContent).toBe("the turns");
+    // The formatted log box rides the note; the text is inside it.
+    expect(container.querySelector(".transcript-body")?.textContent).toContain(
+      "the turns",
+    );
   });
 
   it("the gone and unreadable states name the fact without the sweeper", () => {
@@ -249,8 +238,6 @@ describe("the PRJ-547 full-width log block", () => {
         page({
           sessions: [liveSession({ sessionId: undefined, log: undefined })],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.querySelectorAll("tr.row-log")).toHaveLength(0);
@@ -307,8 +294,6 @@ describe("the failed report", () => {
             }),
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.textContent).toContain(
@@ -353,8 +338,6 @@ describe("the failed report", () => {
             }),
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     const warn = [...container.querySelectorAll(".chip.warn")];
@@ -376,8 +359,6 @@ describe("the failed report", () => {
             }),
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.textContent).toContain("reviewer session log");
@@ -394,8 +375,6 @@ describe("the failed report", () => {
         page({
           runs: [failedRun({ transcript: { state: "swept" } })],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.textContent).toContain(
@@ -420,8 +399,6 @@ describe("the failed report", () => {
             },
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.querySelector("tbody .chip.ok")?.textContent).toBe(
@@ -433,7 +410,7 @@ describe("the failed report", () => {
 
 describe("the page's panels", () => {
   it("the read arrives in order: health, running, runs, dropped, narration, config", () => {
-    const container = mount(pageTemplate(page(), "off", () => {}));
+    const container = mount(pageTemplate(page()));
     const positions = [
       "Health",
       "Running now",
@@ -449,7 +426,7 @@ describe("the page's panels", () => {
   });
 
   it("the honest empty states on a fresh boot", () => {
-    const container = mount(pageTemplate(page(), "off", () => {}));
+    const container = mount(pageTemplate(page()));
     expect(container.textContent).toContain("Nothing running right now.");
     expect(container.textContent).toContain("No runs yet.");
     expect(container.textContent).toContain(
@@ -459,14 +436,10 @@ describe("the page's panels", () => {
   });
 
   it("the health line reads the adapter's reachability", () => {
-    const up = mount(
-      pageTemplate(page({ adapterReachable: true }), "off", () => {}),
-    );
+    const up = mount(pageTemplate(page({ adapterReachable: true })));
     expect(up.textContent).toContain("adapter reachable");
     expect(up.textContent).not.toContain("adapter unreachable");
-    const down = mount(
-      pageTemplate(page({ adapterReachable: false }), "off", () => {}),
-    );
+    const down = mount(pageTemplate(page({ adapterReachable: false })));
     expect(down.textContent).toContain("adapter unreachable");
   });
 
@@ -487,8 +460,6 @@ describe("the page's panels", () => {
             ],
           },
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.textContent).toContain("A re-request re-runs them free");
@@ -528,8 +499,6 @@ describe("the page's panels", () => {
             },
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     const text = container.textContent ?? "";
@@ -547,8 +516,6 @@ describe("the page's panels", () => {
             "<script>alert('log')</script>",
           ],
         }),
-        "off",
-        () => {},
       ),
     );
     expect(container.querySelector(".log-tail")?.innerHTML).not.toContain(
@@ -560,7 +527,7 @@ describe("the page's panels", () => {
   });
 
   it("the config echo lists the configured values, with the 0-port and no-allowlist wordings", () => {
-    const container = mount(pageTemplate(page(), "off", () => {}));
+    const container = mount(pageTemplate(page()));
     const text = container.textContent ?? "";
     expect(text).toContain("0 (the OS picks the port)");
     expect(text).toContain("no allowlist (every repository)");
@@ -570,17 +537,39 @@ describe("the page's panels", () => {
 });
 
 describe("the footer's notifications control", () => {
+  /** The footer control is the app's refresh point: shell, then hydrate. */
+  const mountHydrated = (
+    notifyState: "on" | "off" | "unsupported",
+  ): HTMLElement => {
+    const p = page();
+    const container = mount(pageTemplate(p));
+    hydratePage(p, container, notifyState, () => {});
+    return container;
+  };
+
   it("off offers the turn-on control; on reads quiet; unsupported names the browser", () => {
-    const off = mount(pageTemplate(page(), "off", () => {}));
+    const off = mountHydrated("off");
     expect(off.querySelector("footer button")?.textContent).toContain(
       "notifications off — turn on",
     );
-    const on = mount(pageTemplate(page(), "on", () => {}));
+    const on = mountHydrated("on");
     expect(on.textContent).toContain("notifications on");
     expect(on.querySelector("footer button")).toBeNull();
-    const unsupported = mount(pageTemplate(page(), "unsupported", () => {}));
+    const unsupported = mountHydrated("unsupported");
     expect(unsupported.textContent).toContain(
       "notifications not available in this browser",
     );
+  });
+
+  it("the control renders exactly one state — never a second copy beside the first", () => {
+    const off = mountHydrated("off");
+    const control = off.querySelector(".notify-control")!;
+    expect(control.querySelectorAll("button")).toHaveLength(1);
+    // The app's enable path re-renders into the same span; the ownership
+    // rule (one renderer, render() alone) keeps it a replacement.
+    hydratePage(page(), off, "on", () => {});
+    expect(control.querySelectorAll("button")).toHaveLength(0);
+    expect(control.children).toHaveLength(1);
+    expect(control.textContent).toContain("notifications on");
   });
 });
