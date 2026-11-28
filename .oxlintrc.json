@@ -1,0 +1,23 @@
+{
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "no-restricted-properties": [
+      "error",
+      {
+        "object": "http",
+        "property": "createServer",
+        "message": "http.createServer is banned in TypeScript sources; servers use hono"
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["**/tests/**"],
+      "rules": {
+        "no-restricted-properties": "off"
+      }
+    }
+  ]
+}

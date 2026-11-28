@@ -95,6 +95,9 @@ export const startRoute = ({
   stateOf,
 }: RouteDeps & { host?: string; port: number }): Promise<RouteServer> =>
   new Promise((resolve, reject) => {
+    // Pre-ruling surface, still on its raw server. Pending the hono
+    // conversion, which is undecided for this file.
+    // oxlint-disable-next-line no-restricted-properties
     const inner = http.createServer(async (request, response) => {
       const url = new URL(request.url ?? "/", `http://127.0.0.1`);
       try {

@@ -295,6 +295,30 @@
               ];
               language = "system";
             };
+            oxlint = {
+              enable = true;
+              # nixpkgs's oxlint (1.65.0 at the nixpkgs pin this flake
+              # locks). The rule, the ban message, and the rule-scoped
+              # tests exemption live in the repo-root .oxlintrc.json; the
+              # entry runs oxlint with no filenames, so it walks the repo
+              # itself.
+              #
+              # Scoping outside the config is banned. The two pre-ruling
+              # surfaces carry their exemption inline, in their own files:
+              # an oxlint-disable-next-line on the http.createServer line
+              # with the why-comment — watch/mail-watcher/daemon/route.ts
+              # (conversion undecided) and
+              # watch/mail-watcher/daemon/webhook-receiver.ts (conversion
+              # in flight on PR #209). Each suppression drops when that
+              # surface converts. Tests stay exempt by the config's
+              # overrides entry, which turns off only this rule for
+              # **/tests/** — fakes are the sanctioned pattern there,
+              # product surfaces are not exempt.
+              entry = "${pkgs.oxlint}/bin/oxlint";
+              pass_filenames = false;
+              always_run = true;
+              language = "system";
+            };
           };
 
           packages = {
