@@ -1,15 +1,27 @@
-# NixOS module: the watcher daemon (PRJ-540).
+# NixOS module: the watcher daemon (PRJ-540) and its webhook receiver
+# (PRJ-542).
 #
 # One service, one environment file for the secrets, and the watcher
 # block as a JSON file the module renders from `settings`. The secrets —
 # every source's token (FORGEJO_TOKEN, SLACK_TOKEN, GITHUB_TOKEN,
-# PAGERDUTY_TOKEN, the linear token) and the host server's password —
-# ride the unit's EnvironmentFile alone; `settings` is the block's
-# non-secret surface (forgeUrl, pollSeconds, and the source blocks whose
-# tokens stay in the secrets file). The process's local route binds
-# loopback only; the session-side tools proxy to it over
-# options.watcher.daemonUrl and no forge credential ever enters an
-# opencode environment.
+# PAGERDUTY_TOKEN, the linear token), the host server's password, and
+# the webhook receiver's WATCHER_WEBHOOK_SECRET — ride the unit's
+# EnvironmentFile alone; `settings` is the block's non-secret surface
+# (forgeUrl, pollSeconds, and the source blocks whose tokens stay in the
+# secrets file). The process's local route binds loopback only; the
+# session-side tools proxy to it over options.watcher.daemonUrl and no
+# forge credential ever enters an opencode environment.
+#
+# The webhook receiver is the daemon's second server, and a different
+# trust domain from the route: it serves the forge's deliveries,
+# verified against WATCHER_WEBHOOK_SECRET. Its bind defaults to
+# loopback — the adopter-first shape, zero infra change, polling stays
+# the backstop for a forge that cannot reach the host. Making it
+# reachable (an LAN allow-list, a tunnel front) is the deployment's
+# choice, never a product fact; the hook registration it calls for is a
+# hand step either way (one hook per watched repo: url + secret + the
+# v17 events), and the daemon self-diagnoses a watched repo whose hook
+# is missing.
 #
 # The unit runs under DynamicUser with ProtectHome, so the host's own
 # service registration file (in the operator's home) is out of reach:
@@ -61,30 +73,30 @@ let
 
   configFile = pkgs.writeText "watcher-daemon.json" (builtins.toJSON settings');
 
-  # The token keys the sources read from their config blocks. The forge
-  # source's namespace is the block's own keys, so its token is the
-  # top-level forgeToken; the other four read their own block's token
-  # key. The walk refuses a token at any depth, so an old-config paste
-  # (the pre-split options.watcher shape, tokens included) fails named
-  # instead of silently winning over the secrets file.
+  # The secret keys the module refuses in settings, one walk per
+  # family: the sources' tokens (isTokenKey), and the webhook
+  # receiver's secret (PRJ-542). The walk skips derivations (a settings
+  # value may be one) and walks lists, so no placement hides.
   isTokenKey = name: name == "token" || name == "forgeToken";
 
-  # The token keys' paths in settings, named for the refusal message.
-  # The walk skips derivations (a settings value may be one) and walks
-  # lists, so no placement hides.
-  tokenPathsOf =
-    value: prefix:
+  # The webhook secret's keys: the receiver's settings paste targets.
+  isWebhookSecretKey = name: name == "webhookSecret" || name == "secret";
+
+  # The refused keys' paths in settings, named for the refusal message.
+  secretPathsOf =
+    pred: value: prefix:
     if lib.isAttrs value && !(value ? "type" && value.type == "derivation") then
       lib.concatMap (
         name:
-        if isTokenKey name then [ "${prefix}.${name}" ] else tokenPathsOf value.${name} "${prefix}.${name}"
+        if pred name then [ "${prefix}.${name}" ] else secretPathsOf pred value.${name} "${prefix}.${name}"
       ) (builtins.attrNames value)
     else if lib.isList value then
-      lib.concatMap (item: tokenPathsOf item prefix) value
+      lib.concatMap (item: secretPathsOf pred item prefix) value
     else
       [ ];
 
-  tokenPaths = tokenPathsOf cfg.settings "settings";
+  tokenPaths = secretPathsOf isTokenKey cfg.settings "settings";
+  webhookSecretPaths = secretPathsOf isWebhookSecretKey cfg.settings "settings";
 in
 {
   options.services.watcher-daemon = {
@@ -94,6 +106,31 @@ in
       type = types.port;
       default = 8473;
       description = "Port the daemon's local route listens on (the route binds 127.0.0.1 only). The plugin's options.watcher.daemonUrl names this as http://127.0.0.1:<port>.";
+    };
+
+    webhookPort = mkOption {
+      type = types.port;
+      default = 8474;
+      description = "Port the daemon's webhook receiver (PRJ-542) listens on — the daemon's second server, the forge's X-Forgejo-Signature-verified deliveries in.";
+    };
+
+    webhookBind = mkOption {
+      type = types.str;
+      default = "127.0.0.1";
+      description = ''
+        Address the webhook receiver binds. Loopback is the default and
+        the adopter-first shape: zero infra change, and a forge that
+        cannot reach the host loses nothing — polling stays the
+        backstop. Making the receiver reachable is a deployment choice,
+        not a product fact: allow-list it on the LAN, front it with a
+        tunnel, or point the forge at it directly, whatever the host's
+        shape allows. The hook registration is a hand step either way —
+        one hook per watched repo (url + secret + the v17 events) — and
+        the daemon self-diagnoses a watched repo whose hook is missing;
+        state the url the hooks carry in settings.webhookUrl when the
+        deployment's reachability choice produces one that differs from
+        the receiver's own origin.
+      '';
     };
 
     stateDir = mkOption {
@@ -115,13 +152,15 @@ in
         the plugin's options.watcher carried before the split
         (forgeUrl, pollSeconds, the slack/github/pagerduty/linear
         blocks). Non-secret knobs only: the rendered file is a store
-        path, world-readable by construction (0444), and the sources
-        read their tokens from the environment first with the block
-        winning per key — the module refuses a token anywhere in
-        settings (the forge's forgeToken, or a token key inside the
-        slack, github, pagerduty, or linear block). The projection's
-        database path defaults under stateDir
-        (`/var/lib/watcher-daemon/pr-state.db`).
+        path, world-readable by construction (0444), and the module
+        refuses both a token anywhere in settings (the forge's
+        forgeToken, or a token key inside the slack, github, pagerduty,
+        or linear block) and a webhook secret anywhere in settings
+        (webhookSecret). The projection's database path defaults under
+        stateDir (`/var/lib/watcher-daemon/pr-state.db`).
+        settings.webhookUrl (optional) names the url the deployment
+        registered its webhook hooks under, for the missing-hook
+        diagnosis.
       '';
     };
 
@@ -148,7 +187,9 @@ in
         the secrets the sources read from the environment:
         `FORGEJO_TOKEN` (required — the watcher is off without it),
         `SLACK_TOKEN`, `GITHUB_TOKEN`, `PAGERDUTY_TOKEN`, `LINEAR_TOKEN`,
-        and `WATCHER_OPENCODE_PASSWORD` — the opencode server's local
+        `WATCHER_WEBHOOK_SECRET` (the webhook receiver's shared secret —
+        empty or absent fails closed: every delivery answers 403), and
+        `WATCHER_OPENCODE_PASSWORD` — the opencode server's local
         password matching `opencodeUrl`.
       '';
     };
@@ -186,6 +227,17 @@ in
           services.watcher-daemon.settings carries a token (${lib.concatStringsSep ", " tokenPaths}) — refuse it. The rendered config file is a store path and world-readable, and the sources read the environment first with the block winning per key, so a token here would silently override the secrets file and leak through the store path. Every source's token rides the secrets file's EnvironmentFile instead: the forge source reads FORGEJO_TOKEN (the block's own forgeToken key), the slack source reads SLACK_TOKEN (slack.token), the github source reads GITHUB_TOKEN (github.token), the pagerduty source reads PAGERDUTY_TOKEN (pagerduty.token), and the linear source reads LINEAR_TOKEN (linear.token). settings carries non-secret knobs only (forgeUrl, pollSeconds, dbPath, and the source blocks' urls, services, and projects).
         '';
       }
+      {
+        # The webhook secret's sibling refusal (PRJ-542): the same store
+        # path, the same leak, a different secret — the receiver's shared
+        # secret rides the secrets file as WATCHER_WEBHOOK_SECRET, read
+        # from the environment alone, and an empty one fails closed
+        # rather than leaking an unverified acceptance.
+        assertion = webhookSecretPaths == [ ];
+        message = ''
+          services.watcher-daemon.settings carries a webhook secret (${lib.concatStringsSep ", " webhookSecretPaths}) — refuse it. The rendered config file is a store path and world-readable, so a webhook secret pasted into settings would leak through it. The receiver's secret rides the secrets file's EnvironmentFile instead, as WATCHER_WEBHOOK_SECRET, which the receiver reads from the environment alone. settings carries non-secret knobs only.
+        '';
+      }
     ];
 
     systemd.services.watcher-daemon = {
@@ -209,6 +261,8 @@ in
       environment = {
         WATCHER_CONFIG = "${configFile}";
         WATCHER_ROUTE_PORT = toString cfg.listenPort;
+        WATCHER_WEBHOOK_PORT = toString cfg.webhookPort;
+        WATCHER_WEBHOOK_BIND = cfg.webhookBind;
         WATCHER_OPENCODE_URL = cfg.opencodeUrl;
       };
 
@@ -227,6 +281,13 @@ in
         Restart = "on-failure";
         RestartSec = 5;
       };
+      # A secrets-file change is invisible to the unit otherwise: the
+      # EnvironmentFile references the file by path, so a new secret
+      # content redeploys nothing and the running daemon would hold the
+      # old WATCHER_WEBHOOK_SECRET and source tokens until a restart it
+      # never saw coming. The trigger restarts the service on the file's
+      # change.
+      restartTriggers = [ cfg.secretsFile ];
     };
   };
 }

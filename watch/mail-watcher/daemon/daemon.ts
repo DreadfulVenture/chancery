@@ -18,6 +18,18 @@
 //   stays free of credentials.
 // - WATCHER_ROUTE_PORT (or --port <n>): the local route's port
 //   (default 8473; the route binds 127.0.0.1 only).
+// - WATCHER_WEBHOOK_PORT (or --webhook-port <n>) and
+//   WATCHER_WEBHOOK_BIND (or --webhook-bind <addr>): the webhook
+//   receiver's (PRJ-542) port (default 8474) and bind address (default
+//   127.0.0.1 — the adopter-first shape; a reachable deployment names
+//   its own bind, a tunnel front or an LAN allow-list, and registers
+//   its hooks against the url that reachability choice produces).
+// - WATCHER_WEBHOOK_SECRET: the webhook receiver's shared secret, read
+//   from the environment alone — the secrets file feeds it, never the
+//   rendered settings (the module refuses a webhook secret in
+//   settings). Empty or absent fails closed: the receiver answers
+//   every delivery 403 and says so, rather than serving an unverified
+//   one.
 // - WATCHER_OPENCODE_URL / WATCHER_OPENCODE_PASSWORD (or the host's
 //   registration file, host-client.ts): the opencode server the
 //   daemon's stamps, mail, and event stream ride.
@@ -30,9 +42,15 @@ import { readFileSync } from "node:fs";
 import { resolveHost, hostContext } from "./host-client.ts";
 import { composeWatcher } from "./composition.ts";
 import { startRoute } from "./route.ts";
+import {
+  startHookDiagnosis,
+  startWebhookReceiver,
+} from "./webhook-receiver.ts";
 import { readStamps } from "../kernel.ts";
 
 const ROUTE_PORT_DEFAULT = 8473;
+const WEBHOOK_PORT_DEFAULT = 8474;
+const WEBHOOK_BIND_DEFAULT = "127.0.0.1";
 
 const argOf = (argv: string[], flag: string): string | undefined => {
   const exact = argv.indexOf(flag);
@@ -50,9 +68,15 @@ const argOf = (argv: string[], flag: string): string | undefined => {
 export const startDaemon = async ({
   watcherBlock = {},
   port,
+  webhookPort = WEBHOOK_PORT_DEFAULT,
+  webhookBind = WEBHOOK_BIND_DEFAULT,
+  webhookSecret = "",
 }: {
   watcherBlock?: Record<string, unknown>;
   port: number;
+  webhookPort?: number;
+  webhookBind?: string;
+  webhookSecret?: string;
 }) => {
   const resolved = resolveHost();
   if (!resolved.ok) throw new Error(resolved.reason);
@@ -64,6 +88,39 @@ export const startDaemon = async ({
   };
 
   const composition = await composeWatcher({ ctx });
+
+  // The webhook receiver (PRJ-542): the daemon's second server, the
+  // forge's deliveries in, the verified payloads pushed into the
+  // composition's ingest queue. Fail closed on an empty secret — the
+  // receiver still serves, and every delivery answers the named 403,
+  // so a deployment that forgot WATCHER_WEBHOOK_SECRET sees the reason
+  // in the forge's delivery history instead of silence.
+  const receiver = await startWebhookReceiver({
+    host: webhookBind,
+    port: webhookPort,
+    secret: webhookSecret,
+    ingest: composition.ingest,
+    debug: composition.debug,
+  });
+
+  // The missing-hook self-diagnosis (PRJ-542): watched forge repos
+  // whose hooks read names no active hook at this receiver's url are
+  // said on their line — the hand registration the deployment owns.
+  // The stated webhookUrl (a non-secret knob in the watcher block)
+  // names the url a tunnel-fronted or LAN-reachable deployment
+  // registered its hooks under; without one, the receiver's own origin.
+  const statedHookUrl =
+    typeof watcherBlock.webhookUrl === "string" &&
+    watcherBlock.webhookUrl.trim() !== ""
+      ? watcherBlock.webhookUrl.trim()
+      : null;
+  const hookDiagnosis = startHookDiagnosis({
+    watches: () => composition.kernel.watches(),
+    hooksOf: composition.hooksOf,
+    expectedUrl: () => statedHookUrl ?? receiver.url,
+    debug: composition.debug,
+  });
+
   const route = await startRoute({
     port,
     register: (req, caller) => composition.kernel.register(req, caller),
@@ -85,8 +142,11 @@ export const startDaemon = async ({
   });
   return {
     route,
+    receiver,
     composition,
     stop: async () => {
+      await receiver.close();
+      hookDiagnosis.stop();
       await route.close();
       await composition.cleanup();
     },
@@ -136,9 +196,39 @@ export const main = async (argv: string[] = []) => {
     process.exit(1);
   }
 
+  const webhookPort = Number(
+    argOf(argv, "--webhook-port") ??
+      process.env.WATCHER_WEBHOOK_PORT ??
+      WEBHOOK_PORT_DEFAULT,
+  );
+  if (
+    !Number.isFinite(webhookPort) ||
+    webhookPort <= 0 ||
+    webhookPort > 65535
+  ) {
+    console.error(
+      `[watcher-daemon] the webhook receiver's port must be 1-65535 (got ${webhookPort})`,
+    );
+    process.exit(1);
+  }
+  const webhookBind =
+    argOf(argv, "--webhook-bind") ??
+    process.env.WATCHER_WEBHOOK_BIND ??
+    WEBHOOK_BIND_DEFAULT;
+  // The secret rides the environment alone (the secrets file feeds the
+  // unit's EnvironmentFile); there is no flag for it, and a
+  // config-file placement is what the module's assertion refuses.
+  const webhookSecret = process.env.WATCHER_WEBHOOK_SECRET ?? "";
+
   let daemon;
   try {
-    daemon = await startDaemon({ watcherBlock, port });
+    daemon = await startDaemon({
+      watcherBlock,
+      port,
+      webhookPort,
+      webhookBind,
+      webhookSecret,
+    });
   } catch (error) {
     console.error(
       `[watcher-daemon] ${error instanceof Error ? error.message : error}`,
@@ -147,6 +237,9 @@ export const main = async (argv: string[] = []) => {
   }
   console.error(
     `[watcher-daemon] the route answers at ${daemon.route.url} (register/list/forget/state); polling every ${Math.round(1000 * Number(watcherBlock.pollSeconds ?? 30))}ms`,
+  );
+  console.error(
+    `[watcher-daemon] the webhook receiver answers at ${daemon.receiver.url} (X-Forgejo-Signature verified deliveries; the secret rides WATCHER_WEBHOOK_SECRET${webhookSecret ? "" : " — unset, so every delivery is refused"})`,
   );
 
   let stopping = false;

@@ -100,6 +100,15 @@ let
       };
       names = "the linear source reads LINEAR_TOKEN";
     }
+    {
+      # The webhook receiver's secret (PRJ-542): the same store-path
+      # leak, its own refusal, naming the env name the receiver reads.
+      name = "webhook-secret";
+      settings = {
+        webhookSecret = "x";
+      };
+      names = "WATCHER_WEBHOOK_SECRET";
+    }
   ];
 
   verdict = lib.forEach cases (
@@ -139,6 +148,22 @@ let
     else
       "opencodeUrl-forgotten";
 
+  # The restartTriggers behavior (PRJ-542): the unit must carry the
+  # secrets file as a restart trigger, so a changed secret content
+  # restarts the daemon instead of leaving it running on the old
+  # WATCHER_WEBHOOK_SECRET and source tokens. The trigger's attribute is
+  # selected alone — the raw stub keeps the unit's other attributes
+  # (the package interpolation included) unforced.
+  restartTriggers =
+    let
+      unit = (evalOf base).config.systemd.services.watcher-daemon;
+      triggers = unit.restartTriggers or null;
+    in
+    if triggers != [ base.secretsFile ] then
+      builtins.throw "the module's unit carries no restartTriggers on the secrets file: ${builtins.toJSON triggers}"
+    else
+      "restartTriggers";
+
   clean = refused base;
 in
 if clean != [ ] then
@@ -146,5 +171,12 @@ if clean != [ ] then
     lib.concatMapStringsSep " | " (a: a.message) clean
   }"
 else
-  lib.deepSeq (verdict ++ [ forgottenUrl ])
-    "all five token placements refused, each naming its source's secret; the forgotten opencodeUrl reaches the friendly assertion"
+  lib.deepSeq
+    (
+      verdict
+      ++ [
+        forgottenUrl
+        restartTriggers
+      ]
+    )
+    "all five token placements refused, each naming its source's secret; the webhook secret placement refused, naming WATCHER_WEBHOOK_SECRET; the forgotten opencodeUrl reaches the friendly assertion; the unit restarts on a secrets-file change"

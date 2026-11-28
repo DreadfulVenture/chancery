@@ -114,6 +114,18 @@ import {
 } from "./kernel.ts";
 import { WatchSource } from "./source.ts";
 import { forgejoReady } from "./config.ts";
+// The webhook deliveries' event side (PRJ-542): the ingest queue's
+// shape the drain reads, the Actions statuses (one vocabulary for the
+// wire's two doors), and the cross-family absorbs — a webhook-delivered
+// run or review's marker stops the REST read from waking it again.
+import {
+  TERMINAL_STATUSES,
+  reviewDedupeId,
+  webhookPrMarkerKey,
+  webhookRunSpent,
+  type IngestEntry,
+  type IngestQueue,
+} from "./webhook-events.ts";
 
 const WATCH_KINDS = new Set(["run", "pr", "branch", "pr-reviews"]);
 // The PagerDuty and Linear sources' claims rows (kinds "pagerduty" and
@@ -131,12 +143,6 @@ const WATCH_KINDS = new Set(["run", "pr", "branch", "pr-reviews"]);
 // with the session. A row whose kind sits outside this set therefore
 // keeps its delivered markers exactly as its owner wrote them; nothing
 // rebuilds it with an empty map, so nothing re-wakes.
-const TERMINAL_STATUSES = new Set([
-  "success",
-  "failure",
-  "cancelled",
-  "skipped",
-]);
 const NON_TERMINAL_STATUSES = new Set([
   "running",
   "waiting",
@@ -548,19 +554,28 @@ type ForgejoReads = {
   ) => Promise<unknown>;
 };
 
+// The ingest half (PRJ-542): the verified webhook deliveries' queue,
+// drained at each pass. Typed at its take alone — the source never
+// pushes; the receiver does.
+type ForgejoIngest = Pick<IngestQueue, "take">;
+
 // The Forgejo source: the contract's class shape over the module's pure
 // boundary (the run and review parsers, the pull-record lifecycle, the
 // log-tail read) and the REST reads built beside it. A pr or branch
 // watch shares one claim group — a second register on the same repo+ref
-// returns the claimed watch instead of a second owner.
+// returns the claimed watch instead of a second owner. The ingest queue
+// (PRJ-542) rides in as the third wiring: the receiver's verified
+// deliveries, drained at each pass before the REST reads.
 export class ForgejoSource extends WatchSource {
   readonly id = "forgejo";
 
   private readonly reads: ForgejoReads;
+  private readonly ingest: ForgejoIngest | null;
 
-  constructor(reads: ForgejoReads, debug: Debug) {
+  constructor(reads: ForgejoReads, debug: Debug, ingest?: ForgejoIngest) {
     super(debug);
     this.reads = reads;
+    this.ingest = ingest ?? null;
   }
 
   protected readConfig(config: unknown): unknown {
@@ -579,10 +594,15 @@ export class ForgejoSource extends WatchSource {
 
   // The register request's validation: the source's own argument errors,
   // thrown for the tool to surface. The messages are today's, word for
-  // word; the kind check and the note limit are the base's.
+  // word; the kind check and the note limit are the base's. The repo
+  // reads lowercase — the canonical form the ingest queue keys by (the
+  // receiver's payload normalization canonicalizes its side the same
+  // way), so a case-mismatched spelling can never miss a delivery.
   normalize(req: RegisterRequest): WatchRowSeed {
     const kind = this.checkKind(req);
-    const repo = String(req.repo || "").trim();
+    const repo = String(req.repo || "")
+      .trim()
+      .toLowerCase();
     if (!/^[^/]+\/[^/]+$/.test(repo)) {
       throw new Error(
         `watcher_register: repo must be owner/name (got ${JSON.stringify(req.repo)})`,
@@ -631,12 +651,49 @@ export class ForgejoSource extends WatchSource {
     return Object.fromEntries(reviews.map((review) => [review.id, true]));
   }
 
+  // The ingest's takes, per watch kind: the queue's entries this watch
+  // can consume, drained BEFORE the API reads (PRJ-542) so a verified
+  // delivery is processed even when the read then fails, and never
+  // delayed behind one. A baseline-pending watch takes nothing — the
+  // fresh page its first pass spends whole covers the queue's entries,
+  // and the spend's markers keep their replays absorbed (the baseline
+  // race's resolution). A queue entry the watch cannot consume stays
+  // queued for the watch that can; a repo's register still in flight
+  // is no consumer at all.
+  private takeIngest(
+    watch: AdoptedWatch,
+    cursor: WatchCursor,
+    want: (entry: IngestEntry) => boolean,
+  ): IngestEntry[] {
+    if (cursor.baselinePending || !this.ingest) return [];
+    return this.ingest.take(watch.repo, want);
+  }
+
+  // The drain's absorb: a queue entry whose dedupe id is spent (a
+  // replayed delivery) or whose REST-form id is spent (the other path
+  // got there first — the REST row's plain id, the lifecycle's
+  // "closed") is dropped here; the marker either form wrote keeps the
+  // item at one wake.
+  private ingestEvents(
+    entries: IngestEntry[],
+    cursor: WatchCursor,
+    restSpent: (entry: IngestEntry) => boolean,
+  ): WatchEvent[] {
+    return entries
+      .filter(
+        (entry) => !this.isSpent(cursor, entry.event.id) && !restSpent(entry),
+      )
+      .map((entry) => entry.event);
+  }
+
   // The poll read, per kind — a pure read answering normalized events.
   // Null answers "the read gave nothing usable" (the pass skips; a
   // baseline-pending row keeps its flag); an array answers a successful
   // read (a baseline-pending row spends it, empty or not). The cursor is
   // the watch's stamp-carried progress; the memo shares this pass's
-  // reads with the projection.
+  // reads with the projection. The ingest queue's entries (PRJ-542)
+  // answer ahead of the REST rows, in the order the read of each
+  // surface follows them.
   async poll(
     watch: AdoptedWatch,
     cursor: WatchCursor,
@@ -651,6 +708,12 @@ export class ForgejoSource extends WatchSource {
       // pass that already read this PR's reviews for the projection (or
       // for another wake) reads them no second time, and a read that
       // already failed this pass fails the wake without a retry.
+      const queued = this.takeIngest(
+        watch,
+        cursor,
+        (entry) =>
+          entry.family === "pr-review" && String(entry.index) === watch.ref,
+      );
       const memoKey = `reviews ${watch.repo} ${Number(watch.ref)}`;
       let data = pass.memo.get(memoKey);
       if (data === undefined) {
@@ -664,14 +727,33 @@ export class ForgejoSource extends WatchSource {
           pass.memo.set(memoKey, data);
         } catch (error) {
           pass.memo.set(memoKey, null);
+          // The drain ran before the read: its entries are answered even
+          // when the read failed — a verified delivery is never lost
+          // behind a failing read. Nothing queued: the read's failure is
+          // the answer, said and left to the next pass.
+          const fromQueue = this.ingestEvents(queued, cursor, (entry) =>
+            this.isSpent(cursor, entry.reviewId ?? NaN),
+          );
+          if (fromQueue.length > 0) return fromQueue;
           throw error;
         }
       }
-      if (data === null) return null;
+      if (data === null) {
+        // A read that already failed this pass: the drain's entries are
+        // answered even so — a verified delivery is never lost behind a
+        // failing read.
+        const fromQueue = this.ingestEvents(queued, cursor, (entry) =>
+          this.isSpent(cursor, entry.reviewId ?? NaN),
+        );
+        return fromQueue.length > 0 ? fromQueue : null;
+      }
       const reviews = parseReviews(data);
       if (!reviews) {
         this.debug("reviews.list.unparsed", { id: watch.id, pr: watch.ref });
-        return null;
+        const fromQueue = this.ingestEvents(queued, cursor, (entry) =>
+          this.isSpent(cursor, entry.reviewId ?? NaN),
+        );
+        return fromQueue.length > 0 ? fromQueue : null;
       }
       // A register whose own baseline read could not run (the forge was
       // down, the entry unusable) left the baseline to this pass: the
@@ -682,37 +764,152 @@ export class ForgejoSource extends WatchSource {
           baseline: true,
         }));
       }
-      return reviews
-        .filter((review) => !this.isSpent(cursor, review.id))
-        .map((review) => reviewEventOf(review));
+      // The webhook-first reviews answer ahead of the REST page; the
+      // REST side skips a review either family's marker already spent,
+      // and skips the very ids this pass's drain took (one pass, one
+      // wake per review — the queue entry answers, the REST row does
+      // not repeat it).
+      const takenReviewIds = new Set(
+        queued.map((entry) => entry.reviewId).filter((id) => id !== undefined),
+      );
+      const reviewSpent = (review: { id: number }) =>
+        this.isSpent(cursor, review.id) ||
+        takenReviewIds.has(review.id) ||
+        this.isSpent(
+          cursor,
+          reviewDedupeId(watch.repo, Number(watch.ref), review.id),
+        );
+      return [
+        ...this.ingestEvents(queued, cursor, (entry) =>
+          this.isSpent(cursor, entry.reviewId ?? NaN),
+        ),
+        ...reviews
+          .filter((review) => !reviewSpent(review))
+          .map((review) => reviewEventOf(review)),
+      ];
     }
     if (watch.kind === "run") {
-      const run = runRowOf(
-        await this.reads.runRecord(owner, repo, Number(watch.ref)),
+      // The run watch's drain: the queue's deliveries for this run id,
+      // ahead of the record read. The REST side absorbs a run a webhook
+      // delivered (the dedupe id's prefix, the row's own id) and skips
+      // the non-terminal rows as before; the ids this pass's drain took
+      // answer once, from the queue.
+      const queued = this.takeIngest(
+        watch,
+        cursor,
+        (entry) =>
+          entry.family === "run" &&
+          entry.runId !== undefined &&
+          String(entry.runId) === watch.ref,
       );
+      const takenRunIds = new Set(
+        queued.map((entry) => entry.runId).filter((id) => id !== undefined),
+      );
+      let run;
+      try {
+        run = runRowOf(
+          await this.reads.runRecord(owner, repo, Number(watch.ref)),
+        );
+      } catch (error) {
+        // The drain ran before the read; its entries answer even when
+        // the read failed — a verified delivery is never lost behind a
+        // failing read. Nothing queued: the read's failure is the
+        // answer, said and left to the next pass.
+        this.debug("run.record.unread", {
+          id: watch.id,
+          run: watch.ref,
+          error: String(error),
+        });
+        const fromQueue = this.ingestEvents(queued, cursor, (entry) =>
+          this.isSpent(cursor, String(entry.runId)),
+        );
+        if (fromQueue.length > 0) return fromQueue;
+        throw error;
+      }
       if (!run) {
         this.debug("run.record.unparsed", { id: watch.id, run: watch.ref });
-        return null;
+        return this.ingestEvents(queued, cursor, (entry) =>
+          this.isSpent(cursor, String(entry.runId)),
+        );
       }
-      if (!runIsTerminal(run, this.debug) || this.isSpent(cursor, run.id)) {
-        return [];
-      }
-      return [runEventOf(run)];
+      const restEvents =
+        !runIsTerminal(run, this.debug) ||
+        this.isSpent(cursor, run.id) ||
+        takenRunIds.has(run.id) ||
+        webhookRunSpent(cursor.delivered, watch.repo, run.id)
+          ? []
+          : [runEventOf(run)];
+      return [
+        ...this.ingestEvents(queued, cursor, (entry) =>
+          this.isSpent(cursor, String(entry.runId)),
+        ),
+        ...restEvents,
+      ];
     }
+    // The pr and branch watches: the head resolves fresh each pass, so a
+    // later push presents new runs of the same watch. The pr watch's
+    // close rides first — a queue entry for it (the delivery's own
+    // dedupe id) ahead of the lifecycle read's word.
+    const closed =
+      watch.kind === "pr"
+        ? this.takeIngest(
+            watch,
+            cursor,
+            (entry) =>
+              entry.family === "pr-close" && String(entry.index) === watch.ref,
+          )
+        : [];
     let sha;
     if (watch.kind === "pr") {
       // The pull-request read decides two things every pass: the watch's
       // lifecycle — a closed pull request ends it, before any run is
       // read — and, on an open one, the head the run reads follow.
-      const pull = parsePullRecord(
-        await this.reads.prRecord(owner, repo, Number(watch.ref)),
-      );
+      let pull;
+      try {
+        pull = parsePullRecord(
+          await this.reads.prRecord(owner, repo, Number(watch.ref)),
+        );
+      } catch (error) {
+        this.debug("pr.record.unread", {
+          id: watch.id,
+          pr: watch.ref,
+          error: String(error),
+        });
+        const fromQueue = this.ingestEvents(closed, cursor, () =>
+          this.isSpent(cursor, LIFECYCLE),
+        );
+        if (fromQueue.length > 0) return fromQueue;
+        throw error;
+      }
       if (pull === null) {
         this.debug("pr.record.unparsed", { id: watch.id, pr: watch.ref });
-        return null;
+        return this.ingestEvents(closed, cursor, () =>
+          this.isSpent(cursor, LIFECYCLE),
+        );
       }
       const life = prLifecycle(pull, this.debug);
-      if (life) return [lifecycleEventOf(life)];
+      if (life) {
+        // The close, twice named (the queue's delivery and the read's
+        // word): the first settles, the second finds no row to mark —
+        // the one-terminal-mail rule, unchanged. The drain's entry goes
+        // first, the read's word behind it. A close a webhook delivered
+        // earlier carries its dedupe id on the row; the read's word
+        // answers under that marker's own key, so the heal pass's
+        // settle reads it spent — the mail already went — and rides the
+        // dissolve, never a second close mail.
+        const markerKey = webhookPrMarkerKey(
+          cursor.delivered,
+          watch.repo,
+          Number(watch.ref),
+        );
+        const restClose = lifecycleEventOf(life);
+        return [
+          ...this.ingestEvents(closed, cursor, () =>
+            this.isSpent(cursor, LIFECYCLE),
+          ),
+          markerKey ? { ...restClose, id: markerKey } : restClose,
+        ];
+      }
       sha = pull?.head?.sha;
       if (typeof sha !== "string" || !sha) {
         this.debug("watch.head.unresolved", { id: watch.id, kind: watch.kind });
@@ -722,16 +919,50 @@ export class ForgejoSource extends WatchSource {
       sha = await branchSha(watch, this.debug, this.reads.branchesOf);
     }
     if (!sha) return null;
-    const listed = parseRunRows(
-      await this.reads.runsOfHead(owner, repo, sha, RUNS_PER_HEAD),
+    // The head's run deliveries: taken after the sha resolves — the
+    // payload's head sha is the match — and before the runs read, so the
+    // queue's entries answer first and the REST page absorbs what they
+    // spent (the prefix read, own keys only).
+    const headRuns = this.takeIngest(
+      watch,
+      cursor,
+      (entry) => entry.family === "run" && entry.headSha === sha,
     );
+    const takenRunIds = new Set(
+      headRuns.map((entry) => entry.runId).filter((id) => id !== undefined),
+    );
+    let listed;
+    try {
+      listed = parseRunRows(
+        await this.reads.runsOfHead(owner, repo, sha, RUNS_PER_HEAD),
+      );
+    } catch (error) {
+      this.debug("runs.list.unread", {
+        id: watch.id,
+        error: String(error),
+      });
+      const fromQueue = this.ingestEvents(headRuns, cursor, (entry) =>
+        this.isSpent(cursor, String(entry.runId)),
+      );
+      if (fromQueue.length > 0) return fromQueue;
+      throw error;
+    }
     if (!listed) {
       this.debug("runs.list.unparsed", { id: watch.id });
-      return null;
+      return headRuns.length
+        ? this.ingestEvents(headRuns, cursor, (entry) =>
+            this.isSpent(cursor, String(entry.runId)),
+          )
+        : null;
     }
     const events: WatchEvent[] = [];
     for (const entry of listed) {
-      if (!runIsTerminal(entry, this.debug) || this.isSpent(cursor, entry.id)) {
+      if (
+        !runIsTerminal(entry, this.debug) ||
+        this.isSpent(cursor, entry.id) ||
+        takenRunIds.has(entry.id) ||
+        webhookRunSpent(cursor.delivered, watch.repo, entry.id)
+      ) {
         continue;
       }
       // The verdict is built from the run's full record, and falls back
@@ -753,7 +984,12 @@ export class ForgejoSource extends WatchSource {
       }
       events.push(runEventOf(run));
     }
-    return events;
+    return [
+      ...this.ingestEvents(headRuns, cursor, (entry) =>
+        this.isSpent(cursor, String(entry.runId)),
+      ),
+      ...events,
+    ];
   }
 
   // The verdict's detail reads — the job states and the failing job's
@@ -763,7 +999,11 @@ export class ForgejoSource extends WatchSource {
   // The answer is opaque to the kernel; render lays it into the mail.
   async prepare(watch: AdoptedWatch, event: WatchEvent) {
     if (event.type !== "run") return undefined;
-    const runId = Number(event.id);
+    // The run's id comes off the event's fields (the `run` field both
+    // families lay down): the webhook events' ids are the content-derived
+    // dedupe ids, and Number(event.id) would read a run that does not
+    // exist.
+    const runId = Number(eventValue(event, "run") ?? event.id);
     const [owner, name] = watch.repo.split("/");
     let jobs = null;
     try {

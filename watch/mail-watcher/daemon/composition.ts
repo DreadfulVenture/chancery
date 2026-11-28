@@ -22,6 +22,11 @@ import {
 import { forgeClient } from "../forge-client.ts";
 import { debugOf, forgejoReady } from "../config.ts";
 import { ForgejoSource } from "../forgejo-source.ts";
+// The webhook deliveries' ingest queue (PRJ-542): the receiver's
+// verified deliveries land here, and the forge source drains it at each
+// pass. A push wakes the kernel — a delivery asks for a pass now, not
+// at the next timer tick.
+import { createIngestQueue } from "../webhook-events.ts";
 // The Slack source: the watcher's third source on the kernel's source
 // contract (the forge source first, github second — the forge source's
 // registration shape, not a legacy leg): a session subscribes to a
@@ -130,7 +135,19 @@ export const composeWatcher = async ({
       { max_bytes: LOG_TAIL_BYTES },
     );
 
-  // The source, over those reads.
+  // The hooks read (PRJ-542): the missing-hook self-diagnosis's read,
+  // one hooks list per watched repo per diagnosis round.
+  const hooksOf = (owner, name) => forge.get(`/repos/${owner}/${name}/hooks`);
+
+  // The ingest queue (PRJ-542): the receiver's verified deliveries push
+  // into it per repo, and each push wakes the kernel — the pass the
+  // wake starts drains the queue before its REST reads. The kernel is
+  // named after the queue here because the closure runs long after the
+  // assignment; the receiver that pushes starts only once the
+  // composition has returned.
+  const ingest = createIngestQueue({ wake: () => kernel.wake(), debug });
+
+  // The source, over those reads, with the ingest half beside them.
   const source = new ForgejoSource(
     {
       prRecord,
@@ -142,6 +159,7 @@ export const composeWatcher = async ({
       branchesOf,
     },
     debug,
+    ingest,
   );
 
   // The Slack source: built beside the forge source when the config's
@@ -260,6 +278,11 @@ export const composeWatcher = async ({
     kernel,
     debug,
     projectionSync,
+    // The ingest queue and the hooks read, the receiver's two wiring
+    // points: daemon.ts starts the receiver pushing into the queue and
+    // the hook diagnosis reading the hooks lists.
+    ingest,
+    hooksOf,
     cleanup: async () => {
       await kernel.cleanup();
       if (disposeTools) await step("tool registration", disposeTools);

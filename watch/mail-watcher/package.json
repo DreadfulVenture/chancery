@@ -6,7 +6,9 @@
     "node": ">=24"
   },
   "dependencies": {
+    "@hono/node-server": "2.1.11",
     "drizzle-orm": "1.0.0-rc.5-ab785fc",
+    "hono": "4.13.22",
     "zod": "4.6.7"
   }
 }

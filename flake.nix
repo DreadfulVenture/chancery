@@ -572,9 +572,11 @@
                 }
                 // The plugin side holds no kernel and no credential; the
                 // daemon's composition must load beside it in the packaged
-                // layout, and the route server's module with it.
+                // layout, and the route server's module with it — the
+                // webhook receiver's module beside them both (PRJ-542).
                 await import('${config.packages.mail-watcher}/lib/mail-watcher/daemon/composition.ts');
                 await import('${config.packages.mail-watcher}/lib/mail-watcher/daemon/route.ts');
+                await import('${config.packages.mail-watcher}/lib/mail-watcher/daemon/webhook-receiver.ts');
               " && touch "$out"
             '';
 

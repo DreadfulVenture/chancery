@@ -277,6 +277,13 @@ export type WatcherKernel = {
   isStopped(): boolean;
   failedWrites: Set<string>;
   cleanup(): Promise<void>;
+  /**
+   * The ingest's wake (PRJ-542): a verified webhook delivery asks for a
+   * pass now, not at the next timer tick. The ask re-arms one more pass
+   * when a pass is already in flight — one pass at a time, the same
+   * rule the timer runs under, and no new stamp write or delivery path.
+   */
+  wake(): void;
 };
 
 export function stampOf(metadata: unknown): StampRow[] | null {
@@ -870,11 +877,39 @@ export function createWatcherKernel(options: KernelOptions): WatcherKernel {
       polling = false;
     }
     debug("poll.pass", { watches: registry.size });
+    // A delivery that landed mid-pass re-armed here: one more pass now,
+    // still one at a time, until the queue's entries are consumed.
+    if (wakeQueued && !stopped) {
+      wakeQueued = false;
+      if (!polling) pass = pollOnce();
+    }
   };
 
   const timer = setInterval(() => {
     if (!polling) pass = pollOnce();
   }, pollMs);
+
+  // The ingest's wake (PRJ-542): a verified webhook delivery asks for a
+  // pass now. The ask is a flag and one deferred schedule — the
+  // receiver's 200 answers before the pass starts — and a delivery
+  // landing mid-pass re-arms one more pass at the pass's end, so a
+  // burst never waits behind pollMs. Nothing here writes stamps or
+  // delivers; it only starts the same pass the timer starts.
+  let wakeQueued = false;
+  let wakeScheduled = false;
+  const wake = () => {
+    if (stopped) return;
+    wakeQueued = true;
+    if (polling || wakeScheduled) return;
+    wakeScheduled = true;
+    setTimeout(() => {
+      wakeScheduled = false;
+      if (wakeQueued && !polling && !stopped) {
+        wakeQueued = false;
+        pass = pollOnce();
+      }
+    }, 0);
+  };
 
   // The family tool surface calls these; the tool definitions and their
   // schemas stay with the composer.
@@ -1038,6 +1073,7 @@ export function createWatcherKernel(options: KernelOptions): WatcherKernel {
     watches: () => [...registry.values()],
     isStopped: () => stopped,
     failedWrites,
+    wake,
     // OpenCode awaits the returned cleanup (packages/plugin/src/promise/
     // adapter.ts, v2.0.29). Each step runs even when the one before
     // throws; the composer appends its own steps after these.
