@@ -215,7 +215,7 @@ async function fakeOpencode(
       }
       if (
         request.method === "DELETE" &&
-        /^\/api\/session\//.test(url.pathname)
+        url.pathname.startsWith("/api/session/")
       ) {
         respondJson(response, null, 204);
         return;

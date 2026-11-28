@@ -421,11 +421,9 @@ const messageEventOf = (
 ): WatchEvent => ({
   id: message.ts,
   type: "message",
-  fields: [
-    ...(sender
-      ? [{ kind: "ref" as const, name: "sender", value: sender }]
-      : []),
-  ],
+  fields: sender
+    ? [{ kind: "ref" as const, name: "sender", value: sender }]
+    : [],
 });
 
 // The wake: the channel, the message's ts and sender, and the body —

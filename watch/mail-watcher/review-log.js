@@ -130,7 +130,7 @@ export class ReviewLog {
    * close or a gone). Returns the reasons the apply is incomplete; an
    * empty list is a clean write.
    */
-  apply({ repo, open, answers, now, limit, sweep }) {
+  apply({ repo, answers, now, limit, sweep }) {
     const reasons = [];
     for (const verdict of sweep ?? []) {
       if (verdict.how === "terminal" || verdict.how === "gone") {

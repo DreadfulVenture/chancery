@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HOME, plugin, withDaemon, SILENT } from "./harness.ts";
+import { HOME, withDaemon, SILENT } from "./harness.ts";
 
 test("injects cwd into memory tool calls before execution", async () => {
   await withDaemon(

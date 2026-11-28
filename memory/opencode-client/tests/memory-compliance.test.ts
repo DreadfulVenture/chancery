@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { plugin, SILENT, withDaemon } from "./harness.ts";
+import { SILENT, withDaemon } from "./harness.ts";
 
 // The compliance ladder (PRD-179) at the plugin boundary: the plugin only
 // reports — a turn leg per active prompt and a pull leg per reading verb —

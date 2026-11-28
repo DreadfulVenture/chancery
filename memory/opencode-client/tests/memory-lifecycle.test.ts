@@ -229,7 +229,7 @@ test("dispatch lineage: a record naming its own session as parent registers noth
 test("dispatch lineage: a failed stamp read neither marks nor captures, and retries", async () => {
   await withDaemon(
     () => SILENT,
-    async ({ fire, sessionHooks, emit, sessions, sessionGetLog }) => {
+    async ({ fire, sessionHooks, sessions, sessionGetLog }) => {
       // No row seeded: the host read fails.
       const turn = () =>
         fire(sessionHooks, "prompt", {

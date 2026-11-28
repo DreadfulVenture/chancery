@@ -110,7 +110,7 @@ describe("the finish diff", () => {
 
   it("a second poll of the same state diffs into nothing", () => {
     const runs = [run()];
-    const seen = [...runs.map(runId)];
+    const seen = runs.map(runId);
     expect(diffFinishes(runs, seen)).toEqual([]);
   });
 

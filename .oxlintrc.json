@@ -1,6 +1,6 @@
 {
   "categories": {
-    "correctness": "off"
+    "correctness": "error"
   },
   "rules": {
     "no-restricted-properties": [

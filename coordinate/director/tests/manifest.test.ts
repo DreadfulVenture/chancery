@@ -77,6 +77,10 @@ function fakeManifestContext(kv: Map<string, unknown>): Fixture {
     },
     event: {
       // No events ever fire; the pump idles here until cleanup aborts it.
+      // The async generator is the subscribe interface the plugin pumps;
+      // an intentionally empty event stream cannot yield, so the
+      // require-yield flag is exempted inline.
+      // oxlint-disable-next-line require-yield
       subscribe: async function* ({ signal }: { signal: AbortSignal }) {
         while (!signal.aborted) {
           await new Promise((resolve) => setTimeout(resolve, 5));

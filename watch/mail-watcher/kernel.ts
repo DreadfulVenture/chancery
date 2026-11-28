@@ -319,10 +319,13 @@ export async function writeStamps(
   } catch {
     return false;
   }
-  const fresh: Record<string, unknown> = { ...(info?.metadata ?? {}) };
-  const chancery: Record<string, unknown> = {
-    ...(isRecord(fresh[STAMP]) ? fresh[STAMP] : {}),
+  const fresh: Record<string, unknown> = {
+    ...(info?.metadata as object | undefined),
   };
+  const priorStamp = fresh[STAMP];
+  const chancery: Record<string, unknown> = isRecord(priorStamp)
+    ? { ...priorStamp }
+    : {};
   chancery[WATCHES] = rows;
   fresh[STAMP] = chancery;
   try {
@@ -835,7 +838,7 @@ export function createWatcherKernel(options: KernelOptions): WatcherKernel {
       // consumer in this pass — the wakes and the composer's after-stage.
       const memo: PassMemo = new Map();
       for (const source of sources) {
-        for (const watch of [...registry.values()]) {
+        for (const watch of registry.values()) {
           if (stopped) break;
           if (watch.source !== source.id) continue;
           try {
@@ -1010,7 +1013,7 @@ export function createWatcherKernel(options: KernelOptions): WatcherKernel {
               }
               break;
             case "session.deleted": {
-              for (const watch of [...registry.values()]) {
+              for (const watch of registry.values()) {
                 if (watch.session === data.sessionID) registry.delete(watch.id);
               }
               break;

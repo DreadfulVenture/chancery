@@ -198,7 +198,7 @@ describe("the live log's refresh (PRJ-547)", () => {
   };
 
   it("an open block fetches its view on the poll cadence and swaps the body in place", async () => {
-    const { container, app: a, block } = await bootedWithOpenBlock();
+    const { container, block } = await bootedWithOpenBlock();
     const env = {
       fetchLog: vi.fn().mockResolvedValue({
         state: "found",
@@ -300,7 +300,7 @@ describe("the live log's refresh (PRJ-547)", () => {
   });
 
   it("re-checking the pin jumps to the tail at once", async () => {
-    const { container, block } = await bootedWithOpenBlock();
+    const { block } = await bootedWithOpenBlock();
     const pre = block.querySelector<HTMLElement>(".transcript-body")!;
     Object.defineProperty(pre, "scrollHeight", {
       get: () => 4242,

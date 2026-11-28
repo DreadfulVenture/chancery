@@ -8,7 +8,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import type { PageData } from "../page-feed.js";
 import type { SessionLiveView } from "../session-data.js";
-import { chip, duration, stamped, type Renderable } from "./format.js";
+import { duration, stamped, type Renderable } from "./format.js";
 import { pullCell } from "./forge-link.js";
 import { liveLogUnder, transcriptStateNote } from "./session-log.js";
 import { table, type Column } from "./table.js";

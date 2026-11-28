@@ -51,17 +51,6 @@ function required(
   return value;
 }
 
-function optional(
-  env: Record<string, string | undefined>,
-  name: string,
-): string | undefined {
-  const value = env[name];
-  if (value === undefined || value.trim() === "") {
-    return undefined;
-  }
-  return value;
-}
-
 function int(
   env: Record<string, string | undefined>,
   name: string,

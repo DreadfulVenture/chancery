@@ -327,6 +327,9 @@ const jobsLine = (jobs) =>
 // The runner prefixes every log line with a timestamp and action output
 // can carry ANSI color; the mail shows the real lines.
 const TIMESTAMP_PREFIX = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z\s*/;
+// The matcher needs the real ESC byte: a control character in a regex is
+// the point here — the rule flags it, so this line is exempted inline.
+// oxlint-disable-next-line no-control-regex
 const ANSI_CODES = /\x1b\[[0-9;]*[A-Za-z]/g;
 
 function unwrapLog(text) {

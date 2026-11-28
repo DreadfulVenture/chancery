@@ -48,8 +48,6 @@ import {
 } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const FINAL_TEXT = "parent final after the subagent report";
 const CHILD_TEXT = "child report text";
 const CHILD_DELAY_MS = Number(process.env.ZT_MOCK_CHILD_DELAY_MS ?? 2000);

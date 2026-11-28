@@ -217,7 +217,7 @@ test("the curation verbs carry cwd (and the session link where they write)", asy
 test("a failed call clears its pending delivery", async () => {
   await withMoment(
     (body, url) => (url === "/tool-moment" ? MOMENT : SILENT),
-    async ({ fire, toolHooks, sessionHooks, synthetics }) => {
+    async ({ fire, toolHooks, synthetics }) => {
       // The before-hook fetched an informational moment; the call then
       // errored. The after-hook consumes (and drops) the pending block —
       // it must not narrate the next tool's output.

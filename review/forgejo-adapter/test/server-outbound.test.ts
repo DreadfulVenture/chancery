@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createHmac } from "node:crypto";
 import { startServer } from "../src/server.js";
-import { baseConfig, makeFakeForgejo, serve } from "./helpers.js";
+import { baseConfig, makeFakeForgejo } from "./helpers.js";
 import { ForgejoHttpError } from "../src/forgejo-client.js";
 
 const auth = { Authorization: "Bearer outbound-token" };

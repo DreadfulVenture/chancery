@@ -78,7 +78,7 @@ test("the route answers register/forget/list/state as the kernel and projection 
   });
 
   const captured: Recorded[] = [];
-  route.server.on("request", (request, response) => {
+  route.server.on("request", (request) => {
     // The capture's chunks are consumed by the route's own body read;
     // only method, path, and headers are recorded here. A request body
     // the client sends is asserted separately below, from the client's

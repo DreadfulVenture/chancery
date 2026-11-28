@@ -873,7 +873,7 @@ test("a terminal run delivers its verdict mail once and marks the stamp", async 
           [`token ${TOKEN}`],
         );
         assert.ok(
-          state.calls.some((call) => /\/actions\/runs\/18197$/.test(call.path)),
+          state.calls.some((call) => call.path.endsWith("/actions/runs/18197")),
         );
 
         // Delivered once, ever: further ticks re-send nothing.
@@ -941,6 +941,10 @@ test("a failure verdict carries per-job states and the failing job's byte-tail l
         assert.ok(mail.includes('last lines of job "pre-commit":'));
         // The envelope comes off: no ISO timestamps, no ANSI codes.
         assert.ok(!/2026-11-16T05:04/.test(mail));
+        // The assertion looks for the ESC byte itself; a control
+        // character in a regex is the point here, so the rule is
+        // exempted inline.
+        // oxlint-disable-next-line no-control-regex
         assert.ok(!/\x1b\[/.test(mail));
         assert.ok(mail.includes("error: prettier found differences"));
         assert.ok(mail.includes("Job 'pre-commit' failed"));
@@ -952,7 +956,7 @@ test("a failure verdict carries per-job states and the failing job's byte-tail l
         assert.ok(
           state.calls.some(
             (call) =>
-              /\/jobs\/108412\/logs$/.test(call.path) &&
+              call.path.endsWith("/jobs/108412/logs") &&
               call.query.max_bytes === "2048",
           ),
         );
@@ -1056,7 +1060,7 @@ test("a pr watch follows its head across pushes; every run of the head delivers 
         const headListed = () =>
           state.calls.some(
             (call) =>
-              /\/actions\/runs$/.test(call.path) &&
+              call.path.endsWith("/actions/runs") &&
               call.query.head_sha === SHA_ONE,
           );
         await waitFor(headListed);
@@ -1095,7 +1099,7 @@ test("a pr watch follows its head across pushes; every run of the head delivers 
         // the live server matches nothing for a short one.
         const listedShas = new Set(
           state.calls
-            .filter((call) => /\/actions\/runs$/.test(call.path))
+            .filter((call) => call.path.endsWith("/actions/runs"))
             .map((call) => call.query.head_sha),
         );
         assert.deepEqual([...listedShas].sort(), [SHA_ONE, SHA_TWO].sort());
@@ -1235,7 +1239,7 @@ test("registered on a pull request that is already closed: one terminal event, d
         await settle(60);
         assert.equal(fixture.mails.length, 1);
         assert.ok(
-          !state.calls.some((call) => /\/actions\/runs$/.test(call.path)),
+          !state.calls.some((call) => call.path.endsWith("/actions/runs")),
           "the closed pull request never had a run read",
         );
       } finally {
@@ -1428,7 +1432,7 @@ test("a branch watch resolves the branch commit; a deleted branch never expires 
         assert.ok(
           state.calls.some(
             (call) =>
-              /\/branches$/.test(call.path) &&
+              call.path.endsWith("/branches") &&
               call.query.page === "1" &&
               call.query.limit === "100",
           ),
@@ -1512,7 +1516,7 @@ test("a pr-reviews watch wakes once per new review, the next pass re-delivers no
         // never a page walk.
         assert.ok(routeCount(state, /\/pulls\/83\/reviews$/) >= 1);
         for (const read of state.calls.filter((call) =>
-          /\/pulls\/83\/reviews$/.test(call.path),
+          call.path.endsWith("/pulls/83/reviews"),
         )) {
           assert.deepEqual(read.query, { limit: "50" });
         }
@@ -1661,7 +1665,7 @@ test("register spends the backlog: a PR already carrying reviews wakes nobody un
         // largest page, and the page's ids ride the watch's stamp as
         // spent markers at creation.
         const reads = state.calls.filter((call) =>
-          /\/pulls\/83\/reviews$/.test(call.path),
+          call.path.endsWith("/pulls/83/reviews"),
         );
         assert.equal(reads.length, 1);
         assert.deepEqual(reads[0].query, { limit: "50" });
@@ -1918,7 +1922,7 @@ test("reviews on an unregistered pull request wake nobody", async () => {
         await settle(60);
         assert.equal(fixture.mails.length, 0);
         assert.ok(
-          !state.calls.some((call) => /\/pulls\/44\/reviews$/.test(call.path)),
+          !state.calls.some((call) => call.path.endsWith("/pulls/44/reviews")),
           "the watcher read only the registered pull request",
         );
 
@@ -2256,7 +2260,7 @@ test("cleanup waits for a poll pass in flight, and a pass that outlasts the wait
         await waitFor(() =>
           state.calls
             .slice(reads)
-            .some((call) => /\/actions\/runs\/18197$/.test(call.path)),
+            .some((call) => call.path.endsWith("/actions/runs/18197")),
         );
         if (openAfterMs !== null) setTimeout(read.open, openAfterMs);
         await cleanup?.();

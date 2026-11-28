@@ -7,7 +7,7 @@
  */
 
 import { createAdaptorServer, type HttpBindings } from "@hono/node-server";
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import type { Server } from "node:http";
 import { plain } from "./intake.js";
 import { IntakeRoute } from "./intake.js";

@@ -14,11 +14,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  FAILED_DRAFT_CAP,
-  DROPPED_COMMENT_TRUNCATION_MARKER,
-  type DroppedSource,
-} from "../src/journal.js";
-import {
   ForgeDouble,
   makeReply,
   makeReviewRequested,
@@ -38,7 +33,6 @@ import {
 import {
   EVENT_TOKEN,
   FAILED_REPLY,
-  POSTED_REPLY,
   SEEDED_POSTED_BODY,
   happyScript,
   PR,
@@ -480,7 +474,8 @@ describe("review flow", () => {
         message: expect.stringContaining("no review-status line"),
       },
     });
-    const message = (records[0]?.failure as { message?: string }).message ?? "";
+    const message =
+      (records[0]?.failure as { message?: string } | undefined)?.message ?? "";
     expect(message).toContain("Here is my opinion");
     // One prompt: a re-prompt would re-run the whole review, so none
     // is sent.

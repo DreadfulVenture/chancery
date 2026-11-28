@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { plugin, withDaemon, queued, SILENT } from "./harness.ts";
+import { withDaemon, queued, SILENT } from "./harness.ts";
 
 // The plugin as OpenCode 2 loads it: setup() registers hooks against the
 // domain objects, and each hook receives one mutable event.

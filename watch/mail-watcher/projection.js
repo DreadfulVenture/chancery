@@ -48,7 +48,7 @@ export function openProjectionDb(path) {
   const rollback = (why) => {
     try {
       file.exec("ROLLBACK");
-    } catch (rollbackError) {
+    } catch {
       // A rollback that failed strands the handle inside its
       // transaction — every later write would fail with it. The file
       // closes (the stranded transaction rolls back with the handle)

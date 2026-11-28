@@ -28,12 +28,7 @@ import {
 import { LogRing } from "./log-ring.js";
 import { Metrics } from "./metrics.js";
 import { loadPersona } from "./persona.js";
-import {
-  appendJournal,
-  indexFromJournal,
-  journalPath,
-  walkJournal,
-} from "./journal.js";
+import { indexFromJournal, journalPath, walkJournal } from "./journal.js";
 import { createStatusSource, LiveSessions } from "./status.js";
 import { StatusDb, statusDbPath } from "./status-db.js";
 import {

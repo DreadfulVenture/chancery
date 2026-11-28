@@ -769,7 +769,7 @@ const createCore = ({
             status: response.status,
           });
         }
-      } catch (error) {
+      } catch {
         debug("compliance.pull.failed", { session: sessionID });
       }
       return null;
@@ -937,7 +937,7 @@ const createCore = ({
       dispatchLinked.delete(sessionID);
       toolMomentBusyUntil.delete(sessionID);
       complianceBusyUntil.delete(sessionID);
-      for (const key of [...toolMomentPending.keys()]) {
+      for (const key of toolMomentPending.keys()) {
         if (key.startsWith(`${sessionID}\u0000`)) toolMomentPending.delete(key);
       }
     },
