@@ -1,7 +1,7 @@
-"""Daemon integration: /nudge round-trip through the real Starlette app
-with a stub embedder — asserts both channels (framed memories + fired
-rules) in one response, capture-drain classification, and record
-emission from tool calls (the single-writer path)."""
+"""Daemon integration tests through the DaemonState surface with a stub
+embedder: session-open scoring and the lexical fallback, capture-drain
+classification, and record emission from tool calls (the single-writer
+path)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../..")
 
 import sandbox  # noqa: E402,F401 -- scratch-root guard, precedes the module constants below
 from memory_store.server import daemon  # noqa: E402
-from memory_store import spans  # noqa: E402
 from memory_store.server.daemon import DaemonState, RecordEmittingTools, drain_captures  # noqa: E402
 from memory_store.store import UNRECORDED_CONVERSATION, Store, tool_key_id, tool_rule_id  # noqa: E402
 from memory_store.sync import SyncClient  # noqa: E402
@@ -185,201 +183,6 @@ class DaemonStateTest(unittest.TestCase):
 
     def _stub_embed(self, texts, origin=None):
         return [[1.0] for _ in texts]
-
-    def test_nudge_returns_both_channels(self):
-        self.store.upsert_capture(
-            {
-                "id": "m1",
-                "content": "deploy via make targets",
-                "source": "convention",
-                "repo": "example",
-                "origin": "deliberate",
-                "app": "opencode",
-            }
-        )
-        self.store.upsert_situational(
-            {
-                "id": 1,
-                "situation": "deploying to a host",
-                "statement": "run make check-example first",
-                "grader": "agent",
-                "stance": "prescriptive",
-                "scope": "global",
-                "status": "active",
-            }
-        )
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            result = self.state.nudge(
-                {
-                    "prompt": "deploying to a host",
-                    "workspace": "example",
-                    "conversation_id": "conv1",
-                    "injected_contents": [],
-                    "session_texts": [],
-                }
-            )
-        self.assertEqual(result["status"], "ok")
-        self.assertTrue(result["memories"])
-        self.assertTrue(result["rules"])
-        rule = result["rules"][0]
-        self.assertEqual(rule["statement"], "run make check-example first")
-        self.assertIn("confidence", rule)
-        self.assertIn("## Recalled memory", result["sections"]["memories"])
-        self.assertIn("## Fired rules", result["sections"]["rules"])
-
-    def test_the_recalled_memory_text_splits_the_two_tiers(self):
-        """The one instruction that differs by tier, and the reason the
-        clients could not be left to write it themselves."""
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            sections = self.state.nudge({"prompt": "anything", "conversation_id": "conv-text"})[
-                "sections"
-            ]
-        self.assertIn("Correct a working memory with memory_update", sections["memories"])
-        self.assertIn("memory_forget (table episodic_memory)", sections["memories"])
-
-    def test_the_fired_rules_text_asks_for_a_grade(self):
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            sections = self.state.nudge({"prompt": "anything", "conversation_id": "conv-grade"})[
-                "sections"
-            ]
-        self.assertIn("rule_feedback", sections["rules"])
-
-    def test_the_nudge_arrives_with_its_heading(self):
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            for _ in range(2):
-                result = self.state.nudge(
-                    {
-                        "prompt": "nothing matches this",
-                        "conversation_id": "conv-heading",
-                        "session_texts": ["earlier turn"],
-                    }
-                )
-        self.assertTrue(result["nudge"])
-        self.assertTrue(result["sections"]["nudge"].startswith("## Memory\n\n"))
-        self.assertIn(result["nudge"], result["sections"]["nudge"])
-
-    def test_no_nudge_leaves_its_section_empty(self):
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            result = self.state.nudge({"prompt": "first prompt", "conversation_id": "conv-quiet"})
-        self.assertFalse(result["nudge"])
-        self.assertEqual(result["sections"]["nudge"], "")
-
-    def test_nudge_without_a_directory_has_no_workspace_to_boost(self):
-        # A body with no cwd used to resolve the daemon's own directory.
-        # Under launchd that is '/', which stamped as the literal 'unknown'
-        # and then matched every row already stamped the same way.
-        seen = {}
-
-        def record_workspace(store, prompt, workspace=None, **kwargs):
-            seen["workspace"] = workspace
-            return []
-
-        with (
-            mock.patch("memory_store.server.daemon.nudge_score", side_effect=record_workspace),
-            mock.patch.object(self.store, "embed", side_effect=self._stub_embed),
-        ):
-            self.state.nudge({"prompt": "a prompt from a rootless window", "conversation_id": "c9"})
-        self.assertEqual(seen["workspace"], "")
-
-    def test_nudge_requires_prompt(self):
-        from memory_store.tools import ToolError
-
-        with self.assertRaises(ToolError):
-            self.state.nudge({"prompt": "", "conversation_id": "conv1"})
-
-    def test_nudge_requires_a_conversation_to_escalate_against(self):
-        from memory_store.tools import ToolError
-
-        with self.assertRaises(ToolError):
-            self.state.nudge({"prompt": "deploying to a host"})
-
-    def _nudge(self, prompt, *, conversation="conv1", turns=("earlier",)):
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            return self.state.nudge(
-                {
-                    "prompt": prompt,
-                    "workspace": "example",
-                    "conversation_id": conversation,
-                    "injected_contents": [],
-                    "session_texts": list(turns),
-                }
-            )
-
-    def test_the_first_prompt_of_a_conversation_is_not_nudged(self):
-        # No dry spell to measure against yet.
-        self.assertIsNone(self._nudge("what does the drain classifier do?", turns=())["nudge"])
-
-    def test_empty_recall_starts_the_nudge_and_it_sharpens(self):
-        first = self._nudge("what does the drain classifier do?")["nudge"]
-        second = self._nudge("and how are exhibits told apart?")["nudge"]
-        self.assertEqual(first, daemon.WRITE_NUDGES[0])
-        self.assertEqual(second, daemon.WRITE_NUDGES[1])
-
-    def test_escalation_is_counted_per_conversation(self):
-        self._nudge("what does the drain classifier do?", conversation="a")
-        fresh = self._nudge("and how are exhibits told apart?", conversation="b")
-        self.assertEqual(fresh["nudge"], daemon.WRITE_NUDGES[0])
-
-    def test_a_deliberate_write_clears_the_nudge(self):
-        # A conversation's first pass only establishes the high water mark,
-        # so nothing can count as newer than it yet. Start from an old one
-        # instead, which is what any store with history in it looks like.
-        self.state._tracked("conv1")["watermark"] = "2020-01-01 00:00:00"
-        self.assertIsNotNone(self._nudge("what does the drain classifier do?")["nudge"])
-        with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
-            self.state.call_tool(
-                "memory_remember",
-                {"content": "the drain classifies before it upserts", "source": "convention"},
-                app="test",
-            )
-        self.assertIsNone(self._nudge("and how are exhibits told apart?")["nudge"])
-
-    def test_an_ignored_nudge_eventually_crowds_recall_out(self):
-        # Past the insistent threshold the nudge arrives alone: an agent
-        # already skipping what memory says is not helped by more of it.
-        for _ in range(daemon.NUDGE_INSISTENT_AFTER + 1):
-            self._nudge("deploying to a host")
-        self.store.upsert_capture(
-            {
-                "id": "m1",
-                "content": "deploy via make targets",
-                "source": "convention",
-                "repo": "example",
-                "origin": "deliberate",
-                "app": "test",
-            }
-        )
-        result = self._nudge("deploying to a host")
-        self.assertEqual(result["memories"], [])
-        self.assertEqual(result["nudge"], daemon.WRITE_NUDGES[2])
-
-    def test_the_nudge_decision_is_observable_at_debug(self):
-        lines: list[str] = []
-        spans.sink(lines.append)
-        try:
-            with mock.patch.object(spans, "MIN_LEVEL", spans._LEVELS["debug"]):
-                self._nudge("deploying to a host")
-        finally:
-            spans.pop_sink(lines.append)
-        decision = [line for line in lines if "op=nudge.write" in line]
-        self.assertEqual(len(decision), 1, lines)
-        self.assertIn("level=debug", decision[0])
-        self.assertIn("conversation=conv1", decision[0])
-        self.assertIn("fired=1", decision[0])
-
-    def test_the_nudge_decision_is_silent_at_the_default_level(self):
-        lines: list[str] = []
-        spans.sink(lines.append)
-        try:
-            self._nudge("deploying to a host")
-        finally:
-            spans.pop_sink(lines.append)
-        self.assertEqual([line for line in lines if "op=nudge.write" in line], [])
-
-    def test_tracking_does_not_grow_without_bound(self):
-        for index in range(daemon.MAX_TRACKED_CONVERSATIONS + 10):
-            self._nudge("deploying to a host", conversation=f"conv{index}")
-        self.assertEqual(len(self.state.nudge_tracking), daemon.MAX_TRACKED_CONVERSATIONS)
 
     def test_remember_emits_record(self):
         with mock.patch.object(self.store, "embed", side_effect=self._stub_embed):
@@ -1270,47 +1073,6 @@ class DaemonStateTest(unittest.TestCase):
 
         with self.assertRaises(ToolError):
             self.state.call_tool("not_a_tool", {}, app="test")
-
-    def test_nudge_gate_blocks_second_caller(self):
-        """One nudge scores at a time: the second caller's non-blocking
-        acquire fails while the first runs — handle_nudge turns that into
-        an immediate 503 instead of queueing abandoned work."""
-
-        release = threading.Event()
-
-        def slow_embed(texts, origin=None):
-            release.wait()
-            return [[1.0] for _ in texts]
-
-        self.store.upsert_capture(
-            {
-                "id": "m1",
-                "content": "deploy via make targets",
-                "source": "convention",
-                "repo": "example",
-                "origin": "deliberate",
-                "app": "opencode",
-            }
-        )
-        # Shape of handle_nudge: acquire before the worker, release after.
-        held = self.state.nudge_gate.acquire(blocking=False)
-        self.assertTrue(held)
-        with mock.patch.object(self.store, "embed", side_effect=slow_embed):
-            scoring = threading.Thread(
-                target=lambda: self.state.nudge(
-                    {"prompt": "slow scoring nudge", "workspace": "example"}
-                )
-            )
-            scoring.start()
-            try:
-                blocked = not self.state.nudge_gate.acquire(blocking=False)
-            finally:
-                release.set()
-                scoring.join()
-                self.state.nudge_gate.release()
-        self.assertTrue(blocked, "second caller sees the gate closed")
-        self.assertEqual(self.state.nudge_gate.acquire(blocking=False), True)
-        self.state.nudge_gate.release()
 
 
 class DomainPrefixTests(unittest.TestCase):

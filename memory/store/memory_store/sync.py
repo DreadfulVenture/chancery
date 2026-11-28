@@ -1,12 +1,11 @@
 """Record-log sync: one protocol, one upsert, full convergence.
 
-Eight kinds (capture, memory, episodic, rule, feedback, forget, session,
-agent_memory) flow through one log; machines pull by cursor and apply
-idempotently. Conflict behavior per the sync ADR: LWW for append-mostly
-kinds, origin-keyed coexistence for rules (fire-time suppression on the
-matcher side handles duplicates), feedback as accumulative increments,
-forget with tombstones so a delayed replay of the original write cannot
-resurrect a deleted row.
+Every kind in store.RECORD_KINDS flows through one log; machines pull by
+cursor and apply idempotently. Conflict behavior per the sync ADR: LWW for
+append-mostly kinds, origin-keyed coexistence for rules (fire-time
+suppression on the matcher side handles duplicates), feedback as
+accumulative increments, forget with tombstones so a delayed replay of the
+original write cannot resurrect a deleted row.
 """
 
 from __future__ import annotations

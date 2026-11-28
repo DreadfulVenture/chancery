@@ -252,7 +252,6 @@ class MachinePathsNeverStamp(unittest.TestCase):
             "embed",
             side_effect=lambda texts, origin=None: [[1.0, 0.0] for _ in texts],
         ):
-            self.state.nudge({"prompt": "gateway ownership", "conversation_id": "c1"})
             self.state.session_open({"prompt": "gateway ownership", "workspace": "example"})
             self.state.tool_recall({"command": "git push origin main", "delivery": "before"})
             self.state.tool_moment(

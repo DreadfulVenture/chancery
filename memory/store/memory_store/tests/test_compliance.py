@@ -208,12 +208,12 @@ class LadderTests(unittest.TestCase):
         self.assertTrue(any("level=1" in line for line in decisions), decisions)
 
     def test_turns_never_grow_an_unbounded_process_state(self):
-        # Unlike the write nudge's in-RAM tracking (bounded, lost on
-        # restart), the ladder's whole state is the store: nothing per
-        # conversation lives on the DaemonState.
-        for index in range(daemon.MAX_TRACKED_CONVERSATIONS + 10):
+        # The ladder's whole state is the store: nothing per conversation
+        # lives on the DaemonState, so long-running process memory stays flat.
+        before = set(vars(self.state))
+        for index in range(600):
             self.turns(f"conv{index}", 1)
-        self.assertEqual(self.state.nudge_tracking, {})
+        self.assertEqual(set(vars(self.state)), before)
 
     def test_the_ladder_never_queues_a_sync_record(self):
         # Local-only, the same class as tool_fires: per-machine client

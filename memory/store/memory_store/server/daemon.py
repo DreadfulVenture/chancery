@@ -7,9 +7,6 @@ sync client as separate services) with one process:
     tools directly against the owned store — no package dispatch, no
     schema patching. Stateless because a client that caches its MCP
     connection has to survive this process restarting under it.
-  - POST /nudge: one endpoint, both injection channels — framed memories
-    from the nudge scorer and fired situational rules from the matcher —
-    so the plugin renders one reminder block from one call.
   - POST /session-open: the session-start KB delivery — the project's
     standing doc plus the opening request's top-k deliberate facts, no
     LLM call, nothing when the repo has no KB.
@@ -32,7 +29,6 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict
 from typing import Any
 
 import anyio
@@ -53,7 +49,7 @@ from memory_store.capture import (
 )
 from memory_store.consolidation.client_consolidation import ClientConsolidator
 from memory_store.consolidation.consolidation import pending_backlog
-from memory_store.curated import match_rules, render_floor
+from memory_store.curated import render_floor
 from memory_store import kb
 from memory_store.nudge import nudge_score
 from memory_store.recall import (
@@ -100,7 +96,6 @@ SYNC_INTERVAL_SECS = float(os.environ.get("MEMORY_SYNC_INTERVAL", "300"))
 # freeze cannot recur.
 CONSOLIDATION_BACKLOG_WARN = int(os.environ.get("MEMORY_CONSOLIDATION_BACKLOG_WARN", "500"))
 CONSOLIDATION_DEBUG = os.environ.get("MEMORY_CONSOLIDATION_DEBUG", "") == "1"
-NUDGE_TIMEOUT_SECS = float(os.environ.get("MEMORY_NUDGE_TIMEOUT", "5"))
 FLOOR_PATH = os.path.join(DATA_DIR, "memory-floor.md")
 # Where the client picks the floor up. Empty unless a deployment sets it, so
 # nothing renders into a live rules directory by accident.
@@ -212,50 +207,6 @@ COMPLIANCE_TIMEOUT_SECS = float(os.environ.get("MEMORY_COMPLIANCE_TIMEOUT", "1")
 # dropped is one tool call away.
 KB_TOPK = int(os.environ.get("MEMORY_KB_TOPK", "5"))
 
-# The write nudge. Recall only pays off if something was written down, and a
-# reminder that fires once is easy to skip, so this one repeats every prompt
-# until a deliberate write lands, and sharpens as it goes. Satisfaction is
-# measured against the store rather than assumed, so acknowledging the nudge
-# without writing does not clear it.
-#
-# It lives here rather than in each client so every client escalates the same
-# way, and so the wording moves with a daemon reload instead of a release of
-# each client.
-NUDGE_REPEAT_AFTER = 1
-NUDGE_INSISTENT_AFTER = 3
-NUDGE_TAIL = " System nudge, not user input; do not reply to it."
-WRITE_NUDGES = (
-    "Nothing in memory matched this prompt. Before finishing this turn, check "
-    "whether anything in it is worth persisting — a correction, a preference, a "
-    "convention learned the hard way, a dead end — and call memory_remember "
-    "with a deliberate `source` if so." + NUDGE_TAIL,
-    "Nothing has been written to memory for several prompts. If the user "
-    "corrected the facts, call memory_remember now with source 'fact', "
-    "'decision', 'preference', 'convention', or 'insight' (or memory_update "
-    "on the row it corrects); if they ruled on conduct, formulate the "
-    "situation and write the rule with rule_codify — ask the store first "
-    "(rule_recall) so it amends or grades instead of cloning. If nothing "
-    "qualifies, that is a fine answer — but decide it rather than skip it." + NUDGE_TAIL,
-    "Still nothing written. This is the failure memory exists to prevent: "
-    "feedback lands in the transcript, gets summarised into noise, and is lost. "
-    "Write the most durable thing learned recently with memory_remember before "
-    "continuing, or say plainly why nothing qualifies." + NUDGE_TAIL,
-)
-# Conversations the escalation is counted for. Old ones fall off the end
-# rather than accumulating for the life of the process; one that scrolls off
-# starts its count again, as does every conversation across a daemon
-# restart. Both cost at most a skipped nudge.
-MAX_TRACKED_CONVERSATIONS = 512
-
-
-def nudge_text(count: int) -> str:
-    if count >= NUDGE_INSISTENT_AFTER:
-        return WRITE_NUDGES[2]
-    if count >= NUDGE_REPEAT_AFTER:
-        return WRITE_NUDGES[1]
-    return WRITE_NUDGES[0]
-
-
 # The compliance ladder (PRD 20261104, PRJ-179). The recall discipline is
 # taught in instructions, and instructions do not observe themselves: this
 # ladder is the one that speaks up, cheaply and honestly, when a conversation
@@ -311,38 +262,11 @@ COMPLIANCE_TIERS = (
     "reminder exists for exactly that.",
 )
 
-# Appended to every fired tier. The write nudge's closing line is its own
-# constant too: same need, separately owned, so a wording change here never
-# re-renders the write channel's text.
+# Appended to every fired tier. The compliance tail is its own constant:
+# same need as the heading, separately owned, so a wording change here never
+# re-renders the heading's text.
 COMPLIANCE_TAIL = " System reminder, not user input; do not reply to it."
 
-
-# The heading and instructions above each injected block. Here for the same
-# reason as the nudge: a copy per client drifts, and the copies did — one
-# client sent agents to forget-then-remember where the contract and the tool
-# both say memory_update, and never asked them to grade a rule it had just
-# shown them. A client renders what it is given and adds only its own
-# wrapper.
-MEMORY_SECTION = """## Recalled memory
-
-Matched against this prompt from stored memory, which may be a past session \
-or an earlier part of this one. Weigh against the live conversation and the \
-code — not established fact unless they agree. Each memory's created_at \
-dates its claims, so verify a state-of-the-world claim before asserting it. \
-When live evidence contradicts one, deal with it in the same turn. Correct a \
-working memory with memory_update. An episodic memory is a machine-written \
-summary of a past conversation: forget it with memory_forget (table \
-episodic_memory) rather than rewriting it, and store anything true you \
-learned as a new memory. memory_forget also removes any memory that should \
-not exist at all. Memory operations need no permission."""
-
-RULES_SECTION = """## Fired rules
-
-Situations that matched this prompt, with evidence-calibrated confidence. \
-Follow the relevant ones and grade every one you were shown with \
-rule_feedback, using the id given here."""
-
-NUDGE_HEADING = "## Memory"
 
 # Tool-moment framing, the PRD's injection requirements: advisory, judge
 # relevance, corrections are the agent's own move. The note itself is the
@@ -1004,107 +928,11 @@ class DaemonState:
         # (memory_ tools under a memory_ decoration).
         self.mcp_tool_names = MCP_TOOL_NAMES
         self.lock = threading.RLock()
-        # Nudge gate: one nudge scores at a time; excess requests get an
-        # immediate 503 instead of piling up as abandoned work the plugin
-        # already gave up on (the pile-up amplifier in the 2026-09-18
-        # wedge outages).
+        # Scorer gate: one scored request runs at a time; excess requests get
+        # an immediate 503 instead of piling up as abandoned work the client
+        # already gave up on (the pile-up amplifier in the 2026-09-18 wedge
+        # outages).
         self.nudge_gate = threading.BoundedSemaphore(value=1)
-        # Per-conversation escalation state, most recently used last.
-        self.nudge_tracking: OrderedDict[str, dict[str, Any]] = OrderedDict()
-
-    def _tracked(self, conversation_id: str) -> dict[str, Any]:
-        tracked = self.nudge_tracking.pop(conversation_id, None) or {
-            "nudges": 0,
-            "watermark": "",
-        }
-        self.nudge_tracking[conversation_id] = tracked
-        while len(self.nudge_tracking) > MAX_TRACKED_CONVERSATIONS:
-            self.nudge_tracking.popitem(last=False)
-        return tracked
-
-    def _write_nudge(
-        self, conversation_id: str, memories: list, *, first_prompt: bool
-    ) -> tuple[str | None, list]:
-        """The escalating reminder to write something down.
-
-        Returns the nudge text, or None, alongside the memories to inject.
-        Past the insistent threshold recall is dropped entirely: an agent
-        already ignoring what memory says is not helped by more of it, and
-        the nudge is what it needs to read instead.
-
-        Nothing fires on a conversation's first prompt, where there is no
-        dry spell to measure yet.
-        """
-        tracked = self._tracked(conversation_id)
-        deliberate = self.store.deliberate_writes(tracked["watermark"])
-        tracked["watermark"] = str(deliberate.get("watermark") or tracked["watermark"])
-        wrote = bool(deliberate.get("count"))
-        if wrote:
-            tracked["nudges"] = 0
-
-        text = None
-        if not wrote and not first_prompt and (tracked["nudges"] > 0 or not memories):
-            text = nudge_text(tracked["nudges"])
-            tracked["nudges"] += 1
-        crowded_out = tracked["nudges"] > NUDGE_INSISTENT_AFTER
-        if crowded_out:
-            memories = []
-        # Why this prompt was or was not nudged. The span line records the
-        # counts; none of the inputs to the decision survive in it.
-        spans.debug(
-            "nudge.write",
-            conversation=conversation_id,
-            count=tracked["nudges"],
-            wrote=int(wrote),
-            first=int(first_prompt),
-            recalled=len(memories),
-            crowded_out=int(crowded_out),
-            fired=int(text is not None),
-        )
-        return text, memories
-
-    def nudge(self, body: dict[str, Any]) -> dict:
-        prompt = (body.get("prompt") or "").strip()
-        if not prompt:
-            raise ToolError("prompt is required")
-        conversation_id = str(body.get("conversation_id") or "").strip()
-        if not conversation_id:
-            raise ToolError("conversation_id is required")
-        # Workspace is the server's job (one detectRepo implementation);
-        # a client-supplied value is only an override.
-        workspace = body.get("workspace") or resolve_workspace(body.get("cwd"))
-        injected = body.get("injected_contents") or []
-        session_texts = body.get("session_texts") or []
-        # Pool/rule reads underneath may briefly take the store lock; the
-        # score itself (embed + cosine) runs with no daemon lock held, so a
-        # slow or wedged embedding can no longer block MCP tool calls.
-        memories = nudge_score(
-            self.store,
-            prompt,
-            workspace=workspace,
-            injected_contents=injected,
-            session_texts=session_texts,
-        )
-        # The rules leg embeds 2 + active-rule situations and writes fire
-        # telemetry; when a scoring pass blows the 5s client budget this is
-        # the other prime suspect besides embed, so it gets its own span.
-        with spans.span("rules.match", prompt_chars=len(prompt)) as node:
-            rules = match_rules(self.store, prompt)
-            node.set(fired=len(rules))
-        nudge, memories = self._write_nudge(
-            conversation_id, memories, first_prompt=not session_texts
-        )
-        return {
-            "status": "ok",
-            "memories": memories,
-            "rules": rules,
-            "nudge": nudge,
-            "sections": {
-                "nudge": f"{NUDGE_HEADING}\n\n{nudge}" if nudge else "",
-                "memories": MEMORY_SECTION,
-                "rules": RULES_SECTION,
-            },
-        }
 
     def tool_recall(self, body: dict[str, Any]) -> dict:
         """What the store has to say about the tools a command is about to
@@ -1393,9 +1221,8 @@ class DaemonState:
                 project=resolve_workspace(body.get("cwd")),
                 initiator=initiator,
             )
-        # Same resolution contract as the nudge: workspace is the server's
-        # job (one detect_project implementation); a client-supplied value
-        # is only an override.
+        # Workspace is the server's job (one detect_project
+        # implementation); a client-supplied value is only an override.
         repo = body.get("workspace") or resolve_workspace(body.get("cwd"))
         if not prompt or not repo:
             return {"status": "ok", "doc": None}
@@ -1440,13 +1267,12 @@ class DaemonState:
 
     def _session_open_topk(self, repo: str, prompt: str, excluded: set) -> list[dict]:
         """Deliberate facts matching the opening request, ranked from the
-        project's own pool. The nudge scorer is the same ranking the
-        per-message channel uses, scoped here to the repo (a busier
-        sibling repo must not crowd the project out of its own block),
-        with the caller's exclusions and the episodic tier suppressed
-        inside the scorer — the render cap applies to eligible rows only,
-        never to slots the caller would drop. The no-model fallback ranks
-        the same pool."""
+        project's own pool. The nudge scorer is the ranking, scoped here to
+        the repo (a busier sibling repo must not crowd the project out of
+        its own block), with the caller's exclusions and the episodic tier
+        suppressed inside the scorer — the render cap applies to eligible
+        rows only, never to slots the caller would drop. The no-model
+        fallback ranks the same pool."""
         try:
             scored = nudge_score(
                 self.store,
@@ -1722,7 +1548,7 @@ def calling_client(context) -> tuple[str, str]:
 
 def build_app(state: DaemonState) -> Starlette:
     """The daemon's whole HTTP surface: the MCP endpoint and the plain
-    /nudge route the clients POST to. Separate from main() so the wire
+    POST routes the clients' hooks call. Separate from main() so the wire
     format can be exercised without a socket or the timer threads."""
 
     mcp_definitions = [
@@ -1772,58 +1598,6 @@ def build_app(state: DaemonState) -> Starlette:
     # notifications drop — and nothing here has ever used it.
     sessions = StreamableHTTPSessionManager(app=server, stateless=True)
 
-    async def handle_nudge(request: Request):
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
-        prompt = (body.get("prompt") or "").strip()
-        with spans.span(
-            "nudge.request",
-            prompt_chars=len(prompt),
-            injected=len(body.get("injected_contents") or []),
-            session_texts=len(body.get("session_texts") or []),
-        ) as node:
-            if not state.nudge_gate.acquire(blocking=False):
-                node.set(outcome=503, gate="blocked")
-                return Response(
-                    json.dumps({"status": "busy"}),
-                    status_code=503,
-                    headers={"Retry-After": "2"},
-                    media_type="application/json",
-                )
-            node.set(gate="acquired")
-            try:
-                # NUDGE_TIMEOUT_SECS bounds the synchronous scorer the client
-                # abandoned its request long before this, but the guard keeps
-                # a pathological embed from occupying the gate forever.
-                with anyio.fail_after(NUDGE_TIMEOUT_SECS):
-                    result = await anyio.to_thread.run_sync(
-                        lambda: state.nudge(body),
-                        abandon_on_cancel=True,
-                    )
-            except ToolError as error:
-                node.set(status="error-400")
-                return Response(
-                    json.dumps({"status": "error", "error": str(error)}),
-                    status_code=400,
-                    media_type="application/json",
-                )
-            except TimeoutError:
-                node.set(status="timeout-503")
-                return Response(
-                    json.dumps({"status": "busy"}),
-                    status_code=503,
-                    headers={"Retry-After": "5"},
-                    media_type="application/json",
-                )
-            finally:
-                state.nudge_gate.release()
-            node.set(status=200)
-            return Response(json.dumps(result, default=str), media_type="application/json")
-
     async def handle_tool_recall(request: Request):
         try:
             body = await request.json()
@@ -1831,9 +1605,9 @@ def build_app(state: DaemonState) -> Starlette:
             body = {}
         if not isinstance(body, dict):
             body = {}
-        # Same gate as the nudge: the caller is a hook holding a tool call
-        # open, so work it has already abandoned must not queue behind work
-        # it is still waiting on.
+        # The caller is a hook holding a tool call open, so work it has
+        # already abandoned must not queue behind work it is still waiting
+        # on: one scored request at a time, excess calls get the busy 503.
         if not state.nudge_gate.acquire(blocking=False):
             return Response(
                 json.dumps({"status": "busy"}),
@@ -1872,8 +1646,9 @@ def build_app(state: DaemonState) -> Starlette:
         if not isinstance(body, dict):
             body = {}
         with spans.span("session.open.http") as node:
-            # Same gate as the nudge: the caller is a hook holding the first
-            # prompt open, and the scorer underneath is the same expense.
+            # The caller is a hook holding the first prompt open, and the
+            # scorer underneath is the same expense: one scored request at
+            # a time, excess calls get the busy 503.
             if not state.nudge_gate.acquire(blocking=False):
                 node.set(outcome=503, gate="blocked")
                 return Response(
@@ -1913,7 +1688,7 @@ def build_app(state: DaemonState) -> Starlette:
             # Bounds the whole moment pass (match + fire record). With
             # abandon_on_cancel a timed-out run can still finish in the
             # background and record its fire — fail-open by design, and
-            # the shape is the nudge route's: the client has already
+            # the same shape as the gated routes: the client has already
             # given up, the guard keeps a pathological run from holding
             # the request slot forever.
             with anyio.fail_after(TOOL_MOMENT_TIMEOUT_SECS):
@@ -1977,7 +1752,6 @@ def build_app(state: DaemonState) -> Starlette:
 
     return Starlette(
         routes=[
-            Route("/nudge", endpoint=handle_nudge, methods=["POST"]),
             Route("/session-open", endpoint=handle_session_open, methods=["POST"]),
             Route("/tool-recall", endpoint=handle_tool_recall, methods=["POST"]),
             Route("/tool-moment", endpoint=handle_tool_moment, methods=["POST"]),

@@ -1,15 +1,12 @@
-"""Nudge scorer: the automatic-injection channel's own scoring.
+"""Nudge scorer: the ranking behind the session-start block.
 
-Per the memory PRD, the nudge channel is the precision channel and gets its
-own scorer rather than upstream's: the candidate pool is restricted to
-judgment-provenance rows (deliberate writes + consolidated episodic
-summaries — raw captured turns are never nudge candidates), large rows sink
-via a soft length penalty so keyword-shotgun documents cannot dominate, and
-framing data (speaker, veracity, date) ships with every result; the honest
-template lives in the plugin.
+The candidate pool is restricted to judgment-provenance rows (deliberate
+writes + consolidated episodic summaries — raw captured turns are never
+candidates), large rows sink via a soft length penalty so keyword-shotgun
+documents cannot dominate, and framing data (speaker, veracity, date)
+ships with every result.
 
-Similarity runs as two matrix products when numpy is importable — prompt
-similarity in one, the semantic-debounce mask in another — with the
+Similarity runs as one matrix product when numpy is importable, with the
 per-pair Python loop kept as the reference shape (and the only path
 without numpy). The Python path must stay behaviorally identical: the
 parity test in memory_store/tests/test_nudge.py diff-checks the two.
@@ -38,12 +35,6 @@ except ImportError:  # pragma: no cover - numpy ships with fastembed/onnxruntime
 # summaries 22k-46k. Env-tunable per the package's weight-knob convention.
 PENALTY_ONSET = 2000.0
 PENALTY_FLOOR = 0.2
-
-# Length-delta guard on the semantic debounce: rows and injected contents
-# within this many chars of the same length are eligible for the 0.9-cosine
-# suppression; unlike-length texts don't suppress. Cheap prefilter that
-# mainly keeps the fork-summary near-dup from matching short prose.
-LENGTH_DEBOUNCE_DELTA = 4000
 
 
 def length_penalty(
@@ -139,31 +130,16 @@ def _sims(rows: list, targets: list[list[float]]):
 
 def _vectorized_scores(
     row_vectors: list[list[float]],
-    row_lengths: list[int],
     prompt_vec: list[float],
-    injected_lengths: list[int],
-    injected_vecs: list[list[float]],
-) -> tuple[list[float], list[bool]]:
-    """Both channels as two matrix products: prompt similarity, then the
-    debounce mask (any injected vector within the length-delta guard at
-    cosine >= 0.9)."""
-    sims = [s[0] for s in _sims(row_vectors, [prompt_vec])]
-    if not injected_vecs:
-        return sims, [False] * len(row_vectors)
-    pair_sims = _sims(row_vectors, injected_vecs)
-    rows_m = numpy.asarray(row_lengths)[:, None]
-    injected_m = numpy.asarray(injected_lengths)[None, :]
-    near = (pair_sims >= 0.9) & (numpy.abs(rows_m - injected_m) < LENGTH_DEBOUNCE_DELTA)
-    return sims, near.any(axis=1).tolist()
+) -> list[float]:
+    """Prompt similarity for every row, as one matrix product."""
+    return [s[0] for s in _sims(row_vectors, [prompt_vec])]
 
 
 def _loop_scores(
     row_vectors: list[list[float]],
-    row_lengths: list[int],
     prompt_vec: list[float],
-    injected_lengths: list[int],
-    injected_vecs: list[list[float]],
-) -> tuple[list[float], list[bool]]:
+) -> list[float]:
     """Per-pair Python cosine: the reference shape the vectorized path must
     match, and the only path without numpy (hermetic/stub runs)."""
 
@@ -173,15 +149,7 @@ def _loop_scores(
         nb = math.sqrt(sum(x * x for x in b))
         return dot / (na * nb) if na and nb else 0.0
 
-    sims = [cosine(prompt_vec, v) for v in row_vectors]
-    dups = [
-        any(
-            abs(row_len - inj_len) < LENGTH_DEBOUNCE_DELTA and cosine(v, inj) >= 0.9
-            for inj_len, inj in zip(injected_lengths, injected_vecs, strict=True)
-        )
-        for row_len, v in zip(row_lengths, row_vectors, strict=True)
-    ]
-    return sims, dups
+    return [cosine(prompt_vec, v) for v in row_vectors]
 
 
 def _pool_vectors(store, pool: list[dict]) -> dict[tuple[str, int], list[float]]:
@@ -214,8 +182,6 @@ def nudge_score(
     workspace: str | None = None,
     limit: int = 3,
     score_threshold: float = 0.5,
-    injected_contents: list[str] | None = None,
-    session_texts: list[str] | None = None,
     *,
     scope_to_workspace: bool = False,
     exclude_ids: set | None = None,
@@ -224,12 +190,6 @@ def nudge_score(
     """Score the nudge pool against the prompt. Returns top results with
     framing data attached.
 
-    - `injected_contents`: contents already injected this session (semantic
-      debounce — candidates above similarity are suppressed, memory PRD req 3).
-    - `session_texts`: accumulated session text for the context-containment
-      check — a candidate already present in context is suppressed (req 6).
-      Exact substring covers the fork-summary case; the caller passes the
-      concatenated text.
     - `scope_to_workspace`: rank only the workspace's rows instead of
       boosting them — the session-start block's facts come from the
       project's pool, and a busier sibling repo must not crowd it out.
@@ -253,33 +213,13 @@ def nudge_score(
 
         prompt_vec = store.embed([prompt], origin="nudge-prompt")[0]
 
-        # Semantic debounce: embeddings of the injected contents, computed once
-        # per prompt against the (sha256-keyed) embed cache — never per pool row.
-        injected_vecs = (
-            store.embed(list(injected_contents), origin="debounce") if injected_contents else []
-        )
-        node.set(debounced=len(injected_contents or []))
-
-        # Context containment: exact substring in accumulated session text.
-        joined_session = "\n".join(session_texts) if session_texts else ""
-
         paired = [r for r in pool if (r["vec_table"], r["db_rowid"]) in vectors_by_rowid]
         row_vectors = [vectors_by_rowid[(r["vec_table"], r["db_rowid"])] for r in paired]
-        row_lengths = [len(r["content"]) for r in paired]
-        injected_lengths = [len(c) for c in (injected_contents or [])]
         scorer = _vectorized_scores if numpy is not None else _loop_scores
-        sims, dups = scorer(row_vectors, row_lengths, prompt_vec, injected_lengths, injected_vecs)
+        sims = scorer(row_vectors, prompt_vec)
 
         scored: list[dict] = []
-        for row, sim, dup in zip(paired, sims, dups, strict=True):
-            # Semantic debounce: suppress near-duplicates of already-injected rows.
-            if dup:
-                continue
-
-            # Context containment: already in context verbatim.
-            if joined_session and row["content"] and row["content"] in joined_session:
-                continue
-
+        for row, sim in zip(paired, sims, strict=True):
             # Caller-carried exclusions (folded rows, already-delivered ids):
             # suppressed before scoring so the limit never spends slots on
             # rows the caller would only drop.

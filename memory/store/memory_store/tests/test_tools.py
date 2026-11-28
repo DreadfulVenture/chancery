@@ -55,11 +55,10 @@ class RememberTests(unittest.TestCase):
         with self.assertRaises(ToolError):
             self.tools.memory_remember(app="test", content="x", source="vibes")
 
-    def test_a_remembered_row_satisfies_the_write_nudge(self):
-        """The nudge asks the store for deliberate writes newer than a
-        watermark, and asks it of timestamp. An unstamped row is invisible
-        there, so the nudge that asked for the write would keep escalating
-        after it was honoured."""
+    def test_a_remembered_row_moves_the_deliberate_watermark(self):
+        """deliberate_writes counts rows newer than a watermark, and counts
+        them of timestamp. An unstamped row is invisible there, so a writer
+        keyed on the watermark would not see the row it asked for."""
         self.tools.memory_remember(app="test", content="an earlier finding", source="insight")
         baseline = self.tools.store.deliberate_writes()["watermark"]
         self.assertTrue(baseline, "a stored row has to move the watermark off empty")

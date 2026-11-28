@@ -449,42 +449,5 @@ class GroundsTests(unittest.TestCase):
         self.assertEqual([kind for kind, _ in self.sync.records if kind == "feedback"], [])
 
 
-class EvidenceExportTests(unittest.TestCase):
-    """match_rules exports the evidence count alongside confidence — the
-    renderer needs both (confidence alone is uninterpretable without the
-    sample size)."""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.store = Store(self.tmp / "t.db")
-
-    def tearDown(self):
-        self.store.close()
-        capture._repo_cache.clear()
-
-    def test_match_payload_carries_evidence_count(self):
-        self.store.upsert_situational(
-            {
-                "id": 1,
-                "situation": "about to commit code",
-                "statement": "run checks first",
-                "status": "active",
-                "grader": "agent",
-                "stance": "prescriptive",
-            }
-        )
-        self.store.apply_feedback(1, "situational", "confirm", 1.0, "test")
-        self.store.apply_feedback(1, "situational", "disconfirm", 1.0, "test")
-        with mock.patch.object(Store, "embed", return_value=[[0.1] * 8]):
-            from memory_store.curated import match_rules
-
-            matched = match_rules(self.store, "about to commit code", threshold=0.0)
-        self.assertTrue(matched)
-        rule = matched[0]
-        self.assertEqual(rule["evidence_count"], 2)
-        self.assertIn("confidence", rule)
-        self.assertIn("stance", rule)
-
-
 if __name__ == "__main__":
     unittest.main()

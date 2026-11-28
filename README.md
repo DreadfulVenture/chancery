@@ -114,9 +114,8 @@ the run directory; a lost isolation variable aborts before any process spawns (d
 
 `MEMORY_SPAN_LOG` (`debug`, `info`, `error`) sets one level for the daemon and both clients; the nix module's `logLevel`
 option sets it everywhere at once, reaching the clients through `client.json`. At `debug` each side emits point
-observations beside its spans — the locations a client resolved, whether standing context reached the model, why a
-prompt was or was not nudged. Reach for it before asking an agent what it received: a small model will flatly deny text
-that is present in its own prompt.
+observations beside its spans — the locations a client resolved and whether standing context reached the model. Reach
+for it before asking an agent what it received: a small model will flatly deny text that is present in its own prompt.
 
 Daemon lines go to `logFile`: a launchd log under `~/Library/Logs` on darwin, `stateDir/daemon.log` elsewhere. The
 OpenCode plugin writes to the process stderr, so `opencode run` shows them inline. The Cursor hook writes to stderr too,
@@ -272,7 +271,7 @@ The environment contract, with the home-manager module's daemon defaults:
 
 | Variable                         | What it carries                                                                                                                                                         | Default                          |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| `MEMORY_MCP_PORT`                | The MCP and `/nudge` listen port — the daemon binds 127.0.0.1 unconditionally, so the number is the only thing a host chooses                                           | `17173`                          |
+| `MEMORY_MCP_PORT`                | The daemon's HTTP listen port — the daemon binds 127.0.0.1 unconditionally, so the number is the only thing a host chooses                                              | `17173`                          |
 | `MEMORY_DATA_DIR`                | The SQLite store and the rendered floor                                                                                                                                 | `~/.local/services/memory/data`  |
 | `MEMORY_QUEUE_DIR`               | The capture queue the clients append to                                                                                                                                 | `~/.local/services/memory/queue` |
 | `MEMORY_HUB_URL`                 | The hub relay to sync with; empty keeps a local-only store: nothing queues for push and no sync cycle runs                                                              | empty                            |

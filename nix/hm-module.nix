@@ -416,7 +416,7 @@ in
     port = mkOption {
       type = types.port;
       default = 17173;
-      description = "Loopback port serving the MCP endpoint and /nudge.";
+      description = "Loopback port serving the daemon's HTTP surface.";
     };
 
     label = mkOption {
@@ -552,10 +552,9 @@ in
       description = ''
         One level for the daemon and both clients. At `debug` each side
         emits point observations alongside its spans: the locations a
-        client resolved, whether standing context reached the model, and
-        why a prompt was or was not nudged. Clients have no other
-        observability — a hook that ran and declined and a hook Cursor
-        never invoked are otherwise indistinguishable.
+        client resolved and whether standing context reached the model.
+        Clients have no other observability — a hook that ran and declined
+        and a hook Cursor never invoked are otherwise indistinguishable.
 
         It reaches the clients through client.json, since they run with
         whatever environment their editor was launched from.

@@ -306,9 +306,9 @@ def main(argv: list | None = None) -> int:
     st.machine_id = args.machine_id
     sync = None
     if args.apply:
-        from memory_store.sync import Sync
+        from memory_store.sync import SyncClient
 
-        sync = Sync(st, args.hub_url, args.machine_id)
+        sync = SyncClient(st, args.hub_url, args.machine_id)
     manifest = run(
         st,
         sync=sync,

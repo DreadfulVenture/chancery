@@ -2193,10 +2193,10 @@ class Store:
 
     def deliberate_writes(self, since: str = "") -> dict:
         """Count deliberate writes newer than `since`, with the current high
-        water mark. A client's write nudge has to know whether the last one
-        was honoured, and that is a question about the store rather than
-        about the conversation. An empty `since` establishes a baseline
-        instead of counting all of history as compliance.
+        water mark. Whether the last one was honoured is a question about
+        the store rather than about the conversation. An empty `since`
+        establishes a baseline instead of counting all of history as
+        compliance.
 
         The deliberate content lives in agent_memory; working-memory rows
         still carrying the origin tag are migration stragglers (replayed

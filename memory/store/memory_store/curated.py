@@ -1,10 +1,10 @@
 """Curated-rule machinery: matcher engine, floor render, projection.
 
-The matcher engine is the behavior/prediction auto-fire: embed the prompt,
-cosine against active situational matchers above threshold, collapse
-near-duplicate fired candidates (fire-time suppression — sibling rules
-coexist in the store, weighting decides which fires; sync ADR), and
-increment fire telemetry (fire-vs-apply split: matching is not use).
+The matcher engine embeds a situation, cosines it against the active
+situational matchers, and collapses near-duplicate candidates (sibling
+suppression — sibling rules coexist in the store, weighting decides which
+surfaces; sync ADR). The agent-invoked ask (rule_search) and the
+write-reconcile probe (rule_neighbors) rank and gate on it.
 
 Floor render is deterministic: rules grouped under their topic, topics
 alphabetical, ordered by id within a topic, no timestamps in output, so an
@@ -22,9 +22,8 @@ from memory_store.store import DEFAULT_PERSONA_TOPIC, normalize_topic
 
 FIRE_THRESHOLD = 0.60  # thatch's default; env-tunable later if evidence demands
 DUPE_SUPPRESSION = 0.90
-# The agent-invoked pull tolerates a lower bar than fire: the caller asked
-# on purpose, so borderline pairs (probe battery: a true rule at 0.599 under
-# a 0.60 fire cut) still return and relevance stays the caller's judgment.
+# The agent-invoked pull: the caller asked on purpose, so borderline pairs
+# still return and relevance stays the caller's judgment.
 PULL_THRESHOLD = 0.45
 # Two rules write-reconcile instead of cloning: their situations are
 # near-identical, i.e. the matcher engine itself collapses them as siblings.
@@ -51,89 +50,6 @@ def _active_situations(store):
                   confirm_count, disconfirm_count, fire_count
            FROM situational_rules WHERE status = 'active'"""
     ).fetchall()
-
-
-def match_rules(
-    store,
-    prompt: str,
-    limit: int = 5,
-    threshold: float = FIRE_THRESHOLD,
-    workspace: str | None = None,
-) -> list[dict]:
-    """Return situational rules whose situation matches the prompt, strongest
-    first, with fire telemetry incremented (the caller injects; apply is a
-    separate agent-reported signal via rule_feedback)."""
-    rows = _active_situations(store)
-    if not rows:
-        return []
-    # Embedding outside store._lock: the embedder runs on the daemon worker
-    # thread while other threads may hold the store lock for writes; reads
-    # went through the daemon lock before, which serialized whole nudges
-    # behind one stuck call. The write below takes the store lock itself.
-    with spans.span("rules.situations") as node:
-        prompt_vec = store.embed([prompt], origin="rules-prompt")[0]
-        situation_vecs = store.embed([r["situation"] for r in rows], origin="rules-situations")
-        node.set(rules=len(rows))
-
-    scored: list[dict] = []
-    for row, svec in zip(rows, situation_vecs, strict=True):
-        sim = _cosine(prompt_vec, svec)
-        score = sim
-        # Ranking, not gating (PRD 20261104): scope reorders the way the
-        # memory nudge's workspace match does; a foreign project's rule can
-        # still fire — it just ranks without the boost.
-        if workspace and row["scope"] and row["scope"] == workspace:
-            score += 0.15
-        if score < threshold:
-            continue
-        confidence = _confidence(row["confirm_count"], row["disconfirm_count"])
-        if confidence < 0.35:
-            continue  # low-confidence rules stop firing (weighting, not deletion)
-        scored.append(
-            {
-                "id": row["id"],
-                "situation": row["situation"],
-                "statement": row["statement"],
-                "rationale": row["rationale"],
-                "grader": row["grader"],
-                "stance": row["stance"],
-                "scope": row["scope"],
-                "confidence": round(confidence, 4),
-                "evidence_count": int(row["confirm_count"] + row["disconfirm_count"]),
-                "score": round(score, 4),
-                "similarity": round(sim, 4),
-                "vec": svec,
-            }
-        )
-
-    scored.sort(key=lambda r: r["score"], reverse=True)
-
-    # Fire-time suppression: among fired candidates, near-identical
-    # situations collapse to the strongest (sibling rules from offline
-    # machines coexist; this is the weighting that replaces merging).
-    kept: list[dict] = []
-    kept_vecs: list[list[float]] = []
-    for candidate in scored:
-        if any(_cosine(candidate["vec"], pvec) >= DUPE_SUPPRESSION for pvec in kept_vecs):
-            continue
-        kept.append(candidate)
-        kept_vecs.append(candidate["vec"])
-        if len(kept) >= limit:
-            break
-    # Increment fire telemetry for what fired (fire != apply; apply is
-    # agent-reported through rule_feedback).
-    with store._lock, store.conn:
-        for rule in kept:
-            store.conn.execute(
-                """UPDATE situational_rules
-                   SET fire_count = fire_count + 1,
-                       last_fired_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                   WHERE id = ?""",
-                (rule["id"],),
-            )
-    for rule in kept:
-        rule.pop("vec", None)
-    return kept
 
 
 def rule_search(

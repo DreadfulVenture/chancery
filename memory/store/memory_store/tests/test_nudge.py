@@ -1,4 +1,4 @@
-"""Tests for the nudge scorer: pool restriction, penalty, debounce, framing.
+"""Tests for the nudge scorer: pool restriction, penalty, framing.
 
 Embedding-dependent tests use a stub embedder so they run without the model.
 """
@@ -145,29 +145,6 @@ class StubEmbedTests(unittest.TestCase):
                 self.assertIn(field, r)
             self.assertTrue(r["created_at"])
 
-    def test_semantic_debounce_suppresses_repeats(self):
-        first = self._nudge("gateway ownership", limit=3, score_threshold=0.1)
-        self.assertTrue(first)
-        content = first[0]["content"]
-        second = self._nudge(
-            "gateway ownership",
-            limit=3,
-            score_threshold=0.1,
-            injected_contents=[content],
-        )
-        ids = {r["id"] for r in second}
-        self.assertNotIn(first[0]["id"], ids)
-
-    def test_context_containment_suppresses_fork_echo(self):
-        # The fork summary contains the deliberate row verbatim; when the
-        # summary text is in session context, the row is suppressed.
-        session = ["[USER] <chat-history-summary> gateway unit ownership belongs to the service"]
-        results = self._nudge(
-            "gateway ownership", limit=3, score_threshold=0.1, session_texts=session
-        )
-        ids = {r["id"] for r in results}
-        self.assertNotIn("del1", ids)
-
 
 class AgentPoolTests(unittest.TestCase):
     """The nudge pool's agent branch: agent_memory rows enter the pool in
@@ -311,8 +288,8 @@ class StoredVectorTests(unittest.TestCase):
 
 
 class CachedEmbedTests(unittest.TestCase):
-    """store.embed serves identical texts (debounce lists, upserts) from the
-    sha256 cache — one inference per unique content, ever."""
+    """store.embed serves identical texts (repeated prompts, upserts) from
+    the sha256 cache — one inference per unique content, ever."""
 
     def setUp(self):
         try:
@@ -381,9 +358,7 @@ class LengthPenaltyTests(unittest.TestCase):
 
 class ParityTests(unittest.TestCase):
     """The vectorized (numpy) path must reproduce the Python-loop reference:
-    same similarities, same debounce suppressions, same ordering."""
-
-    COUNT = 40
+    same similarities, same scoring, same ordering."""
 
     COUNT = 40
     _LCG_A = 6364136223846793005
@@ -462,7 +437,7 @@ class ParityTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
 
-    def _reference(self, prompt_vec, injected):
+    def _reference(self, prompt_vec):
         """Mirror of the pre-change Python loop over the built pool."""
         from memory_store.nudge import length_penalty, pool_query
 
@@ -478,11 +453,6 @@ class ParityTests(unittest.TestCase):
             vec = self.vectors.get(row["content"])
             if vec is None:
                 continue
-            if any(
-                abs(len(inj) - len(row["content"])) < 4000 and cosine(vec, iv) >= 0.9
-                for inj, iv in injected
-            ):
-                continue
             score = cosine(prompt_vec, vec)
             if row.get("workspace_match"):
                 score += 0.15
@@ -496,31 +466,21 @@ class ParityTests(unittest.TestCase):
         scored.sort(key=lambda p: p[1], reverse=True)
         return scored
 
-    def _nudge_with(self, module_numpy, prompt, prompt_vec, injected):
+    def _nudge_with(self, module_numpy, prompt, prompt_vec):
         from memory_store import nudge as nudge_module
 
         def embed(texts, origin=None):
-            out = []
-            for t in texts:
-                if t == prompt:
-                    out.append(prompt_vec)
-                else:
-                    out.append(self.vectors[t])
-            return out
+            return [prompt_vec if t == prompt else self.vectors[t] for t in texts]
 
         with (
             mock.patch.object(self.store, "embed", side_effect=embed),
             mock.patch.object(nudge_module, "numpy", module_numpy),
         ):
-            return nudge_score(self.store, prompt, score_threshold=0.1, injected_contents=injected)
+            return nudge_score(self.store, prompt, score_threshold=0.1)
 
-    def _assert_matches(self, result, reference, suppressed_ids):
-        # Suppressed rows: the injected contents are exact cos-1.0 dups of
-        # their own rows, so both scorer paths must drop them.
+    def _assert_matches(self, result, reference):
         ids = [r["id"] for r in result]
         self.assertTrue(ids)
-        for row_id in suppressed_ids:
-            self.assertNotIn(row_id, ids)
         self.assertEqual(ids, [row_id for row_id, _ in reference])
         for row, (_, ref_score) in zip(result, reference, strict=True):
             self.assertAlmostEqual(row["score"], round(ref_score, 4), places=3)
@@ -528,21 +488,19 @@ class ParityTests(unittest.TestCase):
     def test_vectorized_matches_loop_and_reference(self):
         prompt = "a probe prompt unlike anything stored"
         prompt_vec = self._seeded_vec(777, self.dim)
-        injected_contents = list(sorted(self.contents))[:3]
-        injected = [(c, self.vectors[c]) for c in injected_contents]
-        reference = self._reference(prompt_vec, injected)
+        reference = self._reference(prompt_vec)
 
         def embed(texts, origin=None):
             return [prompt_vec if t == prompt else self.vectors[t] for t in texts]
 
         with mock.patch.object(self.store, "embed", side_effect=embed):
             fast = nudge_score(  # module numpy untouched: vectorized path
-                self.store, prompt, score_threshold=0.1, injected_contents=injected_contents
+                self.store, prompt, score_threshold=0.1
             )
-        loop = self._nudge_with(None, prompt, prompt_vec, injected_contents)
+        loop = self._nudge_with(None, prompt, prompt_vec)
 
         for result in (fast, loop):
-            self._assert_matches(result, reference, injected_contents)
+            self._assert_matches(result, reference)
 
 
 if __name__ == "__main__":
